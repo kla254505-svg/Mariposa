@@ -39,7 +39,7 @@ def fetch_yahoo(symbol="GC=F", interval="15m", range_="5d"):
     return df
 
 
-ddef fetch_twelvedata(symbol="XAU/USD", interval="15min", outputsize=300, api_key=""):
+def fetch_twelvedata(symbol="XAU/USD", interval="15min", outputsize=300, api_key=""):
     url = "https://api.twelvedata.com/time_series"
     params = dict(symbol=symbol, interval=interval, outputsize=outputsize, apikey=api_key)
     resp = requests.get(url, params=params, timeout=15)
