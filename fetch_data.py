@@ -39,7 +39,7 @@ def fetch_yahoo(symbol="GC=F", interval="15m", range_="5d"):
     return df
 
 
-def fetch_twelvedata(symbol="XAU/USD", interval="15min", outputsize=300, api_key=""):
+ddef fetch_twelvedata(symbol="XAU/USD", interval="15min", outputsize=300, api_key=""):
     url = "https://api.twelvedata.com/time_series"
     params = dict(symbol=symbol, interval=interval, outputsize=outputsize, apikey=api_key)
     resp = requests.get(url, params=params, timeout=15)
@@ -50,8 +50,13 @@ def fetch_twelvedata(symbol="XAU/USD", interval="15min", outputsize=300, api_key
         raise ValueError(f"Twelve Data Error: {data}")
 
     df = pd.DataFrame(data["values"])
-    df[["open", "high", "low", "close", "volume"]] = df[
-        ["open", "high", "low", "close", "volume"]
-    ].astype(float)
+
+    # ทอง/Forex มักไม่มีคอลัมน์ volume ส่งมา ต้องเช็คก่อน
+    if "volume" not in df.columns:
+        df["volume"] = 0
+
+    price_cols = ["open", "high", "low", "close", "volume"]
+    df[price_cols] = df[price_cols].astype(float)
+
     df = df.sort_values("datetime").reset_index(drop=True)  # Twelve Data ส่งมาใหม่->เก่า ต้องกลับลำดับ
-    return df[["open", "high", "low", "close", "volume"]]
+    return df[price_cols]
