@@ -5,7 +5,7 @@ def calc_stop_loss(entry_signal, current_atr, config):
     ob = entry_signal.get("ob")
     fvg = entry_signal.get("fvg")
 
-structure_zone = entry_signal.get("structure_zone")
+    structure_zone = entry_signal.get("structure_zone")
 
     if ob:
         base = ob["bottom"] if direction == "bullish" else ob["top"]
