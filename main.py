@@ -96,11 +96,10 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
 if __name__ == "__main__":
     from fetch_data import fetch_twelvedata
 
-    symbols = [
+        symbols = [
         ("XAU/USD", "XAUUSD"),
-        ("EUR/USD", "EURUSD"),
-        ("GBP/USD", "GBPUSD"),
     ]
+
 
 for td_symbol, display_symbol in symbols:
         df = fetch_twelvedata(
