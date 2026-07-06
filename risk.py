@@ -5,12 +5,13 @@ def calc_stop_loss(entry_signal, current_atr, config):
     ob = entry_signal.get("ob")
     fvg = entry_signal.get("fvg")
 
-    if ob:
+        if ob:
         base = ob["bottom"] if direction == "bullish" else ob["top"]
     elif fvg:
         base = fvg["bottom"] if direction == "bullish" else fvg["top"]
     else:
         base = entry_signal["entry_price"]
+
 
     if direction == "bullish":
         return base - buffer
