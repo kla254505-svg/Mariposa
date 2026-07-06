@@ -25,4 +25,6 @@ CONFIG = {
     "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID", ""),
     "min_score_to_alert": 70,
     "twelvedata_api_key": os.environ.get("TWELVEDATA_API_KEY", ""),
+    "healthchecks_url": os.environ.get("HEALTHCHECKS_URL", ""),
+
 }
