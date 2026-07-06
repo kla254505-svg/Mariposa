@@ -1,3 +1,4 @@
+from structure_entry import find_structure_entry
 from orderblock import find_order_blocks, get_nearest_unmitigated_ob
 from fvg import find_fvgs, get_nearest_unfilled_fvg
 from liquidity import find_liquidity_pools
