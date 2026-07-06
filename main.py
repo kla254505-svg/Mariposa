@@ -102,7 +102,7 @@ if __name__ == "__main__":
         ("GBP/USD", "GBPUSD"),
     ]
 
-        for td_symbol, display_symbol in symbols:
+for td_symbol, display_symbol in symbols:
         df = fetch_twelvedata(
             symbol=td_symbol, interval="15min", outputsize=300,
             api_key=CONFIG["twelvedata_api_key"]
@@ -121,4 +121,6 @@ if __name__ == "__main__":
             )
 
 
+       # ping บอก Healthchecks.io ว่ารนครบทุกคู่เงินสำเร็จแล้ว
+       ping_healthcheck(CONFIG["healthchecks_url"])
 
