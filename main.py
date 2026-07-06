@@ -120,7 +120,5 @@ if __name__ == "__main__":
                 CONFIG["kvdb_bucket"], key=f"briefing_{display_symbol}"
             )
 
-    # ping บอก Healthchecks.io ว่ารนครบทุกคู่เงินสำเร็จแล้ว
-    ping_healthcheck(CONFIG["healthchecks_url"])
 
 
