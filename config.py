@@ -13,6 +13,7 @@ CONFIG = {
     "liquidity_lookback": 40,
     "equal_level_tolerance_atr": 0.1,
     "risk_per_trade_pct": 1.0,
+    "structure_entry_atr_mult": 0.5,
     "sl_buffer_atr": 0.25,
     "min_rr": 1.2,
     "tp1_rr": 1.5,
