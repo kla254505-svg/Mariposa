@@ -11,6 +11,17 @@ from score import calc_confidence_score
 from report import print_report
 from notify import send_telegram_alert, format_alert_message
 
+def ping_healthcheck(url):
+    """ยิงสัญญาณบอกว่าบอทรันสำเร็จ ถ้าไม่มี URL หรือยิงพลาด จะไม่ทำให้บอทหลักพัง"""
+    if not url:
+        return
+    try:
+        requests.get(url, timeout=10)
+    except Exception:
+        pass  # ไม่ต้องทำอะไร แค่ไม่อยากให้ ping พังแล้วบอทหลักพังตาม
+
+
+
 
 def load_csv(path):
     df = pd.read_csv(path)
@@ -93,4 +104,7 @@ if __name__ == "__main__":
             api_key=CONFIG["twelvedata_api_key"]
         )
         run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000)
+    # ping บอก Healthchecks.io ว่ารนครบทุกคู่เงินสำเร็จแล้ว
+    ping_healthcheck(CONFIG["healthchecks_url"])
+
 
