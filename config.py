@@ -26,5 +26,7 @@ CONFIG = {
     "min_score_to_alert": 70,
     "twelvedata_api_key": os.environ.get("TWELVEDATA_API_KEY", ""),
     "healthchecks_url": os.environ.get("HEALTHCHECKS_URL", ""),
+    "kvdb_bucket": os.environ.get("KVDB_BUCKET", ""),
+
 
 }
