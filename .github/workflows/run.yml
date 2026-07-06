@@ -2,7 +2,7 @@ name: Gold Trading Bot
 
 on:
   schedule:
-    - cron: '*/3,18,33,48 * * * *'
+    - cron: '3,18,33,48 * * * *'
   workflow_dispatch:
 
 jobs:
