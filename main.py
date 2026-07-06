@@ -102,12 +102,24 @@ if __name__ == "__main__":
         ("GBP/USD", "GBPUSD"),
     ]
 
-    for td_symbol, display_symbol in symbols:
+        for td_symbol, display_symbol in symbols:
         df = fetch_twelvedata(
             symbol=td_symbol, interval="15min", outputsize=300,
             api_key=CONFIG["twelvedata_api_key"]
         )
         run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000)
+
+        # ส่ง Hourly Briefing เฉพาะรอบที่ตรงกับตนชั่วโมง (นาที 0-14 ของทุกชั่วโมง)
+        if datetime.now(timezone.utc).minute < 15:
+            df_ind = add_indicators(df, CONFIG)
+            structure = analyze_structure(df_ind, CONFIG)
+            entry_signal = evaluate_entry(df_ind, structure, CONFIG)
+            briefing_text = build_hourly_briefing(display_symbol, "15m", df_ind, structure, entry_signal)
+            send_or_edit_message(
+                CONFIG["telegram_token"], CONFIG["telegram_chat_id"], briefing_text,
+                CONFIG["kvdb_bucket"], key=f"briefing_{display_symbol}"
+            )
+
     # ping บอก Healthchecks.io ว่ารนครบทุกคู่เงินสำเร็จแล้ว
     ping_healthcheck(CONFIG["healthchecks_url"])
 
