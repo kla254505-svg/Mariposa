@@ -1,7 +1,14 @@
 WEIGHTS = {
-    "structure_event": 20, "order_block": 20, "fvg": 15,
-    "liquidity_sweep": 15, "ote_zone": 15, "rsi_confirm": 10, "rr_quality": 5,
+    "structure_event": 20,
+    "order_block": 15,
+    "fvg": 10,
+    "structure_pullback": 10,
+    "liquidity_sweep": 15,
+    "ote_zone": 15,
+    "rsi_confirm": 10,
+    "rr_quality": 5,
 }
+
 
 
 def calc_confidence_score(entry_signal, structure, df, config, rr_tp1):
@@ -19,6 +26,10 @@ def calc_confidence_score(entry_signal, structure, df, config, rr_tp1):
     if entry_signal.get("fvg"):
         score += WEIGHTS["fvg"]
         breakdown["fvg"] = WEIGHTS["fvg"]
+    if entry_signal.get("structure_zone"):
+        score += WEIGHTS["structure_pullback"]
+        breakdown["structure_pullback"] = WEIGHTS["structure_pullback"]
+
 
     liquidity = entry_signal.get("liquidity") or {}
     direction = entry_signal.get("direction")
