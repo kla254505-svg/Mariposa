@@ -121,6 +121,5 @@ for td_symbol, display_symbol in symbols:
             )
 
 
-       # ping บอก Healthchecks.io ว่ารนครบทุกคู่เงินสำเร็จแล้ว
-       ping_healthcheck(CONFIG["healthchecks_url"])
+       
 
