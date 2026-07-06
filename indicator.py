@@ -27,6 +27,24 @@ def atr(df, period=14):
     ], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / period, adjust=False).mean()
 
+def macd(series, fast=12, slow=26, signal=9):
+    """คืนคา (macd_line, signal_line, histogram)"""
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+
+def bollinger_bands(series, period=20, std_mult=2):
+    """คืนค่า (upper_band, middle_band, lower_band)"""
+    middle = series.rolling(window=period).mean()
+    std = series.rolling(window=period).std()
+    upper = middle + (std * std_mult)
+    lower = middle - (std * std_mult)
+    return upper, middle, lower
+
 
 def add_indicators(df, config):
     df = df.copy()
@@ -35,4 +53,16 @@ def add_indicators(df, config):
     df["ema_trend"] = ema(df["close"], config["ema_trend"])
     df["rsi"] = rsi(df["close"], config["rsi_period"])
     df["atr"] = atr(df, config["atr_period"])
+
+    macd_line, signal_line, hist = macd(df["close"])
+    df["macd"] = macd_line
+    df["macd_signal"] = signal_line
+    df["macd_hist"] = hist
+
+    bb_upper, bb_mid, bb_lower = bollinger_bands(df["close"])
+    df["bb_upper"] = bb_upper
+    df["bb_mid"] = bb_mid
+    df["bb_lower"] = bb_lower
+
     return df
+
