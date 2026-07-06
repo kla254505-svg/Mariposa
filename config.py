@@ -18,7 +18,7 @@ CONFIG = {
     "tp1_rr": 1.5,
     "tp2_rr": 2.5,
     "tp3_rr": 4.0,
-    "min_score_to_trade": 55,
+    "min_score_to_trade": 50,
     "fib_levels": [0.382, 0.5, 0.618, 0.705, 0.79],
     # --- Secrets: อ่านจาก GitHub Actions Secrets (Environment Variables) ---
     "telegram_token": os.environ.get("TELEGRAM_TOKEN", ""),
