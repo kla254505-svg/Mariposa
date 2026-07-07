@@ -1,5 +1,8 @@
+import requests
 import pandas as pd
 import numpy as np
+
+from datetime import datetime, timezone
 
 from config import CONFIG
 from indicator import add_indicators
@@ -9,22 +12,18 @@ from risk import calc_stop_loss, calc_position_size
 from tp import calc_take_profits, calc_risk_reward
 from score import calc_confidence_score
 from report import print_report
-from notify import send_telegram_alert, format_alert_message
-from datetime import datetime, timezone
+from notify import send_telegram_alert, format_alert_message, send_or_edit_message
 from scenario import build_hourly_briefing
-from notify import send_or_edit_message
 
 
 def ping_healthcheck(url):
-    """ยิงสัญญาณบอกว่าบอทรันสำเร็จ ถ้าไม่มี URL หรือยิงพลาด จะไม่ทำให้บอทหลักพัง"""
+    """ยิงสัญญาณบอกว่าบอทรันสำเร็จ ถ้าไม่ม URL หรือยิงพลาด จะไม่ทำให้บอทหลักพัง"""
     if not url:
         return
     try:
         requests.get(url, timeout=10)
     except Exception:
         pass  # ไม่ต้องทำอะไร แค่ไม่อยากให้ ping พังแล้วบอทหลักพังตาม
-
-
 
 
 def load_csv(path):
@@ -90,7 +89,7 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
         msg = format_alert_message(symbol, timeframe, structure, entry_signal,
                                     stop_loss, take_profits, rr, confidence)
         sent = send_telegram_alert(config["telegram_token"], config["telegram_chat_id"], msg)
-        print("[Telegram] ส่งแจ้งเตือนสำเร็จ" if sent else "[Telegram] ส่งแจ้งเตือนล้มเหลว")
+        print("[Telegram] ส่งแจ้งเตือนสำเร็จ" if sent else "[Telegram] ส่งแจ้งเตือนลมเหลว")
 
 
 if __name__ == "__main__":
@@ -100,15 +99,14 @@ if __name__ == "__main__":
         ("XAU/USD", "XAUUSD"),
     ]
 
-
-for td_symbol, display_symbol in symbols:
+    for td_symbol, display_symbol in symbols:
         df = fetch_twelvedata(
             symbol=td_symbol, interval="15min", outputsize=300,
             api_key=CONFIG["twelvedata_api_key"]
         )
         run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000)
 
-        # ส่ง Hourly Briefing เฉพาะรอบที่ตรงกับตนชั่วโมง (นาที 0-14 ของทุกชั่วโมง)
+        # ส่ง Hourly Briefing เฉพาะรอบที่ตรงกับต้นชั่วโมง (นาที 0-14 ของทุกชั่วโมง)
         if datetime.now(timezone.utc).minute < 15:
             df_ind = add_indicators(df, CONFIG)
             structure = analyze_structure(df_ind, CONFIG)
@@ -119,6 +117,5 @@ for td_symbol, display_symbol in symbols:
                 CONFIG["kvdb_bucket"], key=f"briefing_{display_symbol}"
             )
 
-
-       
-
+    # ping บอก Healthchecks.io ว่ารันสำเร็จครบทุกคู่เงนแล้ว (ทำเป็นลำดับสุดท้ายเสมอ)
+    ping_healthcheck(CONFIG["healthchecks_url"])
