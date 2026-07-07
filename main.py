@@ -2,6 +2,7 @@ import requests
 import pandas as pd
 import numpy as np
 
+
 from datetime import datetime, timezone
 
 from config import CONFIG
@@ -14,6 +15,7 @@ from score import calc_confidence_score
 from report import print_report
 from notify import send_telegram_alert, format_alert_message, send_or_edit_message
 from scenario import build_hourly_briefing
+from session import get_session_info
 
 
 def ping_healthcheck(url):
@@ -55,7 +57,7 @@ def generate_synthetic_data(n=400, seed=42):
     return pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"])
 
 
-def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, config=CONFIG, higher_tf_trend=None):
+def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, config=CONFIG, higher_tf_trend=None session_info=None):
     df = add_indicators(df, config)
     structure = analyze_structure(df, config)
     entry_signal = evaluate_entry(df, structure, config)
@@ -78,6 +80,20 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                 f"ตลาดยังไม่มีเทรนด์ชัดเจน (choppy) — ไม่แนะนำเข้า"
             )
             entry_signal["valid"] = False
+
+        # --- กรองด้วย Trading Session (London/NY) ---
+    if entry_signal["valid"] and config.get("session_filter_enabled") and session_info:
+        if not session_info["in_session"]:
+            entry_signal["reasons"].append(
+                f"เวลาปัจจุบัน {session_info['utc_hour']}:00 UTC อยู่นอกชวง London/NY session "
+                f"(สภาพคล่องต่ำ) — ไม่แนะนำเข้า"
+            )
+            entry_signal["valid"] = False
+        elif session_info["in_killzone"]:
+            entry_signal["reasons"].append(
+                f"อยู่ใน Kill Zone ({session_info['utc_hour']}:00 UTC) — ชวงเวลาที่มักเคลื่อนไหวแรง"
+            )
+
 
 
     if not entry_signal["valid"]:
@@ -125,6 +141,8 @@ if __name__ == "__main__":
             api_key=CONFIG["twelvedata_api_key"]
         )
 
+        session_info = get_session_info(CONFIG)
+        
         # ดึงเฟรม 1H มาคำนวณเทรนด์ ใช้เป็นตัวกรองก่อนส่ง Alert
         df_1h = fetch_twelvedata(
             symbol=td_symbol, interval="1h", outputsize=300,
