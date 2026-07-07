@@ -69,6 +69,17 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
             )
             entry_signal["valid"] = False
 
+        # --- กรองตลาด choppy/sideway ด้วย ADX ---
+    if entry_signal["valid"]:
+        current_adx = df["adx"].iloc[-1]
+        if current_adx < config["adx_min_trend"]:
+            entry_signal["reasons"].append(
+                f"ADX ({current_adx:.1f}) ต่ำกว่าเกณฑ์ ({config['adx_min_trend']}) "
+                f"ตลาดยังไม่มีเทรนด์ชัดเจน (choppy) — ไม่แนะนำเข้า"
+            )
+            entry_signal["valid"] = False
+
+
     if not entry_signal["valid"]:
         print_report(symbol, timeframe, structure, entry_signal,
                       stop_loss=None, take_profits={}, position={},
