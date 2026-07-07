@@ -25,17 +25,22 @@ def evaluate_entry(df, structure, config):
         "fib_levels": None,
     }
 
-    if trend == "sideway" or event is None:
+    if trend == "sideway":
         result["reasons"].append(
-            "ตลาดยังไม่มีโครงสร้างชัดเจน (sideway หรือไม่มี BOS/CHoCH) — ข้าม"
+            "ตลาดยังไม่มีโครงสร้างชัดเจน (sideway) — ข้าม"
         )
         return result
 
     direction = "bullish" if trend == "bullish" else "bearish"
     result["direction"] = direction
-    result["reasons"].append(
-        f"โครงสร้างตลาดเป็น {trend} และเพิ่งเกิด {event} ยืนยันทิศทาง"
-    )
+    if event:
+        result["reasons"].append(
+            f"โครงสร้างตลาดเป็น {trend} และเพิ่งเกิด {event} ยืนยันทิศทาง"
+        )
+    else:
+        result["reasons"].append(
+            f"โครงสร้างตลาดเป็น {trend} ต่อเนื่อง (ยังไม่มี BOS/CHoCH ใหม่ในรอบนี้)"
+        )
 
     obs = find_order_blocks(df, config)
     ob = get_nearest_unmitigated_ob(obs, direction, current_price)
