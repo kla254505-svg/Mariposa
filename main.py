@@ -17,7 +17,7 @@ from scenario import build_hourly_briefing
 
 
 def ping_healthcheck(url):
-    """ยิงสัญญาณบอกว่าบอทรันสำเร็จ ถ้าไม่ม URL หรือยิงพลาด จะไม่ทำให้บอทหลักพัง"""
+    """ยิงสัญญาณบอกว่าบอทรันสำเร็จ ถ้าไม่มี URL หรือยิงพลาด จะไม่ทำให้บอทหลักพัง"""
     if not url:
         return
     try:
@@ -84,12 +84,15 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
     print_report(symbol, timeframe, structure, entry_signal, stop_loss,
                  take_profits, position, rr, confidence, config)
 
-    # --- ส่ง Telegram Alert เมื่อ signal ถูกต้อง และ Score ผ่านเกณฑ์ ---
-    if entry_signal["valid"] and confidence["score"] >= config["min_score_to_alert"]:
+    # --- ส่ง Telegram Alert เมื่อ signal ผ่านเกณฑ์กฎหลัก (เทรนด์ + zone + RR) ---
+    # หมายเหตุ: ไม่ใช confidence score มากรองซอีกชั้นแล้ว เพราะ entry_signal["valid"]
+    # เป็น checklist แบบ pass/fail ที่ผ่านมาตรฐานอยู่แล้ว การกรองซ้ำด้วย score
+    # ทให้สัญญาณที่ถูกต้องหลุดออกไปโดยไม่จำเป็น
+    if entry_signal["valid"]:
         msg = format_alert_message(symbol, timeframe, structure, entry_signal,
                                     stop_loss, take_profits, rr, confidence)
         sent = send_telegram_alert(config["telegram_token"], config["telegram_chat_id"], msg)
-        print("[Telegram] ส่งแจ้งเตือนสำเร็จ" if sent else "[Telegram] ส่งแจ้งเตือนลมเหลว")
+        print("[Telegram] ส่งแจ้งเตือนสำเร็จ" if sent else "[Telegram] ส่งแจ้งเตือนล้มเหลว")
 
 
 if __name__ == "__main__":
@@ -117,5 +120,5 @@ if __name__ == "__main__":
                 CONFIG["kvdb_bucket"], key=f"briefing_{display_symbol}"
             )
 
-    # ping บอก Healthchecks.io ว่ารันสำเร็จครบทุกคู่เงนแล้ว (ทำเป็นลำดับสุดท้ายเสมอ)
+    # ping บอก Healthchecks.io ว่ารันสำเร็จครบทุกคู่เงินแล้ว (ทำเป็นลำดับสุดท้ายเสมอ)
     ping_healthcheck(CONFIG["healthchecks_url"])
