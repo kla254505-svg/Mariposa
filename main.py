@@ -57,7 +57,7 @@ def generate_synthetic_data(n=400, seed=42):
     return pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"])
 
 
- def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, config=CONFIG, higher_tf_trend=None session_info=None):
+def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, config=CONFIG, higher_tf_trend=None session_info=None):
     df = add_indicators(df, config)
     structure = analyze_structure(df, config)
     entry_signal = evaluate_entry(df, structure, config)
