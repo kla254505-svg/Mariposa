@@ -55,10 +55,19 @@ def generate_synthetic_data(n=400, seed=42):
     return pd.DataFrame(rows, columns=["open", "high", "low", "close", "volume"])
 
 
-def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, config=CONFIG):
+def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, config=CONFIG, higher_tf_trend=None):
     df = add_indicators(df, config)
     structure = analyze_structure(df, config)
     entry_signal = evaluate_entry(df, structure, config)
+
+    # --- กรองสัญญาณที่สวนทางกับเทรนด์เฟรมใหญ่ (1H) ---
+    if entry_signal["valid"] and higher_tf_trend not in (None, "sideway"):
+        if entry_signal["direction"] != higher_tf_trend:
+            entry_signal["reasons"].append(
+                f"สัญญาณ 15m เป็น {entry_signal['direction']} แต่เทรนด์ 1H เป็น {higher_tf_trend} "
+                f"(สวนทางกัน) — ไม่แนะนำเขา"
+            )
+            entry_signal["valid"] = False
 
     if not entry_signal["valid"]:
         print_report(symbol, timeframe, structure, entry_signal,
@@ -84,10 +93,7 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
     print_report(symbol, timeframe, structure, entry_signal, stop_loss,
                  take_profits, position, rr, confidence, config)
 
-    # --- ส่ง Telegram Alert เมื่อ signal ผ่านเกณฑ์กฎหลัก (เทรนด์ + zone + RR) ---
-    # หมายเหตุ: ไม่ใช confidence score มากรองซอีกชั้นแล้ว เพราะ entry_signal["valid"]
-    # เป็น checklist แบบ pass/fail ที่ผ่านมาตรฐานอยู่แล้ว การกรองซ้ำด้วย score
-    # ทให้สัญญาณที่ถูกต้องหลุดออกไปโดยไม่จำเป็น
+    # --- ส่ง Telegram Alert เมื่อ signal ผานเกณฑ์กฎหลัก (เทรนด์ + zone + RR + ไมสวนเทรนด์ 1H) ---
     if entry_signal["valid"]:
         msg = format_alert_message(symbol, timeframe, structure, entry_signal,
                                     stop_loss, take_profits, rr, confidence)
@@ -107,7 +113,18 @@ if __name__ == "__main__":
             symbol=td_symbol, interval="15min", outputsize=300,
             api_key=CONFIG["twelvedata_api_key"]
         )
-        run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000)
+
+        # ดึงเฟรม 1H มาคำนวณเทรนด์ ใช้เป็นตัวกรองก่อนส่ง Alert
+        df_1h = fetch_twelvedata(
+            symbol=td_symbol, interval="1h", outputsize=300,
+            api_key=CONFIG["twelvedata_api_key"]
+        )
+        df_1h_ind = add_indicators(df_1h, CONFIG)
+        structure_1h = analyze_structure(df_1h_ind, CONFIG)
+        higher_tf_trend = structure_1h["trend"]
+
+        run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000,
+                     higher_tf_trend=higher_tf_trend)
 
         # ส่ง Hourly Briefing เฉพาะรอบที่ตรงกับต้นชั่วโมง (นาที 0-14 ของทุกชั่วโมง)
         if datetime.now(timezone.utc).minute < 15:
