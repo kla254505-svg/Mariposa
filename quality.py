@@ -34,19 +34,23 @@ def calc_ema_distance_score(row, atr_val, cap_atr_mult=1.0):
     return min(dist / (atr_val * cap_atr_mult), 1.0)
 
 
-def calc_macd_slope(df, lookback=3):
+def calc_macd_slope(df, lookback=3, min_change_atr_ratio=0.05):
     """
-    เช็คทิศทางความชันของ MACD Histogram ในช่วง lookback แท่งหลังสุด
-    คืนค่า 'rising' (โมเมนตัมเพิ่มขึ้นต่อเนื่อง) / 'falling' (ลดลงต่อเนื่อง) / 'flat' (ไม่ชัดเจน)
+    เช็คทิศทางรวมของ MACD Histogram ในช่วง lookback แท่งหลังสุด
+    เทียบค่า 'สุทธิ' ระหว่างต้น-ท้ายช่วง (ไม่ต้องชันทางเดียวทุกแท่งแบบเดิม ซึ่งเข้มเกินจริง)
+    ผ่อนปรนกว่าเดิม เพราะ MACD Histogram มักสั่นเล็กน้อยแม้เทรนด์จะชัดอยู่แล้ว
+    คืนค่า 'rising' (โมเมนตัมเพิ่มขึ้นสุทธิ) / 'falling' (ลดลงสุทธิ) / 'flat' (เปลี่ยนน้อยเกินไป)
     """
     if "macd_hist" not in df.columns or len(df) < lookback + 1:
         return "flat"
     recent = df["macd_hist"].iloc[-(lookback + 1):]
-    diffs = recent.diff().dropna()
-    if len(diffs) == 0:
-        return "flat"
-    if (diffs > 0).all():
+    net_change = recent.iloc[-1] - recent.iloc[0]
+
+    atr_val = df["atr"].iloc[-1] if "atr" in df.columns and not df["atr"].empty else 0
+    threshold = min_change_atr_ratio * atr_val if atr_val else 0.0001
+
+    if net_change > threshold:
         return "rising"
-    if (diffs < 0).all():
+    if net_change < -threshold:
         return "falling"
     return "flat"

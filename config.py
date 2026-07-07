@@ -1,7 +1,7 @@
 import os
 
 CONFIG = {
-    "swing_lookback": 5,
+    "swing_lookback": 7,
     "structure_lookback": 50,
     "ema_fast": 20,
     "ema_slow": 50,
@@ -15,6 +15,7 @@ CONFIG = {
     "killzones_utc": [(7, 10), (12, 15)],  # London Open, NY Open
     "ob_lookback": 30,
     "fvg_min_gap_atr": 0.15,
+    "fvg_lookback": 60,
     "liquidity_lookback": 40,
     "liquidity_sweep_lookback": 10,
     "equal_level_tolerance_atr": 0.1,

@@ -6,16 +6,17 @@ from quality import (
 )
 
 WEIGHTS = {
-    "structure_event": 15,
-    "order_block": 12,        # scale ตามคุณภาพ (ขนาดเทียบ ATR) ไม่ใช่ flat อีกต่อไป
+    "structure_event": 13,
+    "order_block": 12,        # scale ตามคุณภาพ (ขนาดเทียบ ATR)
     "fvg": 8,                 # scale ตามคุณภาพ
     "structure_pullback": 8,
-    "liquidity_sweep": 15,    # ตอนนี้ต้องเจอ "สวีปแล้วกลับตัว" จริงถึงจะได้ ไม่ใช่แค่มีแนวอยู่ใกล้ๆ
-    "ote_zone": 12,
-    "rsi_confirm": 8,
+    "liquidity_sweep": 13,    # ต้องเจอ "สวีปแล้วกลับตัว" จริง
+    "ote_zone": 10,
+    "rsi_confirm": 6,
     "rr_quality": 5,
-    "ema_distance": 9,        # scale ตามระยะห่าง EMA fast-slow เทียบ ATR (ความแข็งแรงของเทรนด์)
-    "macd_slope_confirm": 8,  # เต็มถ้า MACD Histogram ชันไปทางเดียวกับทิศทางที่จะเข้า
+    "ema_distance": 9,        # scale ตามระยะห่าง EMA fast-slow เทียบ ATR
+    "macd_slope_confirm": 8,  # เต็มถ้า MACD Histogram ไปทางเดียวกับทิศทางที่จะเข้า (สุทธิ ไม่ต้องชันทุกแท่ง)
+    "ema_bias_confluence": 8, # ใหม่: EMA Bias ตรงกับ Structure Trend หรือไม่
 }
 
 
@@ -51,7 +52,7 @@ def calc_confidence_score(entry_signal, structure, df, config, rr_tp1):
         score += WEIGHTS["structure_pullback"]
         breakdown["structure_pullback"] = WEIGHTS["structure_pullback"]
 
-    # --- Liquidity Sweep: ต้องเจอสวีปแล้วกลับตัวจริง (จาก liquidity.detect_liquidity_sweep) ---
+    # --- Liquidity Sweep: ต้องเจอสวีปแล้วกลับตัวจริง ---
     if entry_signal.get("liquidity_sweep"):
         score += WEIGHTS["liquidity_sweep"]
         breakdown["liquidity_sweep"] = WEIGHTS["liquidity_sweep"]
@@ -83,10 +84,16 @@ def calc_confidence_score(entry_signal, structure, df, config, rr_tp1):
         score += ema_pts
         breakdown["ema_distance"] = ema_pts
 
-    # --- MACD Slope: โมเมนตัมต้องชันไปทางเดียวกับทิศทางที่จะเข้า ---
+    # --- MACD Slope: โมเมนตัมสุทธิต้องไปทางเดียวกับทิศทางที่จะเข้า ---
     slope = calc_macd_slope(df)
     if (direction == "bullish" and slope == "rising") or (direction == "bearish" and slope == "falling"):
         score += WEIGHTS["macd_slope_confirm"]
         breakdown["macd_slope_confirm"] = WEIGHTS["macd_slope_confirm"]
+
+    # --- EMA Bias Confluence: EMA Bias ต้องตรงกับ Structure Trend ---
+    ema_bias = structure.get("ema_trend")
+    if ema_bias == direction:
+        score += WEIGHTS["ema_bias_confluence"]
+        breakdown["ema_bias_confluence"] = WEIGHTS["ema_bias_confluence"]
 
     return {"score": round(score, 1), "breakdown": breakdown}

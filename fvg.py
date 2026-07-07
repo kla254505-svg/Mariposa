@@ -4,8 +4,10 @@ import pandas as pd
 def find_fvgs(df, config):
     fvgs = []
     min_gap = config["fvg_min_gap_atr"]
+    lookback = config.get("fvg_lookback", 60)
+    start = max(2, len(df) - lookback)
 
-    for i in range(2, len(df)):
+    for i in range(start, len(df)):
         c1 = df.iloc[i - 2]
         c3 = df.iloc[i]
         atr_val = df["atr"].iloc[i] if "atr" in df.columns else 0

@@ -42,6 +42,14 @@ def evaluate_entry(df, structure, config):
             f"โครงสร้างตลาดเป็น {trend} ต่อเนื่อง (ยังไม่มี BOS/CHoCH ใหม่ในรอบนี้)"
         )
 
+    ema_bias = structure.get("ema_trend")
+    if ema_bias == direction:
+        result["reasons"].append(f"EMA Bias ({ema_bias}) สอดคล้องกับ Structure Trend — เทรนด์แข็งแรงจริง")
+    else:
+        result["reasons"].append(
+            f"EMA Bias เป็น {ema_bias} ไม่ตรงกับ Structure Trend ({direction}) — เทรนด์อาจยังไม่นิ่งจริง ควรระวัง"
+        )
+
     obs = find_order_blocks(df, config)
     ob = get_nearest_unmitigated_ob(obs, direction, current_price)
     if ob:
