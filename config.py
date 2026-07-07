@@ -10,6 +10,9 @@ CONFIG = {
     "atr_period": 14,
     "adx_period": 14,
     "adx_min_trend": 20,
+    "session_filter_enabled": True,
+    "trading_sessions_utc": [(7, 21)],   # London start ถึง NY end รวมกนเป็นช่วงเดียว
+    "killzones_utc": [(7, 10), (12, 15)],  # London Open, NY Open
     "ob_lookback": 30,
     "fvg_min_gap_atr": 0.15,
     "liquidity_lookback": 40,
