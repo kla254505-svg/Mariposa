@@ -17,6 +17,7 @@ from notify import send_telegram_alert, format_alert_message, send_or_edit_messa
 from scenario import build_hourly_briefing
 from dashboard import build_dashboard_message
 from session import get_session_info
+from orders import add_order, update_orders_status, build_orders_dashboard
 
 
 def ping_healthcheck(url):
@@ -143,6 +144,12 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
         sent = send_telegram_alert(config["telegram_token"], config["telegram_chat_id"], msg)
         print("[Telegram] ส่งแจ้งเตือนสำเร็จ" if sent else "[Telegram] ส่งแจ้งเตือนล้มเหลว")
 
+        # --- บันทึกออเดอร์ใหม่ลง kvdb.io เพื่อติดตามผลย้อนหลัง (win/loss/running) ---
+        add_order(
+            config["kvdb_bucket"], symbol, entry_signal["direction"],
+            entry_signal["entry_price"], stop_loss, take_profits, confidence["score"]
+        )
+
     # --- Dashboard: ส่งทุกรอบ แบบแก้ทับข้อความเดิม (ไม่สแปมแชท) ---
     dashboard_text = build_dashboard_message(
         symbol, timeframe, df, structure, entry_signal, confidence, session_info, config
@@ -150,6 +157,15 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
     send_or_edit_message(
         config["telegram_token"], config["telegram_chat_id"], dashboard_text,
         config["kvdb_bucket"], key=f"dashboard_{symbol}"
+    )
+
+    # --- Order Dashboard: อัพเดทสถานะออเดอร์เก่า (running/win/loss) แล้วส่งแยกจาก Dashboard หลัก ---
+    current_price = df["close"].iloc[-1]
+    orders = update_orders_status(config["kvdb_bucket"], symbol, current_price)
+    orders_dashboard_text = build_orders_dashboard(symbol, orders, current_price)
+    send_or_edit_message(
+        config["telegram_token"], config["telegram_chat_id"], orders_dashboard_text,
+        config["kvdb_bucket"], key=f"orders_dashboard_{symbol}"
     )
 
 
