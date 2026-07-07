@@ -123,12 +123,21 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                 f"RR ของ TP1 ({rr['TP1']}) ต่ำกว่าเกณฑ์ขั้นต่ำ ({config['min_rr']}) — ไม่แนะนำเข้า"
             )
             entry_signal["valid"] = False
+        elif confidence["score"] < config["min_score_to_alert"]:
+            # --- กรองด้วยคะแนนความมั่นใจ ก่อนตัดสินใจส่ง Telegram Alert ---
+            entry_signal["reasons"].append(
+                f"Score ({confidence['score']}/100) ต่ำกว่าเกณฑ์แจ้งเตือน "
+                f"({config['min_score_to_alert']}) — ยังไม่ส่ง Alert"
+            )
+            entry_signal["alert_ready"] = False
+        else:
+            entry_signal["alert_ready"] = True
 
     print_report(symbol, timeframe, structure, entry_signal, stop_loss,
                  take_profits, position, rr, confidence, config)
 
-    # --- ส่ง Telegram Alert เมื่อ signal ผ่านเกณฑ์กฎหลัก ---
-    if entry_signal["valid"]:
+    # --- ส่ง Telegram Alert เมื่อ signal ผ่านเกณฑ์กฎหลัก "และ" ผ่านเกณฑ์คะแนนขั้นต่ำ ---
+    if entry_signal.get("alert_ready"):
         msg = format_alert_message(symbol, timeframe, structure, entry_signal,
                                     stop_loss, take_profits, rr, confidence)
         sent = send_telegram_alert(config["telegram_token"], config["telegram_chat_id"], msg)
@@ -151,36 +160,44 @@ if __name__ == "__main__":
         ("XAU/USD", "XAUUSD"),
     ]
 
-    for td_symbol, display_symbol in symbols:
-        df = fetch_twelvedata(
-            symbol=td_symbol, interval="15min", outputsize=300,
-            api_key=CONFIG["twelvedata_api_key"]
-        )
+    try:
+        for td_symbol, display_symbol in symbols:
+            # --- ห่อการดึงข้อมูลด้วย try/except กันคู่เงินนี้พังแล้วลากทั้งสคริปต์ตายไปด้วย ---
+            try:
+                df = fetch_twelvedata(
+                    symbol=td_symbol, interval="15min", outputsize=300,
+                    api_key=CONFIG["twelvedata_api_key"]
+                )
 
-        session_info = get_session_info(CONFIG)
+                session_info = get_session_info(CONFIG)
 
-        # ดึงเฟรม 1H มาคำนวณเทรนด์ ใช้เป็นตัวกรองก่อนส่ง Alert
-        df_1h = fetch_twelvedata(
-            symbol=td_symbol, interval="1h", outputsize=300,
-            api_key=CONFIG["twelvedata_api_key"]
-        )
-        df_1h_ind = add_indicators(df_1h, CONFIG)
-        structure_1h = analyze_structure(df_1h_ind, CONFIG)
-        higher_tf_trend = structure_1h["trend"]
+                # ดึงเฟรม 1H มาคำนวณเทรนด์ ใช้เป็นตัวกรองก่อนส่ง Alert
+                df_1h = fetch_twelvedata(
+                    symbol=td_symbol, interval="1h", outputsize=300,
+                    api_key=CONFIG["twelvedata_api_key"]
+                )
+            except Exception as e:
+                print(f"[Data Error] {display_symbol}: {e}")
+                continue  # ข้ามคู่เงินนี้ไป แต่คู่อื่น/ping ยังทำงานต่อได้
 
-        run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000,
-                     higher_tf_trend=higher_tf_trend, session_info=session_info)
+            df_1h_ind = add_indicators(df_1h, CONFIG)
+            structure_1h = analyze_structure(df_1h_ind, CONFIG)
+            higher_tf_trend = structure_1h["trend"]
 
-        # ส่ง Hourly Briefing เฉพาะรอบที่ตรงกับต้นชั่วโมง (นาที 0-14 ของทุกชั่วโมง)
-        if datetime.now(timezone.utc).minute < 15:
-            df_ind = add_indicators(df, CONFIG)
-            structure = analyze_structure(df_ind, CONFIG)
-            entry_signal = evaluate_entry(df_ind, structure, CONFIG)
-            briefing_text = build_hourly_briefing(display_symbol, "15m", df_ind, structure, entry_signal)
-            send_or_edit_message(
-                CONFIG["telegram_token"], CONFIG["telegram_chat_id"], briefing_text,
-                CONFIG["kvdb_bucket"], key=f"briefing_{display_symbol}"
-            )
+            run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000,
+                         higher_tf_trend=higher_tf_trend, session_info=session_info)
 
-    # ping บอก Healthchecks.io ว่ารันสำเร็จครบทุกคู่เงินแล้ว (ทำเป็นลำดับสุดท้ายเสมอ)
-    ping_healthcheck(CONFIG["healthchecks_url"])
+            # ส่ง Hourly Briefing เฉพาะรอบที่ตรงกับต้นชั่วโมง (นาที 0-14 ของทุกชั่วโมง)
+            if datetime.now(timezone.utc).minute < 15:
+                df_ind = add_indicators(df, CONFIG)
+                structure = analyze_structure(df_ind, CONFIG)
+                entry_signal = evaluate_entry(df_ind, structure, CONFIG)
+                briefing_text = build_hourly_briefing(display_symbol, "15m", df_ind, structure, entry_signal)
+                send_or_edit_message(
+                    CONFIG["telegram_token"], CONFIG["telegram_chat_id"], briefing_text,
+                    CONFIG["kvdb_bucket"], key=f"briefing_{display_symbol}"
+                )
+    finally:
+        # ping บอก Healthchecks.io เสมอ ไม่ว่าข้างบนจะสำเร็จหรือมี error ก็ตาม
+        # (นี่คือหน้าที่จริงของ Dead Man's Switch — ต้องรู้ว่าบอทยังไม่ตายแม้ตอน API ล่ม)
+        ping_healthcheck(CONFIG["healthchecks_url"])
