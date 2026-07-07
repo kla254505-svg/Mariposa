@@ -27,6 +27,26 @@ def atr(df, period=14):
     ], axis=1).max(axis=1)
     return tr.ewm(alpha=1 / period, adjust=False).mean()
 
+def adx(df, period=14):
+    high, low, close = df["high"], df["low"], df["close"]
+
+    up_move = high.diff()
+    down_move = -low.diff()
+
+    plus_dm = ((up_move > down_move) & (up_move > 0)) * up_move
+    minus_dm = ((down_move > up_move) & (down_move > 0)) * down_move
+
+    tr_atr = atr(df, period)  # ใช้ ATR ที่มีอยู่แล้ว
+
+    plus_di = 100 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / tr_atr)
+    minus_di = 100 * (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / tr_atr)
+
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)
+    adx_val = dx.ewm(alpha=1 / period, adjust=False).mean()
+
+    return adx_val.fillna(0)
+
+
 def macd(series, fast=12, slow=26, signal=9):
     """คืนคา (macd_line, signal_line, histogram)"""
     ema_fast = series.ewm(span=fast, adjust=False).mean()
@@ -53,6 +73,8 @@ def add_indicators(df, config):
     df["ema_trend"] = ema(df["close"], config["ema_trend"])
     df["rsi"] = rsi(df["close"], config["rsi_period"])
     df["atr"] = atr(df, config["atr_period"])
+    df["adx"] = adx(df, config["adx_period"])
+
 
     macd_line, signal_line, hist = macd(df["close"])
     df["macd"] = macd_line
