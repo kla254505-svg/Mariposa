@@ -66,6 +66,21 @@ def bollinger_bands(series, period=20, std_mult=2):
     return upper, middle, lower
 
 
+def is_atr_contracting(df, lookback=50, contraction_ratio=0.7):
+    """
+    เช็คว่า ATR ปัจจุบันหดตัวเทียบค่าเฉลี่ยย้อนหลังมากไหม (ตลาดนิ่ง/sideway ผิดปกติ)
+    ต่างจาก ADX ตรงที่วัด 'ความผันผวนสัมบูรณ์' ไม่ใช่ 'ความแรงของเทรนด์'
+    คืนค่า True ถ้า ATR หดตัวต่ำกว่า contraction_ratio ของค่าเฉลี่ย (ควรหลีกเลี่ยงเข้าเทรด)
+    """
+    if "atr" not in df.columns or len(df) < lookback:
+        return False
+    current_atr = df["atr"].iloc[-1]
+    avg_atr = df["atr"].iloc[-lookback:].mean()
+    if not avg_atr:
+        return False
+    return current_atr < avg_atr * contraction_ratio
+
+
 def add_indicators(df, config):
     df = df.copy()
     df["ema_fast"] = ema(df["close"], config["ema_fast"])

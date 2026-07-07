@@ -21,6 +21,7 @@ def evaluate_entry(df, structure, config):
         "fvg": None,
         "structure_zone": None,  # เพิ่มเข้ามาตรงนี้แล้ว
         "liquidity": None,
+        "liquidity_sweep": None,
         "fib_levels": None,
     }
 
@@ -54,13 +55,14 @@ def evaluate_entry(df, structure, config):
 
     liquidity = find_liquidity_pools(df, config)
     result["liquidity"] = liquidity
-    if direction == "bullish" and liquidity["equal_lows"]:
+
+    from liquidity import detect_liquidity_sweep
+    sweep = detect_liquidity_sweep(df, liquidity, direction, lookback=config.get("liquidity_sweep_lookback", 10))
+    result["liquidity_sweep"] = sweep
+    if sweep:
         result["reasons"].append(
-            "มี Equal Lows (liquidity) ด้านล่างที่อาจถูกกวาดมาแล้วก่อนกลับตัวขึ้น"
-        )
-    if direction == "bearish" and liquidity["equal_highs"]:
-        result["reasons"].append(
-            "มี Equal Highs (liquidity) ด้านบนที่อาจถูกกวาดมาแล้วก่อนกลับตัวลง"
+            f"เจอการกวาด Liquidity ที่ระดับ {sweep['level']:.4f} แล้วราคาปิดกลับตัวตามทิศทาง {direction} "
+            f"(ยืนยันแรงกวาดสภาพคล่องจริง ไม่ใช่แค่มีแนวอยู่ใกล้ๆ)"
         )
 
     swings = structure["last_swings"]
