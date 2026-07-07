@@ -8,6 +8,8 @@ CONFIG = {
     "ema_trend": 200,
     "rsi_period": 14,
     "atr_period": 14,
+    "adx_period": 14,
+    "adx_min_trend": 20,
     "ob_lookback": 30,
     "fvg_min_gap_atr": 0.15,
     "liquidity_lookback": 40,
