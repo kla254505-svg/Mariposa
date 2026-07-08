@@ -345,7 +345,7 @@ if __name__ == "__main__":
                 df_ind = add_indicators(df, CONFIG)
                 structure = analyze_structure(df_ind, CONFIG)
                 entry_signal = evaluate_entry(df_ind, structure, CONFIG)
-                briefing_text = build_hourly_briefing(display_symbol, "15m", df_ind, structure, entry_signal)
+                briefing_text = build_hourly_briefing(display_symbol, "15m", df_ind, structure, entry_signal, CONFIG)
                 sent = send_or_edit_message(
                     CONFIG["telegram_token"], CONFIG["telegram_chat_id"], briefing_text,
                     CONFIG["kvdb_bucket"], key=f"briefing_{display_symbol}"

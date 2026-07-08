@@ -4,9 +4,11 @@ scenario.py
 """
 
 from candles import detect_engulfing, detect_pin_bar, detect_macd_cross, detect_rsi_divergence
+from risk import calc_stop_loss
+from tp import calc_take_profits, calc_risk_reward
 
 
-def build_pullback_plan(df, structure, entry_signal):
+def build_pullback_plan(df, structure, entry_signal, config):
     trend = structure["trend"]
     if trend == "sideway":
         return "ตลาดยัง sideway ไม่มีเทรนดชัดเจนให้รอ Pullback ตาม"
@@ -16,10 +18,25 @@ def build_pullback_plan(df, structure, entry_signal):
 
     if entry_signal.get("valid") and entry_signal.get("direction") == trend:
         lines.append(f"รอราคาย่อมาที่ Entry ~{entry_signal['entry_price']:.4f} ตามโซน OB/FVG ที่เจอ")
+
+        # คำนวณ SL/TP ด้วยสูตรเดียวกับที่ใช้ตอนยิง Alert จริง (risk.py / tp.py) ให้ดูล่วงหน้าได้เลย
+        current_atr = df["atr"].iloc[-1] if "atr" in df.columns and len(df) else 0
+        stop_loss = calc_stop_loss(entry_signal, current_atr, config)
+        take_profits = calc_take_profits(entry_signal["entry_price"], stop_loss, entry_signal["direction"], config)
+        rr = {name: calc_risk_reward(entry_signal["entry_price"], stop_loss, price)
+              for name, price in take_profits.items()}
+
+        lines.append(f"SL (คาดการณ์): {stop_loss:.4f}")
+        for name, price in take_profits.items():
+            lines.append(f"{name}: {price:.4f} (RR {rr[name]})")
+        lines.append(
+            "หมายเหตุ: ตัวเลข SL/TP นี้คำนวณจากโซนปัจจุบัน ถ้าราคายังไม่ย่อมาเข้าโซนจริง "
+            "โซน OB/FVG อาจขยับได้ก่อนราคาจะมาถึง ควรเช็ค Dashboard อีกครั้งตอนใกล้ถึงราคา Entry"
+        )
     else:
         lines.append("ยังไม่เจอโซน OB/FVG ที่ชัดเจนพอให้รอเข้าตามเทรนด์นี้ในตอนนี้")
 
-    return " | ".join(lines)
+    return " | ".join(lines[:2]) + ("\n" + "\n".join(lines[2:]) if len(lines) > 2 else "")
 
 
 def build_breakout_plan(df, structure):
@@ -90,8 +107,8 @@ def build_summary(structure, entry_signal):
     return f"เทรนด์ {trend} ({event}) แต่ยังไม่เจอโซนเข้าไม้ชัดเจน แนะนำรอดูก่อน"
 
 
-def build_hourly_briefing(symbol, timeframe, df, structure, entry_signal):
-    plan1 = build_pullback_plan(df, structure, entry_signal)
+def build_hourly_briefing(symbol, timeframe, df, structure, entry_signal, config):
+    plan1 = build_pullback_plan(df, structure, entry_signal, config)
     plan2 = build_breakout_plan(df, structure)
     plan3 = build_counter_trend_plan(df, structure)
     summary = build_summary(structure, entry_signal)
