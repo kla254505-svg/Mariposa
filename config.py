@@ -31,6 +31,24 @@ CONFIG = {
     "tp3_rr": 4.0,
     "min_score_to_trade": 50,
     "fib_levels": [0.382, 0.5, 0.618, 0.705, 0.79],
+
+    # --- Premium/Discount Zone ---
+    "pd_lookback": 20,
+    "pd_zone_filter_enabled": True,
+
+    # --- Daily Bias (4H) ---
+    "daily_bias_filter_enabled": True,
+
+    # --- Order Block Volatility Filter ---
+    "ob_volatility_filter_enabled": True,
+    "ob_volatility_atr_mult": 2.0,
+
+    # --- Internal Structure (2-tier) ---
+    "internal_swing_lookback": 3,
+
+    # --- Signal Cooldown (กันสัญญาณยิงถี่เกินไป) ---
+    "signal_cooldown_minutes": 45,
+
     # --- Secrets: อ่านจาก GitHub Actions Secrets (Environment Variables) ---
     "telegram_token": os.environ.get("TELEGRAM_TOKEN", ""),
     "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID", ""),

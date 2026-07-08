@@ -1,14 +1,34 @@
 import pandas as pd
 
 
+def is_high_volatility_bar(candle, atr_val, mult=2.0):
+    """
+    เช็คว่าแท่งเทียนนี้ 'ผันผวนผิดปกติ' ไหม (range >= mult * ATR)
+    แท่งแบบนี้มักเกิดจากข่าว/สภาพคล่องกระชาก ไม่ใช่การสะสมของสถาบันจริง
+    ใช้กรอง Order Block ที่ไม่น่าเชื่อถือออกไป
+    """
+    if atr_val <= 0:
+        return False
+    return (candle["high"] - candle["low"]) >= (mult * atr_val)
+
+
 def find_order_blocks(df, config):
     lookback = config["ob_lookback"]
     start = max(0, len(df) - lookback)
     obs = []
 
+    vol_filter_enabled = config.get("ob_volatility_filter_enabled", True)
+    vol_mult = config.get("ob_volatility_atr_mult", 2.0)
+
     for i in range(start, len(df) - 1):
         candle = df.iloc[i]
         next_candle = df.iloc[i + 1]
+        atr_val = df["atr"].iloc[i] if "atr" in df.columns and not pd.isna(df["atr"].iloc[i]) else 0
+
+        # --- กรอง Order Block ที่เกิดจากแท่งเทียนผันผวนผิดปกติออกไปก่อน ---
+        if vol_filter_enabled and is_high_volatility_bar(candle, atr_val, vol_mult):
+            continue
+
         is_bearish_candle = candle["close"] < candle["open"]
         is_bullish_candle = candle["close"] > candle["open"]
         impulsive_up = next_candle["close"] > candle["high"]

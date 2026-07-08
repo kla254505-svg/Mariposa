@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from config import CONFIG
 from indicator import add_indicators, is_atr_contracting
-from trend import analyze_structure
+from trend import analyze_structure, analyze_internal_structure
 from entry import evaluate_entry
 from risk import calc_stop_loss, calc_position_size
 from tp import calc_take_profits, calc_risk_reward
@@ -18,6 +18,8 @@ from scenario import build_hourly_briefing
 from dashboard import build_dashboard_message
 from session import get_session_info
 from orders import add_order, update_orders_status, build_orders_dashboard
+from zones import calc_premium_discount_zone, check_bias_pd_confirm, calc_daily_bias
+from cooldown import is_in_cooldown, mark_alert_sent
 
 
 def ping_healthcheck(url):
@@ -60,9 +62,11 @@ def generate_synthetic_data(n=400, seed=42):
 
 
 def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, config=CONFIG,
-                  higher_tf_trend=None, session_info=None):
+                  higher_tf_trend=None, session_info=None, daily_bias=None):
     df = add_indicators(df, config)
     structure = analyze_structure(df, config)
+    internal_structure = analyze_internal_structure(df, config)
+    pd_zone = calc_premium_discount_zone(df, config.get("pd_lookback", 20))
     entry_signal = evaluate_entry(df, structure, config)
 
     # --- กรองสัญญาณที่สวนทางกับเทรนด์เฟรมใหญ่ (1H) ---
@@ -71,6 +75,25 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
             entry_signal["reasons"].append(
                 f"สัญญาณ 15m เป็น {entry_signal['direction']} แต่เทรนด์ 1H เป็น {higher_tf_trend} "
                 f"(สวนทางกัน) — ไม่แนะนำเข้า"
+            )
+            entry_signal["valid"] = False
+
+    # --- กรองด้วย Daily Bias (4H) — ชั้น bias สูงสุด เหนือกว่า 1H ---
+    if entry_signal["valid"] and config.get("daily_bias_filter_enabled") and daily_bias not in (None, "neutral"):
+        daily_bias_direction = "bullish" if daily_bias == "bullish" else "bearish"
+        if entry_signal["direction"] != daily_bias_direction:
+            entry_signal["reasons"].append(
+                f"สัญญาณ 15m เป็น {entry_signal['direction']} แต่ Daily Bias (4H) เป็น {daily_bias} "
+                f"(สวนทางกับภาพใหญ่สุด) — ไม่แนะนำเข้า"
+            )
+            entry_signal["valid"] = False
+
+    # --- กรองด้วย Premium/Discount Zone — Buy ต้องอยู่ Discount, Sell ต้องอยู่ Premium ---
+    if entry_signal["valid"] and config.get("pd_zone_filter_enabled"):
+        if not check_bias_pd_confirm(entry_signal["direction"], pd_zone):
+            entry_signal["reasons"].append(
+                f"ราคาปัจจุบันอยู่โซน {pd_zone['zone']} ({pd_zone['position_pct']}% ของช่วง) "
+                f"ไม่เหมาะกับสัญญาณ {entry_signal['direction']} — ไม่แนะนำเข้า"
             )
             entry_signal["valid"] = False
 
@@ -131,6 +154,14 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                 f"({config['min_score_to_alert']}) — ยังไม่ส่ง Alert"
             )
             entry_signal["alert_ready"] = False
+        elif is_in_cooldown(config["kvdb_bucket"], symbol, entry_signal["direction"],
+                             config.get("signal_cooldown_minutes", 45)):
+            # --- กัน Alert ยิงถี่เกินไปตอนราคาแกว่งกลับไปมาในทิศทางเดียวกันในกรอบเวลาสั้นๆ ---
+            entry_signal["reasons"].append(
+                f"เพิ่งส่ง Alert ทิศทาง {entry_signal['direction']} ไปเมื่อไม่ถึง "
+                f"{config.get('signal_cooldown_minutes', 45)} นาทีที่แล้ว (Cooldown) — ยังไม่ส่งซ้ำ"
+            )
+            entry_signal["alert_ready"] = False
         else:
             entry_signal["alert_ready"] = True
 
@@ -140,7 +171,9 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
     # --- ส่ง Telegram Alert เมื่อ signal ผ่านเกณฑ์กฎหลัก "และ" ผ่านเกณฑ์คะแนนขั้นต่ำ ---
     if entry_signal.get("alert_ready"):
         msg = format_alert_message(symbol, timeframe, structure, entry_signal,
-                                    stop_loss, take_profits, rr, confidence)
+                                    stop_loss, take_profits, rr, confidence,
+                                    daily_bias=daily_bias, pd_zone=pd_zone,
+                                    internal_structure=internal_structure)
         sent = send_telegram_alert(config["telegram_token"], config["telegram_chat_id"], msg)
         print("[Telegram] ส่งแจ้งเตือนสำเร็จ" if sent else "[Telegram] ส่งแจ้งเตือนล้มเหลว")
 
@@ -149,6 +182,9 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
             config["kvdb_bucket"], symbol, entry_signal["direction"],
             entry_signal["entry_price"], stop_loss, take_profits, confidence["score"]
         )
+
+        # --- บันทึกเวลาที่ส่ง Alert ไป เพื่อเช็ค Cooldown ในรอบถัดไป ---
+        mark_alert_sent(config["kvdb_bucket"], symbol, entry_signal["direction"])
 
     # --- Dashboard: ส่งทุกรอบ แบบแก้ทับข้อความเดิม (ไม่สแปมแชท) ---
     dashboard_text = build_dashboard_message(
@@ -192,6 +228,12 @@ if __name__ == "__main__":
                     symbol=td_symbol, interval="1h", outputsize=300,
                     api_key=CONFIG["twelvedata_api_key"]
                 )
+
+                # ดึงเฟรม 4H มาคำนวณ Daily Bias — ชั้น bias สูงสุด เหนือกว่า 1H
+                df_4h = fetch_twelvedata(
+                    symbol=td_symbol, interval="4h", outputsize=300,
+                    api_key=CONFIG["twelvedata_api_key"]
+                )
             except Exception as e:
                 print(f"[Data Error] {display_symbol}: {e}")
                 continue  # ข้ามคู่เงินนี้ไป แต่คู่อื่น/ping ยังทำงานต่อได้
@@ -200,8 +242,11 @@ if __name__ == "__main__":
             structure_1h = analyze_structure(df_1h_ind, CONFIG)
             higher_tf_trend = structure_1h["trend"]
 
+            daily_bias = calc_daily_bias(df_4h, CONFIG)
+
             run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000,
-                         higher_tf_trend=higher_tf_trend, session_info=session_info)
+                         higher_tf_trend=higher_tf_trend, session_info=session_info,
+                         daily_bias=daily_bias)
 
             # ส่ง Hourly Briefing เฉพาะรอบที่ตรงกับต้นชั่วโมง (นาที 0-14 ของทุกชั่วโมง)
             if datetime.now(timezone.utc).minute < 15:

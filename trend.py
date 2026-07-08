@@ -60,3 +60,14 @@ def analyze_structure(df, config):
         result["event_price"] = last_swing_low
 
     return result
+
+
+def analyze_internal_structure(df, config):
+    """
+    วิเคราะห์โครงสร้างชั้นเล็ก (Internal Structure) โดยใช้ swing lookback สั้นกว่า
+    ใช้เป็นตัวยืนยันเสริมของ Swing Structure หลัก (แนวคิด 2 ชั้น: Internal + Swing)
+    Internal จะไวกว่า จับการกลับตัวสั้นๆ ได้เร็วกว่า แต่สัญญาณหลอกก็มากกว่า
+    """
+    internal_config = dict(config)
+    internal_config["swing_lookback"] = config.get("internal_swing_lookback", 3)
+    return analyze_structure(df, internal_config)

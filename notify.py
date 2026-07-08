@@ -14,13 +14,24 @@ def send_telegram_alert(token, chat_id, message):
 
 
 def format_alert_message(symbol, timeframe, structure, entry_signal,
-                          stop_loss, take_profits, rr, confidence):
+                          stop_loss, take_profits, rr, confidence,
+                          daily_bias=None, pd_zone=None, internal_structure=None):
     direction_th = "LONG (ซื้อ)" if entry_signal["direction"] == "bullish" else "SHORT (ขาย)"
     lines = [
         f"🚨 <b>สัญญาณเทรด: {symbol} ({timeframe})</b>",
         f"ทิศทาง: {direction_th}",
         f"Trend/Event: {structure['trend']} | {structure['event']}",
         f"Score: {confidence['score']}/100",
+    ]
+
+    if daily_bias:
+        lines.append(f"Daily Bias (4H): {daily_bias}")
+    if pd_zone:
+        lines.append(f"PD Zone: {pd_zone['zone']} ({pd_zone['position_pct']}%)")
+    if internal_structure:
+        lines.append(f"Internal Structure: {internal_structure['trend']} | {internal_structure['event']}")
+
+    lines += [
         "",
         f"Entry: {entry_signal['entry_price']:.4f}",
         f"SL: {stop_loss:.4f}",
