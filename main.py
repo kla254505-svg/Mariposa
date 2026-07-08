@@ -1,4 +1,5 @@
 import requests
+import json
 import pandas as pd
 import numpy as np
 
@@ -19,6 +20,60 @@ from dashboard import build_dashboard_message
 from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
+from kvstore import kv_get, kv_set
+
+
+def _current_hour_key():
+    """คืนค่า string ระบุ 'ชั่วโมงปัจจุบัน' แบบ UTC เช่น '2026-07-08-14' ใช้เทียบว่าข้ามชั่วโมงหรือยัง (สำหรับ Hourly Briefing)"""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+
+
+def _htf_cache_bucket_key():
+    """
+    คืนค่า string ระบุ 'ช่วง 30 นาทีปัจจุบัน' แบบ UTC เช่น '2026-07-08-14-00' หรือ '...-14-30'
+    ใช้แยกกับ _current_hour_key() เพราะ cache ของ 1H/4H ควรสดกว่ารอบส่ง Hourly Briefing
+    (ตัวกรองสัญญาณควรสดที่สุดเท่าที่ทำได้ ส่วน briefing แค่รายงานผล ไม่จำเป็นต้องถี่ตาม)
+    """
+    now = datetime.now(timezone.utc)
+    bucket_minute = 0 if now.minute < 30 else 30
+    return now.replace(minute=bucket_minute, second=0, microsecond=0).strftime("%Y-%m-%d-%H-%M")
+
+
+def get_cached_htf_context(kvdb_bucket, symbol):
+    """
+    บอทวิเคราะห์ทุก 5 นาที แต่เทรนด์ 1H และ Bias 4H ไม่จำเป็นต้องดึงข้อมูลใหม่ทุกรอบ
+    ฟังก์ชันนี้จะอ่านค่าที่ cache ไว้จาก kvdb ถ้ายังอยู่ใน "ช่วง 30 นาทีเดียวกัน" กับตอนนี้ (ประหยัด API quota)
+    คืนค่า (higher_tf_trend, bias_4h) หรือ (None, None) ถ้ายังไม่มี cache/cache หมดอายุแล้ว
+    """
+    raw = kv_get(kvdb_bucket, f"htf_ctx_{symbol}")
+    if not raw:
+        return None, None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None, None
+    if data.get("bucket") != _htf_cache_bucket_key():
+        return None, None
+    return data.get("higher_tf_trend"), data.get("bias_4h")
+
+
+def set_cached_htf_context(kvdb_bucket, symbol, higher_tf_trend, bias_4h):
+    """บันทึกผล 1H trend + 4H bias ที่เพิ่งคำนวณลง kvdb ให้รอบ 5 นาทีถัดไปในช่วง 30 นาทีเดียวกันใช้ซ้ำได้"""
+    payload = json.dumps(
+        {"bucket": _htf_cache_bucket_key(), "higher_tf_trend": higher_tf_trend, "bias_4h": bias_4h},
+        default=float,
+    )
+    kv_set(kvdb_bucket, f"htf_ctx_{symbol}", payload)
+
+
+def should_send_hourly_briefing(kvdb_bucket, symbol):
+    """เช็คว่าชั่วโมงนี้เคยส่ง Hourly Briefing ไปแล้วหรือยัง (กันส่งซ้ำตอนวิเคราะห์ทุก 5 นาที)"""
+    last_sent_hour = kv_get(kvdb_bucket, f"briefing_hour_{symbol}")
+    return last_sent_hour != _current_hour_key()
+
+
+def mark_hourly_briefing_sent(kvdb_bucket, symbol):
+    kv_set(kvdb_bucket, f"briefing_hour_{symbol}", _current_hour_key())
 
 
 def ping_healthcheck(url):
@@ -228,55 +283,60 @@ if __name__ == "__main__":
         for td_symbol, display_symbol in symbols:
             # --- ห่อการดึงข้อมูลด้วย try/except กันคู่เงินนี้พังแล้วลากทั้งสคริปต์ตายไปด้วย ---
             try:
+                # 15M และ 5M ต้องสดทุกรอบ เพราะเป็นเฟรมที่ใช้หาโซนเข้าไม้ + trigger จริง
                 df = fetch_twelvedata(
                     symbol=td_symbol, interval="15min", outputsize=300,
+                    api_key=CONFIG["twelvedata_api_key"]
+                )
+                df_5m = fetch_twelvedata(
+                    symbol=td_symbol, interval="5min", outputsize=200,
                     api_key=CONFIG["twelvedata_api_key"]
                 )
 
                 session_info = get_session_info(CONFIG)
 
-                # ดึงเฟรม 1H มาคำนวณเทรนด์ ใช้เป็นตัวกรองก่อนส่ง Alert
-                df_1h = fetch_twelvedata(
-                    symbol=td_symbol, interval="1h", outputsize=300,
-                    api_key=CONFIG["twelvedata_api_key"]
-                )
+                # เทรนด์ 1H + Bias 4H ไม่เปลี่ยนทุก 5 นาที -> ใช้ cache ในชั่วโมงเดียวกัน ประหยัด API quota
+                higher_tf_trend, bias_4h = get_cached_htf_context(CONFIG["kvdb_bucket"], display_symbol)
+                if higher_tf_trend is None or bias_4h is None:
+                    df_1h = fetch_twelvedata(
+                        symbol=td_symbol, interval="1h", outputsize=300,
+                        api_key=CONFIG["twelvedata_api_key"]
+                    )
+                    df_4h = fetch_twelvedata(
+                        symbol=td_symbol, interval="4h", outputsize=300,
+                        api_key=CONFIG["twelvedata_api_key"]
+                    )
 
-                # ดึงเฟรม 4H มาคำนวณ Bias ใหญ่สุด (เทรนด์ + Premium/Discount) — ชั้นบนสุดของ MTF
-                df_4h = fetch_twelvedata(
-                    symbol=td_symbol, interval="4h", outputsize=300,
-                    api_key=CONFIG["twelvedata_api_key"]
-                )
+                    df_1h_ind = add_indicators(df_1h, CONFIG)
+                    structure_1h = analyze_structure(df_1h_ind, CONFIG)
+                    higher_tf_trend = structure_1h["trend"]
 
-                # ดึงเฟรม 5M มาหา Trigger เข้าไม้จริง (reaction ในโซนที่ 15M ระบุ)
-                df_5m = fetch_twelvedata(
-                    symbol=td_symbol, interval="5min", outputsize=200,
-                    api_key=CONFIG["twelvedata_api_key"]
-                )
+                    df_4h_ind = add_indicators(df_4h, CONFIG)
+                    bias_4h = analyze_4h_bias(df_4h_ind, CONFIG)
+
+                    set_cached_htf_context(CONFIG["kvdb_bucket"], display_symbol, higher_tf_trend, bias_4h)
             except Exception as e:
                 print(f"[Data Error] {display_symbol}: {e}")
                 continue  # ข้ามคู่เงินนี้ไป แต่คู่อื่น/ping ยังทำงานต่อได้
 
-            df_1h_ind = add_indicators(df_1h, CONFIG)
-            structure_1h = analyze_structure(df_1h_ind, CONFIG)
-            higher_tf_trend = structure_1h["trend"]
-
-            df_4h_ind = add_indicators(df_4h, CONFIG)
-            bias_4h = analyze_4h_bias(df_4h_ind, CONFIG)
-
+            # รัน pipeline ทุกรอบ (ทุก 5 นาที) — ถ้าเจอจังหวะเข้าไม้ที่ผ่านเกณฑ์ จะยิง Telegram Alert ทันที
+            # ส่วน Dashboard จะถูก edit ทับข้อความเดิมเสมอ ไม่สร้างข้อความใหม่ ไม่สแปมแชท
             run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000,
                          higher_tf_trend=higher_tf_trend, session_info=session_info,
                          bias_4h=bias_4h, df_5m=df_5m)
 
-            # ส่ง Hourly Briefing เฉพาะรอบที่ตรงกับต้นชั่วโมง (นาที 0-14 ของทุกชั่วโมง)
-            if datetime.now(timezone.utc).minute < 15:
+            # ส่ง Hourly Briefing (สถานะปกติ) แค่ครั้งเดียวต่อชั่วโมง แม้จะวิเคราะห์ทุก 5 นาทีก็ตาม
+            if should_send_hourly_briefing(CONFIG["kvdb_bucket"], display_symbol):
                 df_ind = add_indicators(df, CONFIG)
                 structure = analyze_structure(df_ind, CONFIG)
                 entry_signal = evaluate_entry(df_ind, structure, CONFIG)
                 briefing_text = build_hourly_briefing(display_symbol, "15m", df_ind, structure, entry_signal)
-                send_or_edit_message(
+                sent = send_or_edit_message(
                     CONFIG["telegram_token"], CONFIG["telegram_chat_id"], briefing_text,
                     CONFIG["kvdb_bucket"], key=f"briefing_{display_symbol}"
                 )
+                if sent:
+                    mark_hourly_briefing_sent(CONFIG["kvdb_bucket"], display_symbol)
     finally:
         # ping บอก Healthchecks.io เสมอ ไม่ว่าข้างบนจะสำเร็จหรือมี error ก็ตาม
         # (นี่คือหน้าที่จริงของ Dead Man's Switch — ต้องรู้ว่าบอทยังไม่ตายแม้ตอน API ล่ม)
