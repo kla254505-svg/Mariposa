@@ -17,6 +17,9 @@ def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, conf
     price = last["close"]
     adx_val = last.get("adx", 0)
     atr_val = last.get("atr", 0)
+    rsi_val = last.get("rsi", 50)
+
+    RSI_LABEL = "Oversold ⚠️" if rsi_val <= 30 else ("Overbought ⚠️" if rsi_val >= 70 else "ปกติ")
 
     STRENGTH_LABEL = {"strong": " (Strong)", "weak": " (Weak — กำลังก่อตัว)", "none": ""}
     trend_label = TREND_LABEL.get(structure.get("trend"), structure.get("trend"))
@@ -47,6 +50,7 @@ def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, conf
         f"เทรนด์ (Structure): {trend_label} | Event: {structure.get('event') or '-'}",
         f"เทรนด์ (EMA Bias): {ema_bias_label}",
         f"ADX: {adx_val:.1f} ({'มีเทรนด์' if adx_val >= config['adx_min_trend'] else 'Choppy'})",
+        f"RSI: {rsi_val:.1f} ({RSI_LABEL})",
         f"ATR: {atr_val:.4f} ({'หดตัว/นิ่งผิดปกติ' if atr_contract else 'ปกติ'})",
         f"MACD Slope: {slope_label}",
         "",

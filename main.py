@@ -14,7 +14,8 @@ from risk import calc_stop_loss, calc_position_size
 from tp import calc_take_profits, calc_risk_reward
 from score import calc_confidence_score
 from report import print_report
-from notify import send_telegram_alert, format_alert_message, send_or_edit_message
+from notify import send_telegram_alert, format_alert_message, send_or_edit_message, send_telegram_photo
+from chart import build_entry_chart
 from scenario import build_hourly_briefing
 from dashboard import build_dashboard_message
 from session import get_session_info
@@ -259,7 +260,21 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
     if entry_signal.get("alert_ready"):
         msg = format_alert_message(symbol, timeframe, structure, entry_signal,
                                     stop_loss, take_profits, rr, confidence, bias_4h=bias_4h)
-        sent = send_telegram_alert(config["telegram_token"], config["telegram_chat_id"], msg)
+
+        # แนบกราฟราคาไปด้วย (วาดจากข้อมูลที่ดึงมาอยู่แล้ว ไม่ต้องเรียก API เพิ่ม)
+        # ถ้าวาดรูปหรือส่งรูปพลาดด้วยเหตุผลใดก็ตาม ให้ fallback ไปส่งเป็นข้อความล้วนแทน กันไม่ให้ alert หายไปเฉยๆ
+        sent = False
+        try:
+            chart_path = build_entry_chart(
+                df, entry_signal, structure, out_path=f"/tmp/mariposa_chart_{symbol}.png"
+            )
+            sent = send_telegram_photo(config["telegram_token"], config["telegram_chat_id"], chart_path, caption=msg)
+        except Exception as e:
+            print(f"[Chart Error] {e}")
+
+        if not sent:
+            sent = send_telegram_alert(config["telegram_token"], config["telegram_chat_id"], msg)
+
         print("[Telegram] ส่งแจ้งเตือนสำเร็จ" if sent else "[Telegram] ส่งแจ้งเตือนล้มเหลว")
 
     # --- Dashboard: ส่งทุกรอบ แบบแก้ทับข้อความเดิม (ไม่สแปมแชท) ---

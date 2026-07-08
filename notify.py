@@ -13,6 +13,27 @@ def send_telegram_alert(token, chat_id, message):
         return False
 
 
+def send_telegram_photo(token, chat_id, photo_path, caption=""):
+    """
+    ส่งรูปภาพ (เช่นกราฟที่ chart.py วาดไว้) พร้อมข้อความ caption ผ่าน Telegram sendPhoto
+    Telegram caption จำกัดไม่เกิน 1024 ตัวอักษร ถ้ายาวเกินจะตัดให้พอดีอัตโนมัติ
+    คืนค่า True/False ว่าส่งสำเร็จไหม (ไม่ throw exception ออกไปกระทบ pipeline หลัก)
+    """
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    if len(caption) > 1024:
+        caption = caption[:1000] + "\n... (ตัดข้อความ ดูรายละเอียดเต็มที่ Dashboard)"
+    try:
+        with open(photo_path, "rb") as f:
+            files = {"photo": f}
+            payload = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+            resp = requests.post(url, data=payload, files=files, timeout=20)
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        print(f"[Telegram Photo Error] {e}")
+        return False
+
+
 def format_alert_message(symbol, timeframe, structure, entry_signal,
                           stop_loss, take_profits, rr, confidence, bias_4h=None):
     direction_th = "LONG (ซื้อ)" if entry_signal["direction"] == "bullish" else "SHORT (ขาย)"
