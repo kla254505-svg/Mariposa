@@ -7,6 +7,7 @@ from quality import (
 
 WEIGHTS = {
     "structure_event": 13,
+    "trend_strength": 6,       # ใหม่: เต็มถ้าเทรนด์ confirm ครบ (strong), ได้ครึ่งถ้าเป็นเทรนด์อ่อนๆ (weak)
     "order_block": 12,        # scale ตามคุณภาพ (ขนาดเทียบ ATR)
     "fvg": 8,                 # scale ตามคุณภาพ
     "structure_pullback": 8,
@@ -29,8 +30,20 @@ def calc_confidence_score(entry_signal, structure, df, config, rr_tp1):
     last_row = df.iloc[-1]
 
     if structure.get("event") in ("BOS", "CHoCH"):
-        score += WEIGHTS["structure_event"]
-        breakdown["structure_event"] = WEIGHTS["structure_event"]
+        strength_mult = 1.0 if structure.get("trend_strength") == "strong" else 0.7
+        pts = round(WEIGHTS["structure_event"] * strength_mult, 1)
+        score += pts
+        breakdown["structure_event"] = pts
+
+    # --- Trend Strength: เทรนด์ confirm ครบ (strong) ได้เต็ม, เทรนด์อ่อนๆ ที่กำลังก่อตัว (weak) ได้ครึ่งเดียว ---
+    trend_strength = structure.get("trend_strength")
+    if trend_strength == "strong":
+        score += WEIGHTS["trend_strength"]
+        breakdown["trend_strength"] = WEIGHTS["trend_strength"]
+    elif trend_strength == "weak":
+        pts = round(WEIGHTS["trend_strength"] * 0.5, 1)
+        score += pts
+        breakdown["trend_strength"] = pts
 
     ob = entry_signal.get("ob")
     if ob:

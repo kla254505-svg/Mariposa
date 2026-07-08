@@ -18,7 +18,7 @@ def print_report(symbol, timeframe, structure, entry_signal, stop_loss,
     passed = score >= config["min_score_to_trade"]
 
     print(f"ทิศทาง: {direction_th}")
-    print(f"เทรนด์/Event: {structure['trend']} | {structure['event']}")
+    print(f"เทรนด์/Event: {structure['trend']} ({structure.get('trend_strength', '-')}) | {structure['event']}")
     print(f"คะแนนความมั่นใจ: {score}/100  -> {'ผ่านเกณฑ์' if passed else 'ต่ำกว่าเกณฑ์ แนะนำรอดูก่อน'}")
     print("-" * 60)
 

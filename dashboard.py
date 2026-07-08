@@ -18,7 +18,9 @@ def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, conf
     adx_val = last.get("adx", 0)
     atr_val = last.get("atr", 0)
 
+    STRENGTH_LABEL = {"strong": " (Strong)", "weak": " (Weak — กำลังก่อตัว)", "none": ""}
     trend_label = TREND_LABEL.get(structure.get("trend"), structure.get("trend"))
+    trend_label += STRENGTH_LABEL.get(structure.get("trend_strength"), "")
     ema_bias_label = TREND_LABEL.get(structure.get("ema_trend"), structure.get("ema_trend"))
     slope_label = SLOPE_LABEL.get(calc_macd_slope(df), "-")
 
