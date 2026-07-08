@@ -7,7 +7,7 @@ dashboard.py
 from quality import calc_macd_slope
 from indicator import is_atr_contracting
 
-TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
+TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway", "neutral": "เป็นกลาง"}
 SLOPE_LABEL = {"rising": "เพิ่มขึ้น ↑", "falling": "ลดลง ↓", "flat": "แบนราบ"}
 
 
