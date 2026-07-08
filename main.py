@@ -188,7 +188,8 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
 
     # --- Dashboard: ส่งทุกรอบ แบบแก้ทับข้อความเดิม (ไม่สแปมแชท) ---
     dashboard_text = build_dashboard_message(
-        symbol, timeframe, df, structure, entry_signal, confidence, session_info, config
+        symbol, timeframe, df, structure, entry_signal, confidence, session_info, config,
+        daily_bias=daily_bias, pd_zone=pd_zone, internal_structure=internal_structure
     )
     send_or_edit_message(
         config["telegram_token"], config["telegram_chat_id"], dashboard_text,

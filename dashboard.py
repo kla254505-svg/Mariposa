@@ -11,7 +11,8 @@ TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "side
 SLOPE_LABEL = {"rising": "เพิ่มขึ้น ↑", "falling": "ลดลง ↓", "flat": "แบนราบ"}
 
 
-def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, confidence, session_info, config):
+def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, confidence, session_info, config,
+                             daily_bias=None, pd_zone=None, internal_structure=None):
     last = df.iloc[-1]
     price = last["close"]
     adx_val = last.get("adx", 0)
@@ -36,6 +37,21 @@ def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, conf
         f"MACD Slope: {slope_label}",
         "",
     ]
+
+    if daily_bias is not None:
+        daily_bias_label = TREND_LABEL.get(daily_bias, daily_bias)
+        lines.append(f"Daily Bias (4H): {daily_bias_label}")
+
+    if internal_structure is not None:
+        internal_label = TREND_LABEL.get(internal_structure.get("trend"), internal_structure.get("trend"))
+        lines.append(f"Internal Structure: {internal_label} | Event: {internal_structure.get('event') or '-'}")
+
+    if pd_zone is not None:
+        zone_label = "Premium (แพง)" if pd_zone["zone"] == "premium" else "Discount (ถูก)"
+        lines.append(f"PD Zone: {zone_label} ({pd_zone['position_pct']}% ของช่วง {pd_zone['zone_low']}-{pd_zone['zone_high']})")
+
+    if daily_bias is not None or pd_zone is not None or internal_structure is not None:
+        lines.append("")
 
     if session_info:
         session_line = "อยู่ใน London/NY Session" if session_info["in_session"] else "นอก Session (สภาพคล่องต่ำ)"
