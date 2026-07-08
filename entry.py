@@ -125,3 +125,25 @@ def evaluate_entry(df, structure, config):
         )
 
     return result
+
+
+def get_entry_zone_bounds(entry_signal):
+    """
+    รวมขอบบน-ล่างของโซนที่ 15M ระบุไว้ (OB / FVG / Structure zone) เป็นกล่องเดียว
+    ใช้ให้ trigger_5m.py เช็คว่าราคาวิ่งเข้ามาแตะโซนนี้จริงหรือยัง
+    คืนค่า {'top':..., 'bottom':...} หรือ None ถ้าไม่มีโซนเลย
+    """
+    ob = entry_signal.get("ob")
+    fvg = entry_signal.get("fvg")
+    structure_zone = entry_signal.get("structure_zone")
+
+    tops, bottoms = [], []
+    for zone in (ob, fvg, structure_zone):
+        if zone:
+            tops.append(zone["top"])
+            bottoms.append(zone["bottom"])
+
+    if not tops:
+        return None
+
+    return {"top": max(tops), "bottom": min(bottoms)}

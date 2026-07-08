@@ -22,6 +22,13 @@ CONFIG = {
     "atr_contraction_filter_enabled": True,
     "atr_contraction_lookback": 50,
     "atr_contraction_ratio": 0.7,
+    # --- 4H Bias (เทรนด์ใหญ่สุด + Premium/Discount) ---
+    "bias4h_filter_enabled": True,
+    "premium_discount_filter_enabled": True,
+    # --- 5M Trigger (รอ reaction กลับตัวจริงก่อนยิง entry) ---
+    "trigger5m_filter_enabled": True,
+    "trigger5m_lookback": 6,
+    "trigger5m_choch_lookback": 20,
     "risk_per_trade_pct": 1.0,
     "structure_entry_atr_mult": 0.5,
     "sl_buffer_atr": 0.25,
@@ -31,24 +38,6 @@ CONFIG = {
     "tp3_rr": 4.0,
     "min_score_to_trade": 50,
     "fib_levels": [0.382, 0.5, 0.618, 0.705, 0.79],
-
-    # --- Premium/Discount Zone ---
-    "pd_lookback": 20,
-    "pd_zone_filter_enabled": True,
-
-    # --- Daily Bias (4H) ---
-    "daily_bias_filter_enabled": True,
-
-    # --- Order Block Volatility Filter ---
-    "ob_volatility_filter_enabled": True,
-    "ob_volatility_atr_mult": 2.0,
-
-    # --- Internal Structure (2-tier) ---
-    "internal_swing_lookback": 3,
-
-    # --- Signal Cooldown (กันสัญญาณยิงถี่เกินไป) ---
-    "signal_cooldown_minutes": 45,
-
     # --- Secrets: อ่านจาก GitHub Actions Secrets (Environment Variables) ---
     "telegram_token": os.environ.get("TELEGRAM_TOKEN", ""),
     "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID", ""),

@@ -7,12 +7,12 @@ dashboard.py
 from quality import calc_macd_slope
 from indicator import is_atr_contracting
 
-TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway", "neutral": "เป็นกลาง"}
+TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
 SLOPE_LABEL = {"rising": "เพิ่มขึ้น ↑", "falling": "ลดลง ↓", "flat": "แบนราบ"}
 
 
 def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, confidence, session_info, config,
-                             daily_bias=None, pd_zone=None, internal_structure=None):
+                             bias_4h=None):
     last = df.iloc[-1]
     price = last["close"]
     adx_val = last.get("adx", 0)
@@ -30,6 +30,18 @@ def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, conf
         f"📋 <b>Dashboard: {symbol} ({timeframe})</b>",
         f"ราคาปัจจุบัน: {price:.4f}",
         "",
+    ]
+
+    if bias_4h:
+        zone_label = {"premium": "Premium", "discount": "Discount", "equilibrium": "Equilibrium"}.get(
+            bias_4h.get("zone"), "-"
+        )
+        lines.append(
+            f"🧭 4H Bias: {TREND_LABEL.get(bias_4h.get('trend'), bias_4h.get('trend'))} | โซนราคา: {zone_label}"
+        )
+        lines.append("")
+
+    lines += [
         f"เทรนด์ (Structure): {trend_label} | Event: {structure.get('event') or '-'}",
         f"เทรนด์ (EMA Bias): {ema_bias_label}",
         f"ADX: {adx_val:.1f} ({'มีเทรนด์' if adx_val >= config['adx_min_trend'] else 'Choppy'})",
@@ -37,21 +49,6 @@ def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, conf
         f"MACD Slope: {slope_label}",
         "",
     ]
-
-    if daily_bias is not None:
-        daily_bias_label = TREND_LABEL.get(daily_bias, daily_bias)
-        lines.append(f"Daily Bias (4H): {daily_bias_label}")
-
-    if internal_structure is not None:
-        internal_label = TREND_LABEL.get(internal_structure.get("trend"), internal_structure.get("trend"))
-        lines.append(f"Internal Structure: {internal_label} | Event: {internal_structure.get('event') or '-'}")
-
-    if pd_zone is not None:
-        zone_label = "Premium (แพง)" if pd_zone["zone"] == "premium" else "Discount (ถูก)"
-        lines.append(f"PD Zone: {zone_label} ({pd_zone['position_pct']}% ของช่วง {pd_zone['zone_low']}-{pd_zone['zone_high']})")
-
-    if daily_bias is not None or pd_zone is not None or internal_structure is not None:
-        lines.append("")
 
     if session_info:
         session_line = "อยู่ใน London/NY Session" if session_info["in_session"] else "นอก Session (สภาพคล่องต่ำ)"
@@ -68,6 +65,10 @@ def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, conf
     fvg = entry_signal.get("fvg")
     lines.append(f"Order Block: {'พบ (' + direction + ')' if ob else 'ไม่พบ'}")
     lines.append(f"FVG: {'พบ (' + direction + ')' if fvg else 'ไม่พบ'}")
+
+    trigger = entry_signal.get("trigger")
+    if trigger:
+        lines.append(f"5M Trigger: {'ยืนยันแล้ว ✅' if trigger.get('confirmed') else 'รอ reaction ⏳'}")
     lines.append("")
 
     lines.append(f"<b>Score รวม: {confidence['score']}/100</b>")
@@ -75,9 +76,16 @@ def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, conf
         lines.append(f" • {factor}: +{pts}")
     lines.append("")
 
-    if entry_signal.get("valid"):
-        lines.append(f"<b>สถานะ: มีจังหวะเข้าไม้ ({direction})</b>")
+    if entry_signal.get("alert_ready"):
+        lines.append(f"<b>สถานะ: พร้อมเข้าไม้ ({direction})</b>")
         lines.append(f"Entry: {entry_signal['entry_price']:.4f}")
+    elif entry_signal.get("valid"):
+        lines.append(f"<b>สถานะ: มี setup ({direction}) แต่ยังไม่ผ่านเกณฑ์ครบ / รอ trigger</b>")
+        lines.append(f"Entry (คาดการณ์): {entry_signal['entry_price']:.4f}")
+        if entry_signal.get("reasons"):
+            lines.append("เหตุผลล่าสุด:")
+            for r in entry_signal["reasons"][-3:]:
+                lines.append(f" • {r}")
     else:
         lines.append("<b>สถานะ: ยังไม่มีจังหวะเข้าไม้ที่ผ่านเกณฑ์ทั้งหมด</b>")
         if entry_signal.get("reasons"):

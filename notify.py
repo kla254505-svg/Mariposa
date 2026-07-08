@@ -14,24 +14,26 @@ def send_telegram_alert(token, chat_id, message):
 
 
 def format_alert_message(symbol, timeframe, structure, entry_signal,
-                          stop_loss, take_profits, rr, confidence,
-                          daily_bias=None, pd_zone=None, internal_structure=None):
+                          stop_loss, take_profits, rr, confidence, bias_4h=None):
     direction_th = "LONG (ซื้อ)" if entry_signal["direction"] == "bullish" else "SHORT (ขาย)"
     lines = [
         f"🚨 <b>สัญญาณเทรด: {symbol} ({timeframe})</b>",
         f"ทิศทาง: {direction_th}",
         f"Trend/Event: {structure['trend']} | {structure['event']}",
-        f"Score: {confidence['score']}/100",
     ]
 
-    if daily_bias:
-        lines.append(f"Daily Bias (4H): {daily_bias}")
-    if pd_zone:
-        lines.append(f"PD Zone: {pd_zone['zone']} ({pd_zone['position_pct']}%)")
-    if internal_structure:
-        lines.append(f"Internal Structure: {internal_structure['trend']} | {internal_structure['event']}")
+    if bias_4h:
+        zone_label = {"premium": "Premium", "discount": "Discount", "equilibrium": "Equilibrium"}.get(
+            bias_4h.get("zone"), "-"
+        )
+        lines.append(f"4H Bias: {bias_4h.get('trend')} | โซนราคา: {zone_label}")
+
+    trigger = entry_signal.get("trigger")
+    if trigger and trigger.get("confirmed"):
+        lines.append(f"5M Trigger: ยืนยันแล้ว ✅ ({trigger['reason']})")
 
     lines += [
+        f"Score: {confidence['score']}/100",
         "",
         f"Entry: {entry_signal['entry_price']:.4f}",
         f"SL: {stop_loss:.4f}",
