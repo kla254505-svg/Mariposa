@@ -2,10 +2,7 @@ name: Gold Trading Bot
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '*/15 * * * *'   # รันทุก 15 นาที ปรับช่วงเวลาได้ตามต้องการ
 
- 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -22,4 +19,3 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           HEALTHCHECKS_URL: ${{ secrets.HEALTHCHECKS_URL }}
           KVDB_BUCKET: ${{ secrets.KVDB_BUCKET }}
-
