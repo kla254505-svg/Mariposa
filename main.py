@@ -22,6 +22,7 @@ from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
+from news_scheduler import refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning
 
 
 def _current_hour_key():
@@ -339,6 +340,23 @@ if __name__ == "__main__":
             run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000,
                          higher_tf_trend=higher_tf_trend, session_info=session_info,
                          bias_4h=bias_4h, df_5m=df_5m)
+
+            # --- ข่าว/ปฏิทินเศรษฐกิจ: แค่ข้อมูลประกอบการตัดสินใจ ไม่ยุ่งกับ entry logic ---
+            # ห่อทั้งก้อนด้วย try/except เพราะเป็น 3rd-party ฟรี ไม่มี SLA ถ้าพังไม่ให้กระทบบอทหลัก
+            try:
+                new_events, new_headlines = refresh_daily_calendar(CONFIG["kvdb_bucket"], display_symbol)
+                if new_events is not None:  # เพิ่งขึ้นวันใหม่ (เวลาไทย) -> สรุปข่าวทั้งวันครั้งเดียว
+                    summary_text = build_daily_summary_message(display_symbol, new_events, new_headlines)
+                    send_or_edit_message(
+                        CONFIG["telegram_token"], CONFIG["telegram_chat_id"], summary_text,
+                        CONFIG["kvdb_bucket"], key=f"news_summary_{display_symbol}"
+                    )
+
+                warning_text = check_and_send_pre_news_warning(CONFIG["kvdb_bucket"], display_symbol)
+                if warning_text:
+                    send_telegram_alert(CONFIG["telegram_token"], CONFIG["telegram_chat_id"], warning_text)
+            except Exception as e:
+                print(f"[News Scheduler Error] {e}")
 
             # ส่ง Hourly Briefing (สถานะปกติ) แค่ครั้งเดียวต่อชั่วโมง แม้จะวิเคราะห์ทุก 5 นาทีก็ตาม
             if should_send_hourly_briefing(CONFIG["kvdb_bucket"], display_symbol):
