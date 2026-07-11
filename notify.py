@@ -35,7 +35,8 @@ def send_telegram_photo(token, chat_id, photo_path, caption=""):
 
 
 def format_alert_message(symbol, timeframe, structure, entry_signal,
-                          stop_loss, take_profits, rr, confidence, bias_4h=None):
+                          stop_loss, take_profits, rr, confidence, bias_4h=None,
+                          current_price=None, stale_threshold=None):
     direction_th = "LONG (ซื้อ)" if entry_signal["direction"] == "bullish" else "SHORT (ขาย)"
     lines = [
         f"🚨 <b>สัญญาณเทรด: {symbol} ({timeframe})</b>",
@@ -61,6 +62,16 @@ def format_alert_message(symbol, timeframe, structure, entry_signal,
     ]
     for name, price in take_profits.items():
         lines.append(f"{name}: {price:.4f} (RR {rr[name]})")
+
+    # --- กันเข้าไม้ตามข้อความเก่า: ข้อความนี้เป็นภาพนิ่ง ณ เวลาที่ส่ง ไม่ auto-อัปเดต ---
+    if current_price is not None:
+        lines.append("")
+        lines.append(f"ราคา ณ ตอนส่ง Alert: {current_price:.4f}")
+        if stale_threshold:
+            lines.append(
+                f"⚠️ ถ้าตอนที่คุณอ่านข้อความนี้ ราคาห่างจากตัวเลขนี้เกิน {stale_threshold:.2f} "
+                f"ให้ถือว่าสัญญาณนี้หมดอายุแล้ว ไม่ควรเข้าตาม — เช็ค Dashboard ล่าสุดก่อนเสมอ"
+            )
     return "\n".join(lines)
 from kvstore import kv_get, kv_set
 

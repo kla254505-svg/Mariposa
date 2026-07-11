@@ -182,7 +182,9 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
     confidence = {"score": 0, "breakdown": {}}
 
     if entry_signal["valid"]:
-        current_atr = df["atr"].iloc[-1]
+        # ใช้ ATR เฉลี่ยย้อนหลัง (ไม่ใช่แท่งล่าสุดเป๊ะๆ) กัน SL แคบผิดปกติตอนตลาดหดตัวชั่วคราว
+        atr_period = config.get("sl_atr_avg_period", 20)
+        current_atr = df["atr"].tail(atr_period).mean() if "atr" in df.columns and len(df) else 0
         stop_loss = calc_stop_loss(entry_signal, current_atr, config)
         take_profits = calc_take_profits(entry_signal["entry_price"], stop_loss,
                                           entry_signal["direction"], config)
@@ -227,6 +229,14 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                         tightened_base - buffer if entry_signal["direction"] == "bullish"
                         else tightened_base + buffer
                     )
+                    # SL ที่ tighten แล้วก็ยังต้องไม่แคบกว่าขั้นต่ำที่ตั้งไว้ (min_sl_distance) เหมือนกัน
+                    min_distance = config.get("min_sl_distance", 0)
+                    tightened_distance = abs(entry_signal["entry_price"] - tightened_sl)
+                    if min_distance and tightened_distance < min_distance:
+                        tightened_sl = (
+                            entry_signal["entry_price"] - min_distance if entry_signal["direction"] == "bullish"
+                            else entry_signal["entry_price"] + min_distance
+                        )
                     is_tighter = (
                         tightened_sl > stop_loss if entry_signal["direction"] == "bullish"
                         else tightened_sl < stop_loss
@@ -259,8 +269,12 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
 
     # --- ส่ง Telegram Alert เมื่อ signal ผ่านเกณฑ์กฎหลัก "และ" ผ่านเกณฑ์คะแนนขั้นต่ำ ---
     if entry_signal.get("alert_ready"):
+        # threshold ไว้บอกว่า "ห่างจาก Entry เท่าไหร่ถึงถือว่าสัญญาณหมดอายุ" ใช้ 2x ATR เฉลี่ย
+        # (ตัวเดียวกับที่ใช้คำนวณ SL) หรือ fallback เป็น min_sl_distance ถ้า ATR ใช้ไม่ได้
+        stale_threshold = (2 * current_atr) if current_atr else config.get("min_sl_distance", 10.0)
         msg = format_alert_message(symbol, timeframe, structure, entry_signal,
-                                    stop_loss, take_profits, rr, confidence, bias_4h=bias_4h)
+                                    stop_loss, take_profits, rr, confidence, bias_4h=bias_4h,
+                                    current_price=df["close"].iloc[-1], stale_threshold=stale_threshold)
 
         # แนบกราฟราคาไปด้วย (วาดจากข้อมูลที่ดึงมาอยู่แล้ว ไม่ต้องเรียก API เพิ่ม)
         # ถ้าวาดรูปหรือส่งรูปพลาดด้วยเหตุผลใดก็ตาม ให้ fallback ไปส่งเป็นข้อความล้วนแทน กันไม่ให้ alert หายไปเฉยๆ

@@ -37,6 +37,9 @@ CONFIG = {
     "tp2_rr": 2.5,
     "tp3_rr": 4.0,
     "min_score_to_trade": 50,
+    # --- SL: กันเคส zone แคบ/ATR หดตัวชั่วคราวจนได้ SL แคบผิดปกติ ---
+    "min_sl_distance": 10.0,   # ระยะ SL ขั้นต่ำเป็นราคาจริง (เช่น เข้า 4124 SL ห่างอย่างน้อย 10.0 = 4114)
+    "sl_atr_avg_period": 20,   # ใช้ ATR เฉลี่ยย้อนหลังกี่แท่งสำหรับคำนวณ buffer แทน ATR แท่งล่าสุดเป๊ะๆ
     "fib_levels": [0.382, 0.5, 0.618, 0.705, 0.79],
     # --- Secrets: อ่านจาก GitHub Actions Secrets (Environment Variables) ---
     "telegram_token": os.environ.get("TELEGRAM_TOKEN", ""),

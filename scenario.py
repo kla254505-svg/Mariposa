@@ -20,7 +20,9 @@ def build_pullback_plan(df, structure, entry_signal, config):
         lines.append(f"รอราคาย่อมาที่ Entry ~{entry_signal['entry_price']:.4f} ตามโซน OB/FVG ที่เจอ")
 
         # คำนวณ SL/TP ด้วยสูตรเดียวกับที่ใช้ตอนยิง Alert จริง (risk.py / tp.py) ให้ดูล่วงหน้าได้เลย
-        current_atr = df["atr"].iloc[-1] if "atr" in df.columns and len(df) else 0
+        # ใช้ ATR เฉลี่ยย้อนหลัง เหมือนกับที่ main.py ใช้คำนวณ SL จริงตอนยิง Alert (สอดคล้องกัน)
+        atr_period = config.get("sl_atr_avg_period", 20)
+        current_atr = df["atr"].tail(atr_period).mean() if "atr" in df.columns and len(df) else 0
         stop_loss = calc_stop_loss(entry_signal, current_atr, config)
         take_profits = calc_take_profits(entry_signal["entry_price"], stop_loss, entry_signal["direction"], config)
         rr = {name: calc_risk_reward(entry_signal["entry_price"], stop_loss, price)
@@ -29,9 +31,15 @@ def build_pullback_plan(df, structure, entry_signal, config):
         lines.append(f"SL (คาดการณ์): {stop_loss:.4f}")
         for name, price in take_profits.items():
             lines.append(f"{name}: {price:.4f} (RR {rr[name]})")
+
+        current_price = df["close"].iloc[-1] if len(df) else None
+        stale_threshold = 2 * current_atr if current_atr else config.get("min_sl_distance", 10.0)
+        price_line = f"ราคา ณ ตอนสร้าง Briefing นี้: {current_price:.4f}" if current_price is not None else ""
         lines.append(
-            "หมายเหตุ: ตัวเลข SL/TP นี้คำนวณจากโซนปัจจุบัน ถ้าราคายังไม่ย่อมาเข้าโซนจริง "
-            "โซน OB/FVG อาจขยับได้ก่อนราคาจะมาถึง ควรเช็ค Dashboard อีกครั้งตอนใกล้ถึงราคา Entry"
+            f"หมายเหตุ: ตัวเลข SL/TP นี้คำนวณจากโซนปัจจุบัน ({price_line}) ถ้าราคายังไม่ย่อมาเข้าโซนจริง "
+            "โซน OB/FVG อาจขยับได้ก่อนราคาจะมาถึง — และ Plan 1 นี้ไม่ผ่านฟิลเตอร์ 4H/1H/Session แบบ Alert จริง "
+            f"ถ้าราคาตอนที่คุณอ่านอันนี้ห่างจากราคาข้างต้นเกิน {stale_threshold:.2f} ให้ถือว่าข้อมูลนี้เก่าไปแล้ว "
+            "ควรเช็ค Dashboard ล่าสุดก่อนเข้าไม้เสมอ ไม่ควรเข้าตามตัวเลขนี้ตรงๆ"
         )
     else:
         lines.append("ยังไม่เจอโซน OB/FVG ที่ชัดเจนพอให้รอเข้าตามเทรนด์นี้ในตอนนี้")
