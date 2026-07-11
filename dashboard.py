@@ -4,7 +4,7 @@ dashboard.py
 เป็นข้อความเดียว ส่งแบบ "แก้ทับของเดิม" (เหมือน Hourly Briefing) ไม่สแปมแชท
 """
 
-from quality import calc_macd_slope
+from quality import calc_macd_slope, score_order_block_quality, score_fvg_quality
 from indicator import is_atr_contracting
 
 TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
@@ -69,8 +69,18 @@ def build_dashboard_message(symbol, timeframe, df, structure, entry_signal, conf
     direction = entry_signal.get("direction") or "-"
     ob = entry_signal.get("ob")
     fvg = entry_signal.get("fvg")
-    lines.append(f"Order Block: {'พบ (' + direction + ')' if ob else 'ไม่พบ'}")
-    lines.append(f"FVG: {'พบ (' + direction + ')' if fvg else 'ไม่พบ'}")
+
+    if ob:
+        ob_quality = round(score_order_block_quality(ob, atr_val) * 100)
+        lines.append(f"Order Block: พบ ({direction}) — คุณภาพ {ob_quality}% (ขนาดเทียบ ATR)")
+    else:
+        lines.append("Order Block: ไม่พบ")
+
+    if fvg:
+        fvg_quality = round(score_fvg_quality(fvg, atr_val) * 100)
+        lines.append(f"FVG: พบ ({direction}) — คุณภาพ {fvg_quality}% (ขนาดเทียบ ATR)")
+    else:
+        lines.append("FVG: ไม่พบ")
 
     trigger = entry_signal.get("trigger")
     if trigger:
