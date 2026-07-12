@@ -15,7 +15,7 @@ def print_report(symbol, timeframe, structure, entry_signal, stop_loss,
 
     direction_th = "LONG (ซื้อ)" if entry_signal["direction"] == "bullish" else "SHORT (ขาย)"
     score = confidence["score"]
-    passed = score >= config["min_score_to_trade"]
+    passed = score >= config["min_score_console_watchlist"]
 
     print(f"ทิศทาง: {direction_th}")
     print(f"เทรนด์/Event: {structure['trend']} ({structure.get('trend_strength', '-')}) | {structure['event']}")

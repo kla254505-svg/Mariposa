@@ -36,7 +36,9 @@ CONFIG = {
     "tp1_rr": 1.5,
     "tp2_rr": 2.5,
     "tp3_rr": 4.0,
-    "min_score_to_trade": 50,
+    # หมายเหตุ: ตัวนี้ใช้แค่ตอน print console report (report.py) ว่า setup "น่าสนใจ" พอจะจับตาดูไหม
+    # ไม่ใช่ตัวกำหนดว่าจะยิง Telegram Alert หรือไม่ — ตัวที่คุมการยิง Alert จริงคือ min_score_to_alert (ด้านล่าง)
+    "min_score_console_watchlist": 50,
     # --- SL: กันเคส zone แคบ/ATR หดตัวชั่วคราวจนได้ SL แคบผิดปกติ ---
     "min_sl_distance": 10.0,   # ระยะ SL ขั้นต่ำเป็นราคาจริง (เช่น เข้า 4124 SL ห่างอย่างน้อย 10.0 = 4114)
     "sl_atr_avg_period": 20,   # ใช้ ATR เฉลี่ยย้อนหลังกี่แท่งสำหรับคำนวณ buffer แทน ATR แท่งล่าสุดเป๊ะๆ
@@ -47,6 +49,7 @@ CONFIG = {
     # กลุ่ม Telegram แยกต่างหาก (optional) — ใช้เฉพาะ "สัญญาณเข้าเทรด" กับ "เตือนข่าวล่วงหน้า 1 ชม."
     # ถ้าไม่ตั้งค่า env ตัวนี้ไว้ ระบบจะไม่ส่งเข้ากลุ่ม (ส่งแค่ telegram_chat_id เดิมตามปกติ)
     "telegram_group_chat_id": os.environ.get("TELEGRAM_GROUP_CHAT_ID", ""),
+    # ตัวนี้คุมว่าจะยิง Telegram Alert จริงหรือไม่ (ต่างจาก min_score_console_watchlist ด้านบนที่แค่ print console)
     "min_score_to_alert": 70,
     "twelvedata_api_key": os.environ.get("TWELVEDATA_API_KEY", ""),
     "healthchecks_url": os.environ.get("HEALTHCHECKS_URL", ""),
