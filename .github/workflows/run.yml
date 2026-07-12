@@ -19,3 +19,4 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           HEALTHCHECKS_URL: ${{ secrets.HEALTHCHECKS_URL }}
           KVDB_BUCKET: ${{ secrets.KVDB_BUCKET }}
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
