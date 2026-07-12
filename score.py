@@ -4,6 +4,7 @@ from quality import (
     calc_ema_distance_score,
     calc_macd_slope,
 )
+from bias_4h import is_bias_aligned
 
 WEIGHTS = {
     "structure_event": 13,
@@ -18,10 +19,13 @@ WEIGHTS = {
     "ema_distance": 9,        # scale ตามระยะห่าง EMA fast-slow เทียบ ATR
     "macd_slope_confirm": 8,  # เต็มถ้า MACD Histogram ไปทางเดียวกับทิศทางที่จะเข้า (สุทธิ ไม่ต้องชันทุกแท่ง)
     "ema_bias_confluence": 8, # ใหม่: EMA Bias ตรงกับ Structure Trend หรือไม่
+    "bias4h_alignment": 8,     # ใหม่: 4H trend/zone สอดคล้องกับสัญญาณ 15M หรือไม่ (ไม่ veto แล้ว แค่ไม่ได้แต้มถ้าสวนทาง)
+    "htf_1h_alignment": 6,     # ใหม่: 1H trend สอดคล้องกับสัญญาณ 15M หรือไม่ (เช่นเดียวกัน ไม่ veto)
 }
 
 
-def calc_confidence_score(entry_signal, structure, df, config, rr_tp1):
+def calc_confidence_score(entry_signal, structure, df, config, rr_tp1,
+                           bias_4h=None, higher_tf_trend=None):
     score = 0
     breakdown = {}
 
@@ -108,5 +112,18 @@ def calc_confidence_score(entry_signal, structure, df, config, rr_tp1):
     if ema_bias == direction:
         score += WEIGHTS["ema_bias_confluence"]
         breakdown["ema_bias_confluence"] = WEIGHTS["ema_bias_confluence"]
+
+    # --- 4H Bias Alignment: ไม่ veto แล้ว แต่ถ้าสอดคล้องกันได้แต้มเพิ่ม ---
+    # (ถ้าสวนทางกัน แค่ไม่ได้แต้มตรงนี้ ไม่ได้ตัดสิทธิ์สัญญาณทั้งหมดเหมือนเดิม)
+    if bias_4h:
+        aligned, _ = is_bias_aligned(direction, bias_4h, config)
+        if aligned:
+            score += WEIGHTS["bias4h_alignment"]
+            breakdown["bias4h_alignment"] = WEIGHTS["bias4h_alignment"]
+
+    # --- 1H Trend Alignment: เช่นเดียวกัน ไม่ veto แค่ให้แต้มถ้าสอดคล้อง ---
+    if higher_tf_trend not in (None, "sideway") and higher_tf_trend == direction:
+        score += WEIGHTS["htf_1h_alignment"]
+        breakdown["htf_1h_alignment"] = WEIGHTS["htf_1h_alignment"]
 
     return {"score": round(score, 1), "breakdown": breakdown}

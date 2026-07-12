@@ -123,12 +123,15 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
     structure = analyze_structure(df, config)
     entry_signal = evaluate_entry(df, structure, config)
 
-    # --- กรองด้วย Bias เฟรม 4H (เทรนด์ใหญ่สุด + โซน Premium/Discount) — ชั้นบนสุดของ MTF ---
-    if entry_signal["valid"] and config.get("bias4h_filter_enabled", True) and bias_4h:
+    # --- Bias เฟรม 4H (เทรนด์ใหญ่สุด + โซน Premium/Discount) — ชั้นบนสุดของ MTF ---
+    # หมายเหตุ: ไม่ veto การเข้าไม้แล้ว (เปลี่ยนจาก hard filter เป็นส่วนหนึ่งของ confidence score
+    # ใน score.py แทน) เพราะเดิมถ้าสวนทางจะตัด entry_signal["valid"] เป็น False ตั้งแต่จุดนี้
+    # ทำให้ calc_confidence_score ด้านล่างไม่ถูกเรียกเลย (สกอร์ค้างที่ 0 เสมอ) ทั้งที่สัญญาณ 15M/5M
+    # อาจแข็งแรงมาก (เช่น ADX สูง, structure ชัดเจน) เพียงแค่สวนทางกับ 4H เท่านั้น
+    if config.get("bias4h_filter_enabled", True) and bias_4h:
         aligned, reason = is_bias_aligned(entry_signal["direction"], bias_4h, config)
         if not aligned:
-            entry_signal["reasons"].append(f"[4H Bias] {reason}")
-            entry_signal["valid"] = False
+            entry_signal["reasons"].append(f"[4H Bias] {reason} (ไม่ตัดสิทธิ์ แต่จะไม่ได้แต้ม bias4h_alignment)")
         else:
             zone_label = {"premium": "Premium", "discount": "Discount", "equilibrium": "Equilibrium"}.get(
                 bias_4h.get("zone"), "-"
@@ -137,14 +140,17 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                 f"[4H Bias] เทรนด์ 4H: {bias_4h.get('trend')} | โซนราคา: {zone_label} — สอดคล้องกับสัญญาณ 15M"
             )
 
-    # --- กรองสัญญาณที่สวนทางกับเทรนด์เฟรมใหญ่ (1H) ---
-    if entry_signal["valid"] and higher_tf_trend not in (None, "sideway"):
+    # --- เทรนด์เฟรมใหญ่ (1H) — เช่นเดียวกับ 4H ไม่ veto แล้ว แค่มีผลต่อคะแนนใน score.py ---
+    if higher_tf_trend not in (None, "sideway"):
         if entry_signal["direction"] != higher_tf_trend:
             entry_signal["reasons"].append(
                 f"สัญญาณ 15m เป็น {entry_signal['direction']} แต่เทรนด์ 1H เป็น {higher_tf_trend} "
-                f"(สวนทางกัน) — ไม่แนะนำเข้า"
+                f"(สวนทางกัน) — ไม่ได้แต้ม htf_1h_alignment"
             )
-            entry_signal["valid"] = False
+        else:
+            entry_signal["reasons"].append(
+                f"เทรนด์ 1H เป็น {higher_tf_trend} สอดคล้องกับสัญญาณ 15m"
+            )
 
     # --- กรองตลาด choppy/sideway ด้วย ADX ---
     if entry_signal["valid"]:
@@ -191,7 +197,8 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
         rr = {name: calc_risk_reward(entry_signal["entry_price"], stop_loss, price)
               for name, price in take_profits.items()}
         position = calc_position_size(account_balance, entry_signal["entry_price"], stop_loss, config)
-        confidence = calc_confidence_score(entry_signal, structure, df, config, rr["TP1"])
+        confidence = calc_confidence_score(entry_signal, structure, df, config, rr["TP1"],
+                                            bias_4h=bias_4h, higher_tf_trend=higher_tf_trend)
 
         if rr["TP1"] < config["min_rr"]:
             entry_signal["reasons"].append(
