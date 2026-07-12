@@ -44,6 +44,9 @@ CONFIG = {
     # --- Secrets: อ่านจาก GitHub Actions Secrets (Environment Variables) ---
     "telegram_token": os.environ.get("TELEGRAM_TOKEN", ""),
     "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID", ""),
+    # กลุ่ม Telegram แยกต่างหาก (optional) — ใช้เฉพาะ "สัญญาณเข้าเทรด" กับ "เตือนข่าวล่วงหน้า 1 ชม."
+    # ถ้าไม่ตั้งค่า env ตัวนี้ไว้ ระบบจะไม่ส่งเข้ากลุ่ม (ส่งแค่ telegram_chat_id เดิมตามปกติ)
+    "telegram_group_chat_id": os.environ.get("TELEGRAM_GROUP_CHAT_ID", ""),
     "min_score_to_alert": 70,
     "twelvedata_api_key": os.environ.get("TWELVEDATA_API_KEY", ""),
     "healthchecks_url": os.environ.get("HEALTHCHECKS_URL", ""),

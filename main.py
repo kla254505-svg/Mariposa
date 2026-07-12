@@ -283,21 +283,28 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                                     stop_loss, take_profits, rr, confidence, bias_4h=bias_4h,
                                     current_price=df["close"].iloc[-1], stale_threshold=stale_threshold)
 
+        # ปลายทางที่จะส่ง Alert: แชทเดิมเสมอ + กลุ่ม (ถ้าตั้งค่า telegram_group_chat_id ไว้)
+        alert_targets = [config["telegram_chat_id"]]
+        if config.get("telegram_group_chat_id"):
+            alert_targets.append(config["telegram_group_chat_id"])
+
         # แนบกราฟราคาไปด้วย (วาดจากข้อมูลที่ดึงมาอยู่แล้ว ไม่ต้องเรียก API เพิ่ม)
         # ถ้าวาดรูปหรือส่งรูปพลาดด้วยเหตุผลใดก็ตาม ให้ fallback ไปส่งเป็นข้อความล้วนแทน กันไม่ให้ alert หายไปเฉยๆ
-        sent = False
+        chart_path = None
         try:
             chart_path = build_entry_chart(
                 df, entry_signal, structure, out_path=f"/tmp/mariposa_chart_{symbol}.png"
             )
-            sent = send_telegram_photo(config["telegram_token"], config["telegram_chat_id"], chart_path, caption=msg)
         except Exception as e:
             print(f"[Chart Error] {e}")
 
-        if not sent:
-            sent = send_telegram_alert(config["telegram_token"], config["telegram_chat_id"], msg)
-
-        print("[Telegram] ส่งแจ้งเตือนสำเร็จ" if sent else "[Telegram] ส่งแจ้งเตือนล้มเหลว")
+        for target_chat_id in alert_targets:
+            sent = False
+            if chart_path:
+                sent = send_telegram_photo(config["telegram_token"], target_chat_id, chart_path, caption=msg)
+            if not sent:
+                sent = send_telegram_alert(config["telegram_token"], target_chat_id, msg)
+            print(f"[Telegram -> {target_chat_id}] ส่งแจ้งเตือนสำเร็จ" if sent else f"[Telegram -> {target_chat_id}] ส่งแจ้งเตือนล้มเหลว")
 
     # --- Dashboard: ส่งทุกรอบ แบบแก้ทับข้อความเดิม (ไม่สแปมแชท) ---
     dashboard_text = build_dashboard_message(
@@ -375,7 +382,11 @@ if __name__ == "__main__":
 
                 warning_text = check_and_send_pre_news_warning(CONFIG["kvdb_bucket"], display_symbol)
                 if warning_text:
-                    send_telegram_alert(CONFIG["telegram_token"], CONFIG["telegram_chat_id"], warning_text)
+                    news_targets = [CONFIG["telegram_chat_id"]]
+                    if CONFIG.get("telegram_group_chat_id"):
+                        news_targets.append(CONFIG["telegram_group_chat_id"])
+                    for target_chat_id in news_targets:
+                        send_telegram_alert(CONFIG["telegram_token"], target_chat_id, warning_text)
             except Exception as e:
                 print(f"[News Scheduler Error] {e}")
 
