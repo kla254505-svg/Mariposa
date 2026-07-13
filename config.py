@@ -43,6 +43,9 @@ CONFIG = {
     "min_sl_distance": 10.0,   # ระยะ SL ขั้นต่ำเป็นราคาจริง (เช่น เข้า 4124 SL ห่างอย่างน้อย 10.0 = 4114)
     "sl_atr_avg_period": 20,   # ใช้ ATR เฉลี่ยย้อนหลังกี่แท่งสำหรับคำนวณ buffer แทน ATR แท่งล่าสุดเป๊ะๆ
     "fib_levels": [0.382, 0.5, 0.618, 0.705, 0.79],
+    # --- Plan 2/3 (Breakout / สวนเทรนด์) จาก Hourly Briefing: เกณฑ์ยืนยันก่อนยิง Alert จริง ---
+    "breakout_confirm_atr_mult": 0.3,   # ราคาต้องปิดเลยระดับ swing high/low ไปเกิน 0.3*ATR ถึงจะนับว่า "ทะลุแรงๆ" จริง
+    "plan_alert_cooldown_minutes": 60,  # กันสแปม: ทิศทาง/แผนเดียวกัน จะไม่ยิงซ้ำถ้ายังไม่ผ่านช่วงเวลานี้
     # --- Secrets: อ่านจาก GitHub Actions Secrets (Environment Variables) ---
     "telegram_token": os.environ.get("TELEGRAM_TOKEN", ""),
     "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID", ""),

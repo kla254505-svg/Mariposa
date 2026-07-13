@@ -66,10 +66,12 @@ def build_breakout_plan(df, structure):
     return " | ".join(lines) if lines else "ยังไม่มีจุด trigger ที่ชดเจน"
 
 
-def build_counter_trend_plan(df, structure):
+def _evaluate_counter_trend_checklist(df, structure):
+    """ตัวช่วยกลาง: คำนวณ checklist สวนเทรนด์ครั้งเดียว ใช้ร่วมกันทั้ง build_counter_trend_plan (ข้อความ)
+    และ detect_counter_trend_trigger (เช็คว่าควรยิง Alert จริงไหม) กันตรรกะซ้ำซ้อนสองที่"""
     trend = structure["trend"]
     if trend == "sideway":
-        return "ตลาด sideway ไม่มเทรนด์หลักให้สวน ข้ามแผนนี้"
+        return None
 
     counter_direction = "bearish" if trend == "bullish" else "bullish"
 
@@ -84,7 +86,15 @@ def build_counter_trend_plan(df, structure):
         "รปแบบแท่งเทียนกลับตัว": candle_signal == counter_direction,
         "MACD Cross สวนเทรนด์": macd_cross == counter_direction,
     }
+    return counter_direction, checklist
 
+
+def build_counter_trend_plan(df, structure):
+    result = _evaluate_counter_trend_checklist(df, structure)
+    if result is None:
+        return "ตลาด sideway ไม่มเทรนด์หลักให้สวน ข้ามแผนนี้"
+
+    _, checklist = result
     passed = sum(checklist.values())
     total = len(checklist)
 
@@ -99,6 +109,49 @@ def build_counter_trend_plan(df, structure):
         lines.append("=> ยังไม่ครบเงื่อนไข ไม่แนะนำสวนเทรนดตอนนี้")
 
     return "\n".join(lines)
+
+
+def detect_breakout_trigger(df, structure, config):
+    """
+    เช็คว่าราคา 'ทะลุแรงๆ' ตาม Plan 2 (Breakout) จริงหรือยัง
+    'แรงๆ' = ปิดเลยระดับ swing high/low ล่าสุดไปเกิน buffer (คูณ ATR) ไม่ใช่แค่ wick แตะผ่านนิดเดียว
+    คืนค่า None ถ้ายังไม่ทะลุ, หรือ dict {"direction","level","price"} ถ้าทะลุแล้ว
+    """
+    swings = structure.get("last_swings", [])
+    if len(swings) < 2 or not len(df):
+        return None
+
+    highs = [p for p in swings if p["type"] == "high"]
+    lows = [p for p in swings if p["type"] == "low"]
+
+    current_price = df["close"].iloc[-1]
+    atr_val = df["atr"].iloc[-1] if "atr" in df.columns else 0
+    buffer = config.get("breakout_confirm_atr_mult", 0.3) * atr_val
+
+    if highs:
+        last_high = highs[-1]["price"]
+        if current_price > last_high + buffer:
+            return {"direction": "bullish", "level": last_high, "price": current_price}
+
+    if lows:
+        last_low = lows[-1]["price"]
+        if current_price < last_low - buffer:
+            return {"direction": "bearish", "level": last_low, "price": current_price}
+
+    return None
+
+
+def detect_counter_trend_trigger(df, structure):
+    """เช็คว่า Checklist สวนเทรนด์ (Plan 3) ผ่านครบทุกข้อแล้วหรือยัง
+    คืนค่า None ถ้ายังไม่ครบ, หรือ dict {"direction","checklist"} ถ้าครบแล้ว"""
+    result = _evaluate_counter_trend_checklist(df, structure)
+    if result is None:
+        return None
+
+    counter_direction, checklist = result
+    if all(checklist.values()):
+        return {"direction": counter_direction, "checklist": checklist}
+    return None
 
 
 def build_summary(structure, entry_signal):

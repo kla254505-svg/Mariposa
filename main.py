@@ -16,13 +16,14 @@ from score import calc_confidence_score
 from report import print_report
 from notify import send_telegram_alert, format_alert_message, send_or_edit_message, send_telegram_photo
 from chart import build_entry_chart
-from scenario import build_hourly_briefing
+from scenario import build_hourly_briefing, detect_breakout_trigger, detect_counter_trend_trigger
 from dashboard import build_dashboard_message
 from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
 from news_scheduler import refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning
+from cooldown import is_in_cooldown, mark_alert_sent
 
 
 def _current_hour_key():
@@ -368,6 +369,50 @@ if __name__ == "__main__":
             run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000,
                          higher_tf_trend=higher_tf_trend, session_info=session_info,
                          bias_4h=bias_4h, df_5m=df_5m)
+
+            # --- Plan 2/3 จาก Hourly Briefing (Breakout / สวนเทรนด์): เช็คทุกรอบว่า "เข้าออเดอร์จริง" หรือยัง ---
+            # ไม่ใช่แค่ข้อความในบรีฟฟิ่งเฉยๆ แล้ว ถ้าทริกเกอร์จริงจะยิง Telegram (แชทเดิม + กลุ่ม) พร้อมหมายเหตุ
+            # กันสแปมด้วย cooldown เดียวกับที่ cooldown.py เตรียมไว้ (เดิมมีฟังก์ชันนี้อยู่แล้วแต่ยังไม่เคยถูกเรียกใช้จริง)
+            try:
+                df_ind_plan = add_indicators(df, CONFIG)
+                structure_plan = analyze_structure(df_ind_plan, CONFIG)
+
+                plan_triggers = [
+                    ("plan2_breakout", "Breakout (แผนที่ 2)",
+                     detect_breakout_trigger(df_ind_plan, structure_plan, CONFIG),
+                     "ราคาทะลุระดับ {level:.4f} แรงๆ ที่ราคา {price:.4f}"),
+                    ("plan3_counter_trend", "สวนเทรนด์ (แผนที่ 3)",
+                     detect_counter_trend_trigger(df_ind_plan, structure_plan),
+                     "Checklist สวนเทรนด์ผ่านครบ 3/3 ข้อแล้ว"),
+                ]
+
+                for plan_key, plan_label, trigger, detail_template in plan_triggers:
+                    if not trigger:
+                        continue
+                    if is_in_cooldown(CONFIG["kvdb_bucket"], f"{display_symbol}_{plan_key}",
+                                       trigger["direction"], CONFIG.get("plan_alert_cooldown_minutes", 60)):
+                        continue
+
+                    direction_th = "LONG (ซื้อ)" if trigger["direction"] == "bullish" else "SHORT (ขาย)"
+                    detail = detail_template.format(**trigger) if "{" in detail_template else detail_template
+                    plan_msg = (
+                        f"🚨 <b>ออเดอร์เข้า — {plan_label}</b>\n"
+                        f"Symbol: {display_symbol} | ทิศทาง: {direction_th}\n"
+                        f"{detail}\n\n"
+                        "หมายเหตุ: สัญญาณนี้มาจาก Plan เสริมใน Hourly Briefing ไม่ใช่ระบบ Scoring หลัก "
+                        "ไม่ได้ผ่านฟิลเตอร์ 4H Bias/1H Trend/Session เหมือนสัญญาณเข้าเทรดปกติ (Plan 1) "
+                        "ควรพิจารณาความเสี่ยงเพิ่มเติมเอง หรือลดขนาดไม้ก่อนเข้า"
+                    )
+
+                    plan_alert_targets = [CONFIG["telegram_chat_id"]]
+                    if CONFIG.get("telegram_group_chat_id"):
+                        plan_alert_targets.append(CONFIG["telegram_group_chat_id"])
+                    for target_chat_id in plan_alert_targets:
+                        send_telegram_alert(CONFIG["telegram_token"], target_chat_id, plan_msg)
+
+                    mark_alert_sent(CONFIG["kvdb_bucket"], f"{display_symbol}_{plan_key}", trigger["direction"])
+            except Exception as e:
+                print(f"[Plan 2/3 Trigger Error] {display_symbol}: {e}")
 
             # --- ข่าว/ปฏิทินเศรษฐกิจ: แค่ข้อมูลประกอบการตัดสินใจ ไม่ยุ่งกับ entry logic ---
             # ห่อทั้งก้อนด้วย try/except เพราะเป็น 3rd-party ฟรี ไม่มี SLA ถ้าพังไม่ให้กระทบบอทหลัก
