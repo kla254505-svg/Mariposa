@@ -227,6 +227,9 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                 entry_signal["reasons"].append(f"[5M Trigger] {trigger['reason']}")
 
                 if trigger["confirmed"]:
+                    # ยืนยันจริงแล้ว -> เคลียร์ pending-marker เดิมทิ้ง กันไม่ให้ค้างไปงงตอน setup รอบหน้า
+                    kv_set(config["kvdb_bucket"], f"pending_plan1_{symbol}_{entry_signal['direction']}", "")
+
                     # เจอจุดกลับตัวจริงบน 5M แล้ว → ลอง "ลด SL ให้แคบลง" ถ้าจุดกลับตัวจริงใกล้กว่าโซน 15M เดิม
                     tightened_base = (
                         trigger["trigger_low"] if entry_signal["direction"] == "bullish"
@@ -267,6 +270,46 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                         "ยังไม่ยิง Alert เพราะรอการยืนยันกลับตัวบน 5M ก่อน (setup ผ่านเกณฑ์แล้ว แต่ยังไม่ trigger)"
                     )
                     entry_signal["alert_ready"] = False
+
+                    # --- แจ้งเตือนล่วงหน้า (Pending Order): setup ผ่านเกณฑ์ทุกข้อแล้ว รอแค่ 5M ยืนยัน ---
+                    # ให้ผู้ใช้ตั้ง Pending Order รอไว้ที่โซนนี้ได้เลย โดยไม่ต้องรอ Alert เต็มรูปแบบ
+                    # กันสแปม: เทียบกับ entry_price ที่เคยแจ้งไปล่าสุด ถ้ายังเป็นโซนเดิม (ใกล้เคียงกัน) จะไม่แจ้งซ้ำ
+                    try:
+                        pending_key = f"pending_plan1_{symbol}_{entry_signal['direction']}"
+                        stale_threshold_pending = (2 * current_atr) if current_atr else config.get("min_sl_distance", 10.0)
+                        raw_pending = kv_get(config["kvdb_bucket"], pending_key)
+                        already_notified = False
+                        if raw_pending:
+                            try:
+                                prev = json.loads(raw_pending)
+                                if abs(prev.get("entry_price", 0) - entry_signal["entry_price"]) < stale_threshold_pending:
+                                    already_notified = True
+                            except Exception:
+                                pass
+
+                        if not already_notified:
+                            zone = get_entry_zone_bounds(entry_signal)
+                            direction_th = "LONG (ซื้อ)" if entry_signal["direction"] == "bullish" else "SHORT (ขาย)"
+                            pending_msg = (
+                                f"🕒 <b>เตรียมตั้ง Pending Order — {symbol}</b>\n"
+                                f"ทิศทาง: {direction_th} | Score: {confidence['score']}/100 (ผ่านเกณฑ์แล้ว)\n"
+                                f"โซนรอเข้า: {zone['bottom']:.4f} - {zone['top']:.4f}\n"
+                                f"SL (คาดการณ์): {stop_loss:.4f}\n\n"
+                                "หมายเหตุ: setup นี้ผ่านทุกฟิลเตอร์ (4H/1H/ADX/Session/Score) แล้ว "
+                                "เหลือแค่รอราคาวิ่งมาแตะโซนแล้วมี reaction กลับตัวจริงบน 5M เพื่อยืนยัน "
+                                "ถ้าตั้ง Pending Order ไว้ล่วงหน้าได้ ให้ตั้งตามโซนนี้ แต่ระวัง: ราคาอาจขยับก่อนถึงเวลาจริง "
+                                "และ SL/TP ที่ยืนยันจะมาอีกทีตอน Alert เต็มรูปแบบ (เมื่อ 5M trigger ยืนยันแล้ว)"
+                            )
+                            pending_targets = [config["telegram_chat_id"]]
+                            if config.get("telegram_group_chat_id"):
+                                pending_targets.append(config["telegram_group_chat_id"])
+                            for target_chat_id in pending_targets:
+                                send_telegram_alert(config["telegram_token"], target_chat_id, pending_msg)
+
+                            kv_set(config["kvdb_bucket"], pending_key,
+                                   json.dumps({"entry_price": entry_signal["entry_price"]}))
+                    except Exception as e:
+                        print(f"[Pending Order Notice Error] {e}")
             else:
                 entry_signal["reasons"].append(
                     "[5M Trigger] ไม่มีโซน OB/FVG/Structure จาก 15M ให้ตรวจสอบ reaction"
