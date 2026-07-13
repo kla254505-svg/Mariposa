@@ -23,7 +23,6 @@ from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
 from news_scheduler import refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning
-from cooldown import is_in_cooldown, mark_alert_sent
 
 
 def _current_hour_key():
@@ -415,7 +414,12 @@ if __name__ == "__main__":
 
             # --- Plan 2/3 จาก Hourly Briefing (Breakout / สวนเทรนด์): เช็คทุกรอบว่า "เข้าออเดอร์จริง" หรือยัง ---
             # ไม่ใช่แค่ข้อความในบรีฟฟิ่งเฉยๆ แล้ว ถ้าทริกเกอร์จริงจะยิง Telegram (แชทเดิม + กลุ่ม) พร้อมหมายเหตุ
-            # กันสแปมด้วย cooldown เดียวกับที่ cooldown.py เตรียมไว้ (เดิมมีฟังก์ชันนี้อยู่แล้วแต่ยังไม่เคยถูกเรียกใช้จริง)
+            #
+            # กันสแปมแบบ "state-based" แทน cooldown ตามเวลา: เดิมใช้ is_in_cooldown/mark_alert_sent (ตามนาที)
+            # แต่พบว่าพอเวลาผ่านไปเกิน cooldown มันเตือนซ้ำระดับ Breakout เดิมที่ยังไม่มีสวิงใหม่เกิดขึ้นจริง
+            # (โมเมนตัมจบไปแล้ว แค่ยังไม่มีสวิงไฮ/โลว์ใหม่ให้ระบบอ้างอิง) ตอนนี้เปลี่ยนมา dedup ตาม "เงื่อนไขจริง"
+            # แทนเวลา: Plan 2 จะแจ้งซ้ำก็ต่อเมื่อสวิงไฮ/โลว์ที่ทะลุเปลี่ยนเป็นระดับใหม่เท่านั้น, Plan 3 จะเงียบไปจนกว่า
+            # checklist จะหลุด (ไม่ครบ 3/3) แล้วกลับมาครบใหม่อีกครั้ง (rising-edge) ไม่ใช่แจ้งซ้ำทุกช่วงเวลาที่ตั้งไว้
             try:
                 df_ind_plan = add_indicators(df, CONFIG)
                 structure_plan = analyze_structure(df_ind_plan, CONFIG)
@@ -430,11 +434,25 @@ if __name__ == "__main__":
                 ]
 
                 for plan_key, plan_label, trigger, detail_template in plan_triggers:
+                    state_key = f"plan_state_{display_symbol}_{plan_key}"
+
                     if not trigger:
+                        # เงื่อนไขไม่ตรงแล้วในรอบนี้ (breakout ยังไม่มีสวิงใหม่ / checklist หลุดจาก 3/3)
+                        # เคลียร์ state ทิ้ง รอบหน้าถ้ากลับมาเป็นจริงใหม่จะได้แจ้งเตือนสดอีกครั้ง (ไม่ใช่ของค้าง)
+                        kv_set(CONFIG["kvdb_bucket"], state_key, "")
                         continue
-                    if is_in_cooldown(CONFIG["kvdb_bucket"], f"{display_symbol}_{plan_key}",
-                                       trigger["direction"], CONFIG.get("plan_alert_cooldown_minutes", 60)):
-                        continue
+
+                    if plan_key == "plan2_breakout":
+                        # dedup ตาม "ระดับที่ทะลุ" ไม่ใช่เวลา — แจ้งซ้ำก็ต่อเมื่อมีสวิงไฮ/โลว์ใหม่จริงๆ เท่านั้น
+                        dedup_value = f"{trigger['direction']}:{trigger['level']:.4f}"
+                    else:
+                        # plan3: ตราบใด trigger ไม่ None แปลว่า checklist ครบ 3/3 อยู่แล้วเสมอ (เงื่อนไขตายตัว)
+                        # dedup แค่ทิศทาง เพื่อกันไม่ให้แจ้งซ้ำขณะเงื่อนไขยังเป็นจริงต่อเนื่องรอบต่อรอบ
+                        dedup_value = trigger["direction"]
+
+                    prev_value = kv_get(CONFIG["kvdb_bucket"], state_key)
+                    if prev_value == dedup_value:
+                        continue  # เงื่อนไขเดิมที่เคยแจ้งไปแล้ว ไม่แจ้งซ้ำ
 
                     direction_th = "LONG (ซื้อ)" if trigger["direction"] == "bullish" else "SHORT (ขาย)"
                     detail = detail_template.format(**trigger) if "{" in detail_template else detail_template
@@ -453,7 +471,7 @@ if __name__ == "__main__":
                     for target_chat_id in plan_alert_targets:
                         send_telegram_alert(CONFIG["telegram_token"], target_chat_id, plan_msg)
 
-                    mark_alert_sent(CONFIG["kvdb_bucket"], f"{display_symbol}_{plan_key}", trigger["direction"])
+                    kv_set(CONFIG["kvdb_bucket"], state_key, dedup_value)
             except Exception as e:
                 print(f"[Plan 2/3 Trigger Error] {display_symbol}: {e}")
 
