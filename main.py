@@ -16,7 +16,10 @@ from score import calc_confidence_score
 from report import print_report
 from notify import send_telegram_alert, format_alert_message, send_or_edit_message, send_telegram_photo
 from chart import build_entry_chart
-from scenario import build_hourly_briefing, detect_breakout_trigger, detect_counter_trend_trigger
+from scenario import (
+    build_hourly_briefing, build_pullback_plan,
+    detect_breakout_trigger, detect_counter_trend_trigger,
+)
 from dashboard import build_dashboard_message
 from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
@@ -292,6 +295,7 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                             pending_msg = (
                                 f"🕒 <b>เตรียมตั้ง Pending Order — {symbol}</b>\n"
                                 f"ทิศทาง: {direction_th} | Score: {confidence['score']}/100 (ผ่านเกณฑ์แล้ว)\n"
+                                f"Entry (คาดการณ์): {entry_signal['entry_price']:.4f}\n"
                                 f"โซนรอเข้า: {zone['bottom']:.4f} - {zone['top']:.4f}\n"
                                 f"SL (คาดการณ์): {stop_loss:.4f}\n\n"
                                 "หมายเหตุ: setup นี้ผ่านทุกฟิลเตอร์ (4H/1H/ADX/Session/Score) แล้ว "
@@ -508,6 +512,20 @@ if __name__ == "__main__":
                 )
                 if sent:
                     mark_hourly_briefing_sent(CONFIG["kvdb_bucket"], display_symbol)
+
+                # ส่งเฉพาะ "แผนที่ 1" (รอ Pullback) เข้ากลุ่มด้วย ตามที่ขอเพิ่ม
+                # ไม่ส่ง Dashboard/Briefing เต็มรูปแบบเข้ากลุ่ม (ยังคงหลักการเดิม: กลุ่มได้แค่ข้อมูล actionable)
+                # แต่ Plan 1 เป็นแผนหลักที่มักใช้ตัดสินใจตั้ง Pending Order ไว้ล่วงหน้า เลยควรเห็นในกลุ่มด้วย
+                # ใช้ send_or_edit_message เหมือนกัน (edit ทับข้อความเดิมทุกชั่วโมง ไม่สแปมแชทกลุ่ม)
+                if CONFIG.get("telegram_group_chat_id"):
+                    plan1_text = build_pullback_plan(df_ind, structure, entry_signal, CONFIG)
+                    group_plan1_msg = (
+                        f"📋 <b>แผนที่ 1 — รอ Pullback ตามเทรนด์ ({display_symbol})</b>\n\n{plan1_text}"
+                    )
+                    send_or_edit_message(
+                        CONFIG["telegram_token"], CONFIG["telegram_group_chat_id"], group_plan1_msg,
+                        CONFIG["kvdb_bucket"], key=f"briefing_plan1_{display_symbol}_group"
+                    )
     finally:
         # ping บอก Healthchecks.io เสมอ ไม่ว่าข้างบนจะสำเร็จหรือมี error ก็ตาม
         # (นี่คือหน้าที่จริงของ Dead Man's Switch — ต้องรู้ว่าบอทยังไม่ตายแม้ตอน API ล่ม)
