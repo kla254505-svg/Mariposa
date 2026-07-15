@@ -26,7 +26,9 @@ def fetch_usd_calendar_events(min_impact=("High", "Medium")):
     """
     ดึงปฏิทินเศรษฐกิจทั้งสัปดาห์จาก Forex Factory แล้วกรองเฉพาะสกุล USD (กระทบทองมากสุด)
     ที่ impact อยู่ใน min_impact คืนค่า list ของ dict:
-      {'title': str, 'time': datetime (UTC), 'impact': str, 'forecast': str, 'previous': str}
+      {'title': str, 'time': datetime (UTC), 'impact': str, 'forecast': str, 'previous': str, 'actual': str}
+    หมายเหตุ: 'actual' จะว่างเปล่าจนกว่าข่าวจะประกาศผลจริง ต้องเรียกฟังก์ชันนี้ใหม่หลังเวลาข่าวผ่านไปแล้ว
+    ถึงจะได้ค่า actual ที่อัปเดต (ตอน cache ตอนเที่ยงคืนจะยังว่างอยู่เสมอ เพราะข่าวยังไม่เกิด)
     คืนค่า [] เงียบๆ ถ้าดึงไม่สำเร็จ (ไม่ throw exception)
     """
     try:
@@ -54,6 +56,7 @@ def fetch_usd_calendar_events(min_impact=("High", "Medium")):
                 "impact": e.get("impact", ""),
                 "forecast": e.get("forecast", ""),
                 "previous": e.get("previous", ""),
+                "actual": e.get("actual", ""),
             })
         except Exception:
             continue  # ข้าม event ที่ format ผิดปกติ ไม่ให้พังทั้งชุด

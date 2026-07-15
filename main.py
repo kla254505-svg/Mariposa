@@ -25,7 +25,10 @@ from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
-from news_scheduler import refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning
+from news_scheduler import (
+    refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning,
+    check_and_send_post_news_result,
+)
 
 
 def _current_hour_key():
@@ -489,6 +492,12 @@ if __name__ == "__main__":
                         CONFIG["telegram_token"], CONFIG["telegram_chat_id"], summary_text,
                         CONFIG["kvdb_bucket"], key=f"news_summary_{display_symbol}"
                     )
+                    # ส่งเข้ากลุ่มด้วย ถ้าตั้งค่าไว้ (แต่ก่อนหน้านี้ตกหล่นไป ทำให้ข่าวไม่เด้งในกลุ่มเลย)
+                    if CONFIG.get("telegram_group_chat_id"):
+                        send_or_edit_message(
+                            CONFIG["telegram_token"], CONFIG["telegram_group_chat_id"], summary_text,
+                            CONFIG["kvdb_bucket"], key=f"news_summary_{display_symbol}_group"
+                        )
 
                 warning_text = check_and_send_pre_news_warning(CONFIG["kvdb_bucket"], display_symbol)
                 if warning_text:
@@ -497,6 +506,15 @@ if __name__ == "__main__":
                         news_targets.append(CONFIG["telegram_group_chat_id"])
                     for target_chat_id in news_targets:
                         send_telegram_alert(CONFIG["telegram_token"], target_chat_id, warning_text)
+
+                # --- ผลข่าวหลังประกาศจริง (actual vs forecast) — เพิ่มใหม่ ---
+                result_text = check_and_send_post_news_result(CONFIG["kvdb_bucket"], display_symbol)
+                if result_text:
+                    result_targets = [CONFIG["telegram_chat_id"]]
+                    if CONFIG.get("telegram_group_chat_id"):
+                        result_targets.append(CONFIG["telegram_group_chat_id"])
+                    for target_chat_id in result_targets:
+                        send_telegram_alert(CONFIG["telegram_token"], target_chat_id, result_text)
             except Exception as e:
                 print(f"[News Scheduler Error] {e}")
 
