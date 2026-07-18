@@ -3,3 +3,4 @@ numpy
 requests
 matplotlib
 flask
+python-telegram-bot
