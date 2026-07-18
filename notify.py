@@ -1,4 +1,5 @@
 import requests
+from kvstore import kv_get, kv_set
 
 
 def send_telegram_alert(token, chat_id, message):
@@ -73,13 +74,19 @@ def format_alert_message(symbol, timeframe, structure, entry_signal,
                 f"ให้ถือว่าสัญญาณนี้หมดอายุแล้ว ไม่ควรเข้าตาม — เช็ค Dashboard ล่าสุดก่อนเสมอ"
             )
     return "\n".join(lines)
-from kvstore import kv_get, kv_set
 
 
 def send_or_edit_message(token, chat_id, message, kvdb_bucket, key="briefing_message_id"):
     """
     ส่งข้อความใหม่ถ้ายังไม่เคยมีมาก่อน
     ถ้าเคยส่งแล้ว จะ edit ข้อความเดิมทับแทนการส่งใหม่ (กันแชทรก)
+
+    หมายเหตุสำคัญ: Telegram API จะคืน HTTP 400 "message is not modified" ถ้าเนื้อหาที่จะ edit
+    เหมือนเป๊ะกับข้อความเดิมทุกตัวอักษร (เช่น รอบนี้วิเคราะห์ได้ผลลัพธ์เหมือนรอบก่อนหน้าเป๊ะๆ)
+    เดิมโค้ดตีความ error นี้ว่า "edit ล้มเหลว" แล้ว fallback ไปส่งข้อความใหม่ ทำให้เกิดข้อความซ้ำ
+    2 ข้อความในแชท (ข้อความเก่าที่เนื้อหาถูกต้องอยู่แล้ว + ข้อความใหม่ที่เพิ่งส่งซ้ำเข้าไป)
+    ตอนนี้เช็คแยกเคสนี้ออกมาก่อน ถ้าเจอให้ถือว่า "สำเร็จ" เลย (เนื้อหาที่ต้องการก็อยู่ในแชทแล้ว
+    ไม่จำเป็นต้องส่งซ้ำ) ไม่ตกไปที่ fallback ส่งใหม่
     """
     message_id = kv_get(kvdb_bucket, key)
 
@@ -95,9 +102,21 @@ def send_or_edit_message(token, chat_id, message, kvdb_bucket, key="briefing_mes
             resp = requests.post(edit_url, data=payload, timeout=10)
             if resp.status_code == 200 and resp.json().get("ok"):
                 return True
+
+            # เช็คเคส "เนื้อหาเดิมไม่มีอะไรเปลี่ยน" แยกออกมาก่อน — Telegram ตอบ 400 กลับมาพร้อม
+            # description มีคำว่า "message is not modified" ซึ่งไม่ใช่ error จริง แค่บอกว่า
+            # ข้อความในแชทตอนนี้ตรงกับที่เราต้องการอยู่แล้ว ถือว่า "สำเร็จ" ไม่ต้อง fallback ไปส่งใหม่
+            try:
+                err_description = resp.json().get("description", "")
+            except Exception:
+                err_description = ""
+            if "message is not modified" in err_description.lower():
+                return True
+
+            print(f"[Telegram Edit Error] HTTP {resp.status_code}: {err_description}")
         except Exception as e:
             print(f"[Telegram Edit Error] {e}")
-        # ถ้า edit ไม่สำเร็จ (เช่นข้อความถูกลบไปแล้ว) ให้ตกไปส่งใหม่ด้านล่าง
+        # ถ้า edit ล้มเหลวด้วยเหตุผลอื่นจริงๆ (เช่นข้อความถูกลบไปแล้ว) ให้ตกไปส่งใหม่ด้านล่าง
 
     send_url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
