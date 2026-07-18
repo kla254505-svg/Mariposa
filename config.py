@@ -52,6 +52,14 @@ CONFIG = {
     # กลุ่ม Telegram แยกต่างหาก (optional) — ใช้เฉพาะ "สัญญาณเข้าเทรด" กับ "เตือนข่าวล่วงหน้า 1 ชม."
     # ถ้าไม่ตั้งค่า env ตัวนี้ไว้ ระบบจะไม่ส่งเข้ากลุ่ม (ส่งแค่ telegram_chat_id เดิมตามปกติ)
     "telegram_group_chat_id": os.environ.get("TELEGRAM_GROUP_CHAT_ID", ""),
+    # ID ผู้ใช้ Telegram ของเจ้าของบอท (ตัวเลข ไม่ใช่ username) — คำสั่ง /order /trend /news /status /summary
+    # จะตอบเฉพาะคนนี้เท่านั้น คนอื่นในกลุ่มพิมพ์คำสั่งจะถูกเมินเงียบๆ หาได้จาก @userinfobot บน Telegram
+    # ถ้าไม่ตั้งค่านี้ไว้ ระบบจะไม่ประมวลผลคำสั่งใดๆ เลย (ปลอดภัยไว้ก่อน)
+    "telegram_owner_id": os.environ.get("TELEGRAM_OWNER_ID", ""),
+    # ปิด/เปิดการแจ้งเตือนอัตโนมัติ (Push) ทั้งหมด — ถ้า False บอทจะเงียบสนิท ไม่ส่งอะไรเองเลย
+    # ต้องพิมพ์คำสั่ง /order /trend /news /status /summary เอาเองถึงจะได้คำตอบ (Pull-only mode)
+    # ตั้งเป็น True เมื่อไหร่ก็ได้ถ้าอยากได้ Push กลับมาเหมือนเดิม ไม่ต้องแก้โค้ดที่อื่นเลย
+    "push_notifications_enabled": False,
     # ตัวนี้คุมว่าจะยิง Telegram Alert จริงหรือไม่ (ต่างจาก min_score_console_watchlist ด้านบนที่แค่ print console)
     "min_score_to_alert": 45,
     "twelvedata_api_key": os.environ.get("TWELVEDATA_API_KEY", ""),

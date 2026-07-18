@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from config import CONFIG
 from indicator import add_indicators, is_atr_contracting
@@ -25,9 +25,11 @@ from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
+from orders import add_order, update_orders_status, build_orders_dashboard
+from telegram_bot import handle_telegram_commands
 from news_scheduler import (
     refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning,
-    check_and_send_post_news_result,
+    check_and_send_post_news_result, is_in_news_blackout,
 )
 
 
@@ -82,6 +84,24 @@ def should_send_hourly_briefing(kvdb_bucket, symbol):
 
 def mark_hourly_briefing_sent(kvdb_bucket, symbol):
     kv_set(kvdb_bucket, f"briefing_hour_{symbol}", _current_hour_key())
+
+
+def should_send_daily_summary(kvdb_bucket, symbol):
+    """
+    เช็คว่าถึงเวลาสรุปผลประจำวันหรือยัง (เวลาไทย 23:55-23:59 — ใกล้เที่ยงคืนที่สุดในกรอบ cron ทุก 5 นาที
+    เพราะไม่มีทางชนเวลา 23:59:00 เป๊ะๆ ได้ ใช้หน้าต่าง 5 นาทีสุดท้ายของวันแทน)
+    """
+    now = datetime.now(timezone(timedelta(hours=7)))
+    if not (now.hour == 23 and now.minute >= 55):
+        return False
+    today_str = now.strftime("%Y-%m-%d")
+    last_sent = kv_get(kvdb_bucket, f"daily_summary_date_{symbol}")
+    return last_sent != today_str
+
+
+def mark_daily_summary_sent(kvdb_bucket, symbol):
+    today_str = datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d")
+    kv_set(kvdb_bucket, f"daily_summary_date_{symbol}", today_str)
 
 
 def ping_healthcheck(url):
@@ -306,11 +326,12 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                                 "ถ้าตั้ง Pending Order ไว้ล่วงหน้าได้ ให้ตั้งตามโซนนี้ แต่ระวัง: ราคาอาจขยับก่อนถึงเวลาจริง "
                                 "และ SL/TP ที่ยืนยันจะมาอีกทีตอน Alert เต็มรูปแบบ (เมื่อ 5M trigger ยืนยันแล้ว)"
                             )
-                            pending_targets = [config["telegram_chat_id"]]
-                            if config.get("telegram_group_chat_id"):
-                                pending_targets.append(config["telegram_group_chat_id"])
-                            for target_chat_id in pending_targets:
-                                send_telegram_alert(config["telegram_token"], target_chat_id, pending_msg)
+                            if config.get("push_notifications_enabled", True):
+                                pending_targets = [config["telegram_chat_id"]]
+                                if config.get("telegram_group_chat_id"):
+                                    pending_targets.append(config["telegram_group_chat_id"])
+                                for target_chat_id in pending_targets:
+                                    send_telegram_alert(config["telegram_token"], target_chat_id, pending_msg)
 
                             kv_set(config["kvdb_bucket"], pending_key,
                                    json.dumps({"entry_price": entry_signal["entry_price"]}))
@@ -324,46 +345,67 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
     print_report(symbol, timeframe, structure, entry_signal, stop_loss,
                  take_profits, position, rr, confidence, config)
 
+    # --- ระงับ Alert ชั่วคราวถ้าอยู่ในช่วงห้ามเทรดรอบข่าวสำคัญ (±60 นาที) ---
+    if entry_signal.get("alert_ready"):
+        try:
+            in_blackout, blackout_event = is_in_news_blackout(config["kvdb_bucket"], symbol)
+        except Exception:
+            in_blackout, blackout_event = False, None
+        if in_blackout:
+            entry_signal["reasons"].append(
+                f"อยู่ในช่วงห้ามเทรดรอบข่าว \"{blackout_event['title']}\" (±60 นาที) — ระงับ Alert ชั่วคราว"
+            )
+            entry_signal["alert_ready"] = False
+
     # --- ส่ง Telegram Alert เมื่อ signal ผ่านเกณฑ์กฎหลัก "และ" ผ่านเกณฑ์คะแนนขั้นต่ำ ---
     if entry_signal.get("alert_ready"):
-        # threshold ไว้บอกว่า "ห่างจาก Entry เท่าไหร่ถึงถือว่าสัญญาณหมดอายุ" ใช้ 2x ATR เฉลี่ย
-        # (ตัวเดียวกับที่ใช้คำนวณ SL) หรือ fallback เป็น min_sl_distance ถ้า ATR ใช้ไม่ได้
-        stale_threshold = (2 * current_atr) if current_atr else config.get("min_sl_distance", 10.0)
-        msg = format_alert_message(symbol, timeframe, structure, entry_signal,
-                                    stop_loss, take_profits, rr, confidence, bias_4h=bias_4h,
-                                    current_price=df["close"].iloc[-1], stale_threshold=stale_threshold)
+        if config.get("push_notifications_enabled", True):
+            # threshold ไว้บอกว่า "ห่างจาก Entry เท่าไหร่ถึงถือว่าสัญญาณหมดอายุ" ใช้ 2x ATR เฉลี่ย
+            # (ตัวเดียวกับที่ใช้คำนวณ SL) หรือ fallback เป็น min_sl_distance ถ้า ATR ใช้ไม่ได้
+            stale_threshold = (2 * current_atr) if current_atr else config.get("min_sl_distance", 10.0)
+            msg = format_alert_message(symbol, timeframe, structure, entry_signal,
+                                        stop_loss, take_profits, rr, confidence, bias_4h=bias_4h,
+                                        current_price=df["close"].iloc[-1], stale_threshold=stale_threshold)
 
-        # ปลายทางที่จะส่ง Alert: แชทเดิมเสมอ + กลุ่ม (ถ้าตั้งค่า telegram_group_chat_id ไว้)
-        alert_targets = [config["telegram_chat_id"]]
-        if config.get("telegram_group_chat_id"):
-            alert_targets.append(config["telegram_group_chat_id"])
+            # ปลายทางที่จะส่ง Alert: แชทเดิมเสมอ + กลุ่ม (ถ้าตั้งค่า telegram_group_chat_id ไว้)
+            alert_targets = [config["telegram_chat_id"]]
+            if config.get("telegram_group_chat_id"):
+                alert_targets.append(config["telegram_group_chat_id"])
 
-        # แนบกราฟราคาไปด้วย (วาดจากข้อมูลที่ดึงมาอยู่แล้ว ไม่ต้องเรียก API เพิ่ม)
-        # ถ้าวาดรูปหรือส่งรูปพลาดด้วยเหตุผลใดก็ตาม ให้ fallback ไปส่งเป็นข้อความล้วนแทน กันไม่ให้ alert หายไปเฉยๆ
-        chart_path = None
+            # แนบกราฟราคาไปด้วย (วาดจากข้อมูลที่ดึงมาอยู่แล้ว ไม่ต้องเรียก API เพิ่ม)
+            # ถ้าวาดรูปหรือส่งรูปพลาดด้วยเหตุผลใดก็ตาม ให้ fallback ไปส่งเป็นข้อความล้วนแทน กันไม่ให้ alert หายไปเฉยๆ
+            chart_path = None
+            try:
+                chart_path = build_entry_chart(
+                    df, entry_signal, structure, out_path=f"/tmp/mariposa_chart_{symbol}.png"
+                )
+            except Exception as e:
+                print(f"[Chart Error] {e}")
+
+            for target_chat_id in alert_targets:
+                sent = False
+                if chart_path:
+                    sent = send_telegram_photo(config["telegram_token"], target_chat_id, chart_path, caption=msg)
+                if not sent:
+                    sent = send_telegram_alert(config["telegram_token"], target_chat_id, msg)
+                print(f"[Telegram -> {target_chat_id}] ส่งแจ้งเตือนสำเร็จ" if sent else f"[Telegram -> {target_chat_id}] ส่งแจ้งเตือนล้มเหลว")
+
+        # --- บันทึกออเดอร์ไว้ให้ /summary และสรุปรายวันเช็คผล TP/SL ย้อนหลังได้ (ทำเสมอ ไม่ว่าจะ push หรือไม่) ---
         try:
-            chart_path = build_entry_chart(
-                df, entry_signal, structure, out_path=f"/tmp/mariposa_chart_{symbol}.png"
-            )
+            add_order(config["kvdb_bucket"], symbol, entry_signal["direction"],
+                      entry_signal["entry_price"], stop_loss, take_profits, confidence["score"])
         except Exception as e:
-            print(f"[Chart Error] {e}")
+            print(f"[Order Tracking Error] {e}")
 
-        for target_chat_id in alert_targets:
-            sent = False
-            if chart_path:
-                sent = send_telegram_photo(config["telegram_token"], target_chat_id, chart_path, caption=msg)
-            if not sent:
-                sent = send_telegram_alert(config["telegram_token"], target_chat_id, msg)
-            print(f"[Telegram -> {target_chat_id}] ส่งแจ้งเตือนสำเร็จ" if sent else f"[Telegram -> {target_chat_id}] ส่งแจ้งเตือนล้มเหลว")
-
-    # --- Dashboard: ส่งทุกรอบ แบบแก้ทับข้อความเดิม (ไม่สแปมแชท) ---
-    dashboard_text = build_dashboard_message(
-        symbol, timeframe, df, structure, entry_signal, confidence, session_info, config, bias_4h=bias_4h
-    )
-    send_or_edit_message(
-        config["telegram_token"], config["telegram_chat_id"], dashboard_text,
-        config["kvdb_bucket"], key=f"dashboard_{symbol}"
-    )
+    # --- Dashboard: ส่งทุกรอบ แบบแก้ทับข้อความเดิม (ไม่สแปมแชท) — ข้ามถ้าปิด push ไว้ (ดูผ่าน /status แทน) ---
+    if config.get("push_notifications_enabled", True):
+        dashboard_text = build_dashboard_message(
+            symbol, timeframe, df, structure, entry_signal, confidence, session_info, config, bias_4h=bias_4h
+        )
+        send_or_edit_message(
+            config["telegram_token"], config["telegram_chat_id"], dashboard_text,
+            config["kvdb_bucket"], key=f"dashboard_{symbol}"
+        )
 
 
 if __name__ == "__main__":
@@ -419,6 +461,12 @@ if __name__ == "__main__":
                          higher_tf_trend=higher_tf_trend, session_info=session_info,
                          bias_4h=bias_4h, df_5m=df_5m)
 
+            # --- เช็คราคาปัจจุบันเทียบ SL/TP1 ของออเดอร์ที่ยัง 'running' ทุกรอบ (ให้ /summary ข้อมูลสด) ---
+            try:
+                update_orders_status(CONFIG["kvdb_bucket"], display_symbol, df["close"].iloc[-1])
+            except Exception as e:
+                print(f"[Order Status Update Error] {display_symbol}: {e}")
+
             # --- Plan 2/3 จาก Hourly Briefing (Breakout / สวนเทรนด์): เช็คทุกรอบว่า "เข้าออเดอร์จริง" หรือยัง ---
             # ไม่ใช่แค่ข้อความในบรีฟฟิ่งเฉยๆ แล้ว ถ้าทริกเกอร์จริงจะยิง Telegram (แชทเดิม + กลุ่ม) พร้อมหมายเหตุ
             #
@@ -440,6 +488,9 @@ if __name__ == "__main__":
                      "Checklist สวนเทรนด์ผ่านครบ 3/3 ข้อแล้ว"),
                 ]
 
+                # เช็คครั้งเดียวก่อนเข้าลูป ใช้ร่วมกันทั้ง Plan 2/3 (ข่าวเดียวกัน ไม่ต้องเช็คซ้ำต่อแผน)
+                plan_blackout, plan_blackout_event = is_in_news_blackout(CONFIG["kvdb_bucket"], display_symbol)
+
                 for plan_key, plan_label, trigger, detail_template in plan_triggers:
                     state_key = f"plan_state_{display_symbol}_{plan_key}"
 
@@ -447,6 +498,11 @@ if __name__ == "__main__":
                         # เงื่อนไขไม่ตรงแล้วในรอบนี้ (breakout ยังไม่มีสวิงใหม่ / checklist หลุดจาก 3/3)
                         # เคลียร์ state ทิ้ง รอบหน้าถ้ากลับมาเป็นจริงใหม่จะได้แจ้งเตือนสดอีกครั้ง (ไม่ใช่ของค้าง)
                         kv_set(CONFIG["kvdb_bucket"], state_key, "")
+                        continue
+
+                    if plan_blackout:
+                        # อยู่ในช่วงห้ามเทรดรอบข่าว -> ข้ามไปเงียบๆ ไม่ mark state (กันไม่ให้พอข่าวผ่านไปแล้ว
+                        # เงื่อนไขเดิมยังจริงอยู่ แต่ถูก dedup ทิ้งเพราะเข้าใจผิดว่าเคยแจ้งไปแล้วตอนที่จริงแค่ถูกระงับ)
                         continue
 
                     if plan_key == "plan2_breakout":
@@ -472,54 +528,87 @@ if __name__ == "__main__":
                         "ควรพิจารณาความเสี่ยงเพิ่มเติมเอง หรือลดขนาดไม้ก่อนเข้า"
                     )
 
-                    plan_alert_targets = [CONFIG["telegram_chat_id"]]
-                    if CONFIG.get("telegram_group_chat_id"):
-                        plan_alert_targets.append(CONFIG["telegram_group_chat_id"])
-                    for target_chat_id in plan_alert_targets:
-                        send_telegram_alert(CONFIG["telegram_token"], target_chat_id, plan_msg)
+                    if CONFIG.get("push_notifications_enabled", True):
+                        plan_alert_targets = [CONFIG["telegram_chat_id"]]
+                        if CONFIG.get("telegram_group_chat_id"):
+                            plan_alert_targets.append(CONFIG["telegram_group_chat_id"])
+                        for target_chat_id in plan_alert_targets:
+                            send_telegram_alert(CONFIG["telegram_token"], target_chat_id, plan_msg)
 
                     kv_set(CONFIG["kvdb_bucket"], state_key, dedup_value)
             except Exception as e:
                 print(f"[Plan 2/3 Trigger Error] {display_symbol}: {e}")
 
+            # --- ตอบคำสั่ง Telegram (/order /trend /news /status /summary) ถ้ามีพิมพ์เข้ามารอบนี้ ---
+            # แยก try/except ของตัวเอง ไม่พึ่งพาตัวแปรจากบล็อก Plan 2/3 ด้านบน กันกรณีบล็อกนั้น error
+            # กลางทางแล้วตัวแปรไม่ครบ (self-contained คำนวณใหม่เองเบาๆ ไม่มี API call เพิ่ม)
+            try:
+                df_ind_cmd = add_indicators(df, CONFIG)
+                structure_cmd = analyze_structure(df_ind_cmd, CONFIG)
+                entry_signal_cmd = evaluate_entry(df_ind_cmd, structure_cmd, CONFIG)
+                news_blackout_cmd = is_in_news_blackout(CONFIG["kvdb_bucket"], display_symbol)
+
+                cmd_ctx = {
+                    "symbol": display_symbol,
+                    "config": CONFIG,
+                    "df_ind": df_ind_cmd,
+                    "structure": structure_cmd,
+                    "entry_signal": entry_signal_cmd,
+                    "bias_4h": bias_4h,
+                    "session_info": session_info,
+                    "news_blackout": news_blackout_cmd,
+                }
+                handle_telegram_commands(CONFIG, cmd_ctx)
+            except Exception as e:
+                print(f"[Telegram Command Error] {display_symbol}: {e}")
+
             # --- ข่าว/ปฏิทินเศรษฐกิจ: แค่ข้อมูลประกอบการตัดสินใจ ไม่ยุ่งกับ entry logic ---
             # ห่อทั้งก้อนด้วย try/except เพราะเป็น 3rd-party ฟรี ไม่มี SLA ถ้าพังไม่ให้กระทบบอทหลัก
             try:
+                # refresh cache เสมอ (ไม่ว่าจะปิด push หรือไม่) เพราะ /order /status ยังต้องใช้เช็คช่วงห้ามเทรดรอบข่าว
                 new_events, new_headlines = refresh_daily_calendar(CONFIG["kvdb_bucket"], display_symbol)
-                if new_events is not None:  # เพิ่งขึ้นวันใหม่ (เวลาไทย) -> สรุปข่าวทั้งวันครั้งเดียว
-                    summary_text = build_daily_summary_message(display_symbol, new_events, new_headlines)
-                    send_or_edit_message(
-                        CONFIG["telegram_token"], CONFIG["telegram_chat_id"], summary_text,
-                        CONFIG["kvdb_bucket"], key=f"news_summary_{display_symbol}"
-                    )
-                    # ส่งเข้ากลุ่มด้วย ถ้าตั้งค่าไว้ (แต่ก่อนหน้านี้ตกหล่นไป ทำให้ข่าวไม่เด้งในกลุ่มเลย)
-                    if CONFIG.get("telegram_group_chat_id"):
+
+                if CONFIG.get("push_notifications_enabled", True):
+                    if new_events is not None:  # เพิ่งขึ้นวันใหม่ (เวลาไทย) -> สรุปข่าวทั้งวันครั้งเดียว
+                        summary_text = build_daily_summary_message(display_symbol, new_events, new_headlines)
                         send_or_edit_message(
-                            CONFIG["telegram_token"], CONFIG["telegram_group_chat_id"], summary_text,
-                            CONFIG["kvdb_bucket"], key=f"news_summary_{display_symbol}_group"
+                            CONFIG["telegram_token"], CONFIG["telegram_chat_id"], summary_text,
+                            CONFIG["kvdb_bucket"], key=f"news_summary_{display_symbol}"
                         )
+                        # ส่งเข้ากลุ่มด้วย ถ้าตั้งค่าไว้ (แต่ก่อนหน้านี้ตกหล่นไป ทำให้ข่าวไม่เด้งในกลุ่มเลย)
+                        if CONFIG.get("telegram_group_chat_id"):
+                            send_or_edit_message(
+                                CONFIG["telegram_token"], CONFIG["telegram_group_chat_id"], summary_text,
+                                CONFIG["kvdb_bucket"], key=f"news_summary_{display_symbol}_group"
+                            )
 
-                warning_text = check_and_send_pre_news_warning(CONFIG["kvdb_bucket"], display_symbol)
-                if warning_text:
-                    news_targets = [CONFIG["telegram_chat_id"]]
-                    if CONFIG.get("telegram_group_chat_id"):
-                        news_targets.append(CONFIG["telegram_group_chat_id"])
-                    for target_chat_id in news_targets:
-                        send_telegram_alert(CONFIG["telegram_token"], target_chat_id, warning_text)
+                    # หมายเหตุ: check_and_send_pre_news_warning/post_news_result มาร์ค kvdb ว่า "เตือน/รายงานแล้ว"
+                    # ทันทีที่เรียก ถ้าปิด push ไว้จะไม่เรียกเลย กันไม่ให้เสียโอกาสแจ้งเตือนไปฟรีๆ ตอนไม่ได้ส่งจริง
+                    # (เผื่อวันหลังเปิด push กลับมา จะได้ยังเตือน/รายงานข่าวตัวเดิมได้อยู่)
+                    warning_text = check_and_send_pre_news_warning(CONFIG["kvdb_bucket"], display_symbol)
+                    if warning_text:
+                        news_targets = [CONFIG["telegram_chat_id"]]
+                        if CONFIG.get("telegram_group_chat_id"):
+                            news_targets.append(CONFIG["telegram_group_chat_id"])
+                        for target_chat_id in news_targets:
+                            send_telegram_alert(CONFIG["telegram_token"], target_chat_id, warning_text)
 
-                # --- ผลข่าวหลังประกาศจริง (actual vs forecast) — เพิ่มใหม่ ---
-                result_text = check_and_send_post_news_result(CONFIG["kvdb_bucket"], display_symbol)
-                if result_text:
-                    result_targets = [CONFIG["telegram_chat_id"]]
-                    if CONFIG.get("telegram_group_chat_id"):
-                        result_targets.append(CONFIG["telegram_group_chat_id"])
-                    for target_chat_id in result_targets:
-                        send_telegram_alert(CONFIG["telegram_token"], target_chat_id, result_text)
+                    # --- ผลข่าวหลังประกาศจริง (actual vs forecast) ---
+                    result_text = check_and_send_post_news_result(CONFIG["kvdb_bucket"], display_symbol)
+                    if result_text:
+                        result_targets = [CONFIG["telegram_chat_id"]]
+                        if CONFIG.get("telegram_group_chat_id"):
+                            result_targets.append(CONFIG["telegram_group_chat_id"])
+                        for target_chat_id in result_targets:
+                            send_telegram_alert(CONFIG["telegram_token"], target_chat_id, result_text)
             except Exception as e:
                 print(f"[News Scheduler Error] {e}")
 
             # ส่ง Hourly Briefing (สถานะปกติ) แค่ครั้งเดียวต่อชั่วโมง แม้จะวิเคราะห์ทุก 5 นาทีก็ตาม
-            if should_send_hourly_briefing(CONFIG["kvdb_bucket"], display_symbol):
+            # ข้ามทั้งบล็อกถ้าปิด push ไว้ (ใช้ /trend หรือ /order แทนได้)
+            if CONFIG.get("push_notifications_enabled", True) and should_send_hourly_briefing(
+                CONFIG["kvdb_bucket"], display_symbol
+            ):
                 df_ind = add_indicators(df, CONFIG)
                 structure = analyze_structure(df_ind, CONFIG)
                 entry_signal = evaluate_entry(df_ind, structure, CONFIG)
@@ -544,6 +633,25 @@ if __name__ == "__main__":
                         CONFIG["telegram_token"], CONFIG["telegram_group_chat_id"], group_plan1_msg,
                         CONFIG["kvdb_bucket"], key=f"briefing_plan1_{display_symbol}_group"
                     )
+
+            # --- สรุปผลประกอบการประจำวัน (23:55-23:59 เวลาไทย) ครั้งเดียวต่อวัน — ข้ามถ้าปิด push (ใช้ /summary แทน) ---
+            try:
+                if CONFIG.get("push_notifications_enabled", True) and should_send_daily_summary(
+                    CONFIG["kvdb_bucket"], display_symbol
+                ):
+                    daily_orders = update_orders_status(CONFIG["kvdb_bucket"], display_symbol, df["close"].iloc[-1])
+                    daily_text = build_orders_dashboard(display_symbol, daily_orders, df["close"].iloc[-1])
+                    daily_text = daily_text.replace(
+                        "📋 <b>Order Dashboard:", "📆 <b>สรุปผลประกอบการวันนี้:"
+                    )
+                    daily_targets = [CONFIG["telegram_chat_id"]]
+                    if CONFIG.get("telegram_group_chat_id"):
+                        daily_targets.append(CONFIG["telegram_group_chat_id"])
+                    for target_chat_id in daily_targets:
+                        send_telegram_alert(CONFIG["telegram_token"], target_chat_id, daily_text)
+                    mark_daily_summary_sent(CONFIG["kvdb_bucket"], display_symbol)
+            except Exception as e:
+                print(f"[Daily Summary Error] {display_symbol}: {e}")
     finally:
         # ping บอก Healthchecks.io เสมอ ไม่ว่าข้างบนจะสำเร็จหรือมี error ก็ตาม
         # (นี่คือหน้าที่จริงของ Dead Man's Switch — ต้องรู้ว่าบอทยังไม่ตายแม้ตอน API ล่ม)
