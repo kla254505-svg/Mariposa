@@ -1,0 +1,41 @@
+import logging
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+# --- ตั้งค่าส่วนตัว ---
+TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'  # ใส่ Token ที่ได้จาก BotFather
+OWNER_ID = 'YOUR_TELEGRAM_ID'      # ใส่ ID ของคุณเพื่อความปลอดภัย[span_1](start_span)[span_1](end_span)
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+async def check_security(update: Update):
+    return str(update.effective_user.id) == OWNER_ID
+
+# --- คำสั่ง /order ---
+async def order_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_security(update): return
+    # เรียกใช้ logic จาก entry.py และ trigger_5m.py[span_2](start_span)[span_2](end_span)
+    await update.message.reply_text("กำลังวิเคราะห์สัญญาณจากแผนงานที่ 1-4...[span_3](start_span)[span_3](end_span)")
+
+# --- คำสั่ง /trend ---
+async def trend_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_security(update): return
+    # เรียกใช้ logic จาก trend.py และ bias_4h.py[span_4](start_span)[span_4](end_span)
+    await update.message.reply_text("แนวโน้มตลาดปัจจุบันและโซนรับ-ต้าน:[span_5](start_span)[span_5](end_span)")
+
+# --- คำสั่ง /news ---
+async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_security(update): return
+    # เรียกใช้ logic จาก news_scheduler.py[span_6](start_span)[span_6](end_span)
+    await update.message.reply_text("ตรวจสอบข่าวแรงใน 24 ชม. ข้างหน้า...[span_7](start_span)[span_7](end_span)")
+
+# --- เริ่มการทำงาน ---
+if __name__ == '__main__':
+    application = ApplicationBuilder().token(TOKEN).build()
+    
+    application.add_handler(CommandHandler('order', order_command))
+    application.add_handler(CommandHandler('trend', trend_command))
+    application.add_handler(CommandHandler('news', news_command))
+    
+    print("Bot is running...")
+    application.run_polling()
