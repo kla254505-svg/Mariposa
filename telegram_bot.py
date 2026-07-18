@@ -1,34 +1,344 @@
-from flask import Flask
-from threading import Thread
+"""
+telegram_bot.py
+ระบบรับคำสั่งจาก Telegram (Interactive Commands) เพิ่มเติมจากที่บอทส่งแจ้งเตือนอัตโนมัติอยู่แล้ว
+รองรับ: /order /trend /news /status /summary
 
-# สร้างเว็บเซิร์ฟเวอร์จำลองเพื่อให้ Render ไม่ปิดบอท
-app = Flask('')
+ข้อจำกัดสำคัญที่ควรรู้ก่อนใช้: บอทนี้รันบน GitHub Actions แบบ cron (ไม่ใช่ server ที่ฟังตลอดเวลา)
+คำสั่งที่พิมพ์จะถูกประมวลผล "ตอนที่บอทรันรอบถัดไป" เท่านั้น ไม่ใช่ตอบทันที ถ้า cron ตั้งไว้ทุก 5 นาที
+การตอบสนองจะช้าสุดประมาณ 5 นาที ไม่ใช่ real-time เป๊ะๆ — ถ้าต้องการตอบทันทีจริงต้องเปลี่ยนไปรันบน
+server ที่ฟัง webhook ตลอดเวลาแทน (คนละสถาปัตยกรรมกับที่ใช้อยู่ตอนนี้)
 
-@app.route('/')
-def home():
-    return "Bot is running!"
+ความปลอดภัย: ประมวลผลคำสั่งเฉพาะจาก TELEGRAM_OWNER_ID เท่านั้น (ดู config.py) คนอื่นในกลุ่ม
+พิมพ์คำสั่งเดียวกันจะถูกเมินเงียบๆ ไม่มีการตอบกลับใดๆ ทั้งสิ้น
+"""
 
-def run():
-    app.run(host='0.0.0.0', port=8080)
+import time
+import requests
+from datetime import datetime, timedelta, timezone
 
-# รันเว็บเซิร์ฟเวอร์แยกออกมา
-t = Thread(target=run)
-t.start()
+from kvstore import kv_get, kv_set
+from orders import update_orders_status, build_orders_dashboard
+from news import fetch_usd_calendar_events
+from news_scheduler import THAI_TZ, is_in_news_blackout
+from scenario import detect_breakout_trigger, detect_counter_trend_trigger
+from zones import calc_premium_discount_zone
 
-# --- โค้ดเดิมของคุณ (ส่วนที่รันบอท Telegram) เริ่มตรงนี้ ---
-# เช่น updater.start_polling() หรือ bot.polling()
-import os
-from telegram.ext import Updater # หรือ import ที่คุณใช้งานจริง
+TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
+STRENGTH_LABEL = {"strong": "(Strong)", "weak": "(Weak — กำลังก่อตัว)", "none": ""}
 
-# ... (โค้ด Flask ที่คุณมีอยู่แล้ว) ...
 
-# --- โค้ดส่วนรันบอท Telegram ---
-TOKEN = os.environ.get('TOKEN')
-# สมมติว่าคุณใช้ python-telegram-bot เวอร์ชันมาตรฐาน:
-updater = Updater(TOKEN, use_context=True)
+def _build_command_context(symbol, config):
+    """
+    ดึงข้อมูลสดเองทั้งหมด (ไม่พึ่งพา main.py) ใช้ตอนรันแบบ polling loop ตลอดเวลาบน Render
+    ทุกครั้งที่มีคำสั่งเข้ามาจะยิง TwelveData 2 ครั้ง (15M + 4H) — ยอมรับได้เพราะคำสั่งมาไม่ถี่ (คนพิมพ์เอง)
+    """
+    from fetch_data import fetch_twelvedata
+    from indicator import add_indicators
+    from trend import analyze_structure
+    from entry import evaluate_entry
+    from bias_4h import analyze_4h_bias
+    from session import get_session_info
 
-# เพิ่มคำสั่งต่างๆ ของคุณที่นี่ (เช่น updater.dispatcher.add_handler(...))
+    symbol_map = {"XAUUSD": "XAU/USD"}
+    td_symbol = symbol_map.get(symbol, symbol)
 
-updater.start_polling()
-updater.idle()
+    df = fetch_twelvedata(symbol=td_symbol, interval="15min", outputsize=300, api_key=config["twelvedata_api_key"])
+    df_ind = add_indicators(df, config)
+    structure = analyze_structure(df_ind, config)
+    entry_signal = evaluate_entry(df_ind, structure, config)
 
+    df_4h = fetch_twelvedata(symbol=td_symbol, interval="4h", outputsize=300, api_key=config["twelvedata_api_key"])
+    df_4h_ind = add_indicators(df_4h, config)
+    bias_4h = analyze_4h_bias(df_4h_ind, config)
+
+    return {
+        "symbol": symbol,
+        "config": config,
+        "df_ind": df_ind,
+        "structure": structure,
+        "entry_signal": entry_signal,
+        "bias_4h": bias_4h,
+        "session_info": get_session_info(config),
+        "news_blackout": is_in_news_blackout(config["kvdb_bucket"], symbol),
+    }
+
+
+def _get_updates(token, offset=None, timeout=5):
+    """เรียก Telegram getUpdates เพื่อดึงข้อความ/คำสั่งใหม่ตั้งแต่ offset ที่ให้มา"""
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    params = {"timeout": timeout}
+    if offset is not None:
+        params["offset"] = offset
+    try:
+        resp = requests.get(url, params=params, timeout=timeout + 10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ok"):
+            return data.get("result", [])
+    except Exception as e:
+        print(f"[Telegram Bot Error] getUpdates ล้มเหลว: {e}")
+    return []
+
+
+def _reply(token, chat_id, text):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[Telegram Bot Error] ส่งข้อความตอบกลับล้มเหลว: {e}")
+
+
+def _cmd_order(ctx):
+    """เช็คทั้ง 3 แผน คืนเฉพาะแผนที่ตอนนี้เข้าเงื่อนไขจริงๆ เท่านั้น ตามที่ระบุไว้ในดีไซน์"""
+    lines = ["📥 <b>เช็คโอกาสเข้าไม้ตอนนี้</b>", ""]
+    found_any = False
+
+    entry_signal = ctx["entry_signal"]
+    if entry_signal.get("valid") and entry_signal.get("direction") == ctx["structure"]["trend"]:
+        direction_th = "LONG" if entry_signal["direction"] == "bullish" else "SHORT"
+        lines.append(f"✅ แผนที่ 1 (Pullback): {direction_th} ที่โซน ~{entry_signal['entry_price']:.4f}")
+        if entry_signal.get("trigger", {}).get("confirmed"):
+            lines.append("   5M Trigger ยืนยันแล้ว — พร้อมเข้าจริง")
+        else:
+            lines.append("   ยังรอ 5M Trigger ยืนยันก่อนเข้าจริง")
+        found_any = True
+
+    breakout = detect_breakout_trigger(ctx["df_ind"], ctx["structure"], ctx["config"])
+    if breakout:
+        direction_th = "LONG" if breakout["direction"] == "bullish" else "SHORT"
+        lines.append(
+            f"✅ แผนที่ 2 (Breakout): {direction_th} ทะลุ {breakout['level']:.4f} "
+            f"ที่ราคา {breakout['price']:.4f}"
+        )
+        found_any = True
+
+    counter = detect_counter_trend_trigger(ctx["df_ind"], ctx["structure"])
+    if counter:
+        direction_th = "LONG" if counter["direction"] == "bullish" else "SHORT"
+        lines.append(f"✅ แผนที่ 3 (สวนเทรนด์): {direction_th} — Checklist ครบ 3/3 ข้อ")
+        found_any = True
+
+    if ctx.get("news_blackout", (False, None))[0]:
+        lines.append("")
+        lines.append("⛔ หมายเหตุ: ตอนนี้อยู่ในช่วงห้ามเทรดรอบข่าวสำคัญ (±60 นาที) Alert อัตโนมัติจะถูกระงับไว้ก่อน")
+
+    if not found_any:
+        return "📥 ตอนนี้ยังไม่มีจุดเข้าไม้ที่เข้าเงื่อนไขเลยครับ (เช็คครบทั้งแผนที่ 1-3 แล้ว)"
+
+    return "\n".join(lines)
+
+
+def _cmd_trend(ctx):
+    structure = ctx["structure"]
+    bias_4h = ctx["bias_4h"] or {}
+    pd_zone = calc_premium_discount_zone(ctx["df_ind"], ctx["config"].get("structure_lookback", 50))
+
+    lines = [
+        "📈 <b>สรุปแนวโน้ม</b>",
+        "",
+        f"15M Structure: {TREND_LABEL.get(structure['trend'], structure['trend'])} "
+        f"{STRENGTH_LABEL.get(structure.get('trend_strength'), '')} | Event: {structure.get('event') or '-'}",
+        f"4H Bias: {TREND_LABEL.get(bias_4h.get('trend'), '-')}",
+        f"Premium/Discount (15M, {ctx['config'].get('structure_lookback', 50)} แท่งย้อนหลัง): "
+        f"{pd_zone['zone']} ({pd_zone['position_pct']:.0f}% ของ range)",
+        f"  Zone High: {pd_zone['zone_high']:.4f} | Equilibrium: {pd_zone['equilibrium']:.4f} | "
+        f"Zone Low: {pd_zone['zone_low']:.4f}",
+        "",
+        "แนวรับ-แนวต้านหลัก (จาก swing ล่าสุดบน 15M):",
+    ]
+
+    swings = structure.get("last_swings", [])
+    highs = [p for p in swings if p["type"] == "high"]
+    lows = [p for p in swings if p["type"] == "low"]
+    if highs:
+        lines.append(f"  แนวต้าน: {highs[-1]['price']:.4f}")
+    if lows:
+        lines.append(f"  แนวรับ: {lows[-1]['price']:.4f}")
+    if not highs and not lows:
+        lines.append("  ยังไม่มีข้อมูล swing พอ")
+
+    return "\n".join(lines)
+
+
+def _cmd_news(ctx):
+    """ดึงปฏิทินสดตอนนี้เลย (ไม่ใช้ cache เที่ยงคืน) เพราะคำสั่งนี้เรียกน้อย ไม่กระทบ rate limit ของ Forex Factory"""
+    events = fetch_usd_calendar_events()
+    now = datetime.now(timezone.utc)
+    window_end = now + timedelta(hours=24)
+    upcoming = [e for e in events if now <= e["time"] <= window_end]
+
+    if not upcoming:
+        return "📰 ไม่มีข่าว USD สำคัญ (High/Medium Impact) ใน 24 ชม.ข้างหน้าครับ"
+
+    lines = ["📰 <b>ข่าวสำคัญใน 24 ชม.ข้างหน้า</b>", ""]
+    for e in upcoming:
+        t_thai = e["time"].astimezone(THAI_TZ).strftime("%H:%M")
+        icon = "🔴" if e["impact"] == "High" else "🟠"
+        lines.append(f"{icon} {t_thai} — {e['title']} (Forecast: {e.get('forecast') or '-'})")
+    return "\n".join(lines)
+
+
+def _cmd_status(ctx):
+    config = ctx["config"]
+    session_info = ctx.get("session_info") or {}
+    lines = ["⚙️ <b>สถานะบอท</b>", ""]
+
+    if session_info:
+        lines.append(f"Session: {'อยู่ใน London/NY ✅' if session_info.get('in_session') else 'นอก Session ⛔ (ไม่เทรด)'}")
+        if session_info.get("in_killzone"):
+            lines.append("Kill Zone: ใช่ ⚡")
+
+    in_blackout, blackout_event = ctx.get("news_blackout", (False, None))
+    if in_blackout and blackout_event:
+        lines.append(f"⛔ อยู่ในช่วงห้ามเทรดรอบข่าว: {blackout_event['title']}")
+    else:
+        lines.append("ข่าว: ไม่มีข่าวใกล้ๆ ที่ต้องระวังตอนนี้ ✅")
+
+    structure = ctx.get("structure") or {}
+    lines.append(
+        f"เทรนด์ 15M ตอนนี้: {TREND_LABEL.get(structure.get('trend'), '-')} "
+        f"{STRENGTH_LABEL.get(structure.get('trend_strength'), '')}"
+    )
+    lines.append("")
+    lines.append("บอทกำลังทำงานปกติ — ข้อความนี้คือหลักฐานว่ารันสำเร็จล่าสุด ✅")
+    lines.append("(ตอบคำสั่งผ่าน Render polling loop — เกือบ real-time ไม่ใช่รอ cron 5 นาทีแบบเดิมแล้ว)")
+    return "\n".join(lines)
+
+
+def _cmd_summary(ctx):
+    config = ctx["config"]
+    symbol = ctx["symbol"]
+    current_price = ctx["df_ind"]["close"].iloc[-1]
+    orders = update_orders_status(config["kvdb_bucket"], symbol, current_price)
+    return build_orders_dashboard(symbol, orders, current_price)
+
+
+COMMAND_HANDLERS = {
+    "order": _cmd_order,
+    "trend": _cmd_trend,
+    "news": _cmd_news,
+    "status": _cmd_status,
+    "summary": _cmd_summary,
+}
+
+
+def handle_telegram_commands(config, ctx):
+    """
+    เช็คคำสั่งใหม่จาก Telegram (getUpdates) แล้วตอบกลับ ณ รอบที่บอทรันอยู่ตอนนี้ (piggyback บน cron 5 นาที)
+    ต้องตั้ง telegram_owner_id ไว้ใน config ไม่งั้นจะไม่ประมวลผลคำสั่งใดๆ เลย (ปลอดภัยไว้ก่อน)
+    ctx คือ dict ข้อมูลที่คำนวณไว้แล้วในรอบนี้ (df_ind, structure, entry_signal, bias_4h, session_info,
+    news_blackout, symbol, config) ส่งต่อให้ command handler แต่ละตัวใช้ ไม่ต้องคำนวณซ้ำ
+    """
+    token = config.get("telegram_token")
+    owner_id = config.get("telegram_owner_id")
+    if not token or not owner_id:
+        return
+
+    bucket = config["kvdb_bucket"]
+    last_offset_raw = kv_get(bucket, "telegram_last_update_id")
+    try:
+        last_offset = int(last_offset_raw) if last_offset_raw else None
+    except (TypeError, ValueError):
+        last_offset = None
+
+    offset = (last_offset + 1) if last_offset is not None else None
+    updates = _get_updates(token, offset=offset)
+    if not updates:
+        return
+
+    max_update_id = last_offset or 0
+    for update in updates:
+        max_update_id = max(max_update_id, update.get("update_id", 0))
+        message = update.get("message") or update.get("channel_post")
+        if not message:
+            continue
+
+        sender_id = str(message.get("from", {}).get("id", ""))
+        if sender_id != str(owner_id):
+            continue  # ไม่ใช่เจ้าของบอท เมินคำสั่งนี้ทิ้งเงียบๆ ไม่ตอบกลับใดๆ
+
+        text = (message.get("text") or "").strip()
+        if not text.startswith("/"):
+            continue
+
+        # Telegram ส่งคำสั่งกลุ่มมาเป็น "/order@BotName" ต้องตัด @BotName ออกก่อนเทียบ
+        command = text[1:].split("@")[0].split()[0].lower()
+        handler = COMMAND_HANDLERS.get(command)
+        chat_id = message["chat"]["id"]
+
+        if handler:
+            try:
+                reply_text = handler(ctx)
+            except Exception as e:
+                reply_text = f"เกิดข้อผิดพลาดตอนประมวลผลคำสั่ง /{command}: {e}"
+            _reply(token, chat_id, reply_text)
+        # คำสั่งที่ไม่รู้จัก: เมินเงียบๆ ไม่ตอบอะไร (กันสแปมตอบ error ทุกครั้งที่พิมพ์ผิด)
+
+    kv_set(bucket, "telegram_last_update_id", str(max_update_id))
+
+
+def run_polling_loop(config, symbol="XAUUSD"):
+    """
+    Loop รันตลอดเวลา (ใช้บน Render/server ที่ไม่ตาย ไม่ใช่ GitHub Actions) ใช้ Telegram long-polling
+    (timeout=30 วิ — Telegram จะค้าง connection ไว้จนกว่าจะมีข้อความใหม่หรือครบเวลา ไม่ใช่ busy-loop ถี่ๆ
+    ที่กิน CPU/แบนด์วิดท์ฟรี) ตอบคำสั่งได้เกือบทันที (วินาที ไม่ใช่นาที) ต่างจากโหมด cron เดิม
+
+    ⚠️ ห้ามรันคู่กับการเรียก handle_telegram_commands() จาก main.py (cron) พร้อมกัน จะแย่ง offset กัน
+    ให้ Render จัดการคำสั่งอย่างเดียว ส่วน GitHub Actions ทำหน้าที่วิเคราะห์ + ส่ง Alert เท่านั้น
+    """
+    token = config.get("telegram_token")
+    owner_id = config.get("telegram_owner_id")
+    if not token or not owner_id:
+        print("[Telegram Bot] ไม่มี telegram_token หรือ telegram_owner_id — ไม่เริ่ม polling loop")
+        return
+
+    bucket = config["kvdb_bucket"]
+    print("[Telegram Bot] เริ่ม polling loop แล้ว (ตอบคำสั่งได้เกือบทันที)")
+
+    while True:
+        try:
+            last_offset_raw = kv_get(bucket, "telegram_last_update_id")
+            try:
+                last_offset = int(last_offset_raw) if last_offset_raw else None
+            except (TypeError, ValueError):
+                last_offset = None
+            offset = (last_offset + 1) if last_offset is not None else None
+
+            updates = _get_updates(token, offset=offset, timeout=30)
+
+            for update in updates:
+                update_id = update.get("update_id", 0)
+                kv_set(bucket, "telegram_last_update_id", str(update_id))
+
+                message = update.get("message") or update.get("channel_post")
+                if not message:
+                    continue
+
+                sender_id = str(message.get("from", {}).get("id", ""))
+                if sender_id != str(owner_id):
+                    continue  # ไม่ใช่เจ้าของบอท เมินเงียบๆ
+
+                text = (message.get("text") or "").strip()
+                if not text.startswith("/"):
+                    continue
+
+                command = text[1:].split("@")[0].split()[0].lower()
+                handler = COMMAND_HANDLERS.get(command)
+                chat_id = message["chat"]["id"]
+                if not handler:
+                    continue  # คำสั่งไม่รู้จัก เมินเงียบๆ
+
+                try:
+                    ctx = _build_command_context(symbol, config)
+                    reply_text = handler(ctx)
+                except Exception as e:
+                    reply_text = f"เกิดข้อผิดพลาดตอนประมวลผลคำสั่ง /{command}: {e}"
+                _reply(token, chat_id, reply_text)
+
+        except Exception as e:
+            # กัน loop ตายทั้งกระบวนการถ้าเน็ตสะดุด/Telegram ล่มชั่วคราว รอสักพักแล้วลองใหม่
+            print(f"[Telegram Bot Error] polling loop error: {e}")
+            time.sleep(5)

@@ -26,7 +26,6 @@ from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
 from orders import add_order, update_orders_status, build_orders_dashboard
-from telegram_bot import handle_telegram_commands
 from news_scheduler import (
     refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning,
     check_and_send_post_news_result, is_in_news_blackout,
@@ -539,28 +538,10 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"[Plan 2/3 Trigger Error] {display_symbol}: {e}")
 
-            # --- ตอบคำสั่ง Telegram (/order /trend /news /status /summary) ถ้ามีพิมพ์เข้ามารอบนี้ ---
-            # แยก try/except ของตัวเอง ไม่พึ่งพาตัวแปรจากบล็อก Plan 2/3 ด้านบน กันกรณีบล็อกนั้น error
-            # กลางทางแล้วตัวแปรไม่ครบ (self-contained คำนวณใหม่เองเบาๆ ไม่มี API call เพิ่ม)
-            try:
-                df_ind_cmd = add_indicators(df, CONFIG)
-                structure_cmd = analyze_structure(df_ind_cmd, CONFIG)
-                entry_signal_cmd = evaluate_entry(df_ind_cmd, structure_cmd, CONFIG)
-                news_blackout_cmd = is_in_news_blackout(CONFIG["kvdb_bucket"], display_symbol)
-
-                cmd_ctx = {
-                    "symbol": display_symbol,
-                    "config": CONFIG,
-                    "df_ind": df_ind_cmd,
-                    "structure": structure_cmd,
-                    "entry_signal": entry_signal_cmd,
-                    "bias_4h": bias_4h,
-                    "session_info": session_info,
-                    "news_blackout": news_blackout_cmd,
-                }
-                handle_telegram_commands(CONFIG, cmd_ctx)
-            except Exception as e:
-                print(f"[Telegram Command Error] {display_symbol}: {e}")
+            # หมายเหตุ: การตอบคำสั่ง Telegram (/order /trend /news /status /summary) ย้ายไปทำที่
+            # run_bot.py บน Render แล้ว (รันแบบ polling loop ตลอดเวลา ตอบเร็วกว่านี้มาก)
+            # main.py ตัวนี้ (บน GitHub Actions cron) ทำหน้าที่แค่วิเคราะห์ + ส่ง Alert เท่านั้น
+            # ห้ามเรียก handle_telegram_commands() ที่นี่ซ้ำ เพราะจะแย่ง offset ของ getUpdates กับ Render
 
             # --- ข่าว/ปฏิทินเศรษฐกิจ: แค่ข้อมูลประกอบการตัดสินใจ ไม่ยุ่งกับ entry logic ---
             # ห่อทั้งก้อนด้วย try/except เพราะเป็น 3rd-party ฟรี ไม่มี SLA ถ้าพังไม่ให้กระทบบอทหลัก
