@@ -331,7 +331,11 @@ def handle_telegram_commands(config, ctx):
             _reply(token, chat_id, reply_text)
         # คำสั่งที่ไม่รู้จัก: เมินเงียบๆ ไม่ตอบอะไร (กันสแปมตอบ error ทุกครั้งที่พิมพ์ผิด)
 
-    kv_set(bucket, "telegram_last_update_id", str(max_update_id))
+    # บันทึก offset ลง kvdb — ถ้าเขียนไม่สำเร็จ (rate limit/error ชั่วคราว) จะ log ไว้ให้เห็นใน log
+    # (เดิม kv_set คืน True เสมอไม่ว่าจะสำเร็จจริงหรือไม่ ตอนนี้แก้ที่ kvstore.py แล้วให้เช็ค status code จริง)
+    if not kv_set(bucket, "telegram_last_update_id", str(max_update_id)):
+        print(f"[Telegram Bot Error] บันทึก offset ({max_update_id}) ลง kvdb ไม่สำเร็จ — "
+              f"รอบ cron ถัดไปอาจไล่ตอบคำสั่งชุดนี้ซ้ำ")
 
 
 def _acquire_or_renew_lock(bucket):
@@ -371,6 +375,14 @@ def run_polling_loop(config, symbol="XAUUSD"):
 
     ป้องกันไล่ตอบ backlog คำสั่งเก่าตอน resume จาก suspend: คำสั่งที่ค้างคิวเกิน STALE_MESSAGE_SECONDS
     จะถูกข้ามเงียบๆ (ไม่ตอบ แต่ offset ยัง advance ตามปกติ) ผู้ใช้ต้องพิมพ์คำสั่งใหม่เอง ไม่ไล่ตอบย้อนหลัง
+
+    ป้องกันตอบซ้ำเมื่อ kvdb.io เขียนพลาด (เช่นโดน rate limit ตอน loop วนถี่ต่อเนื่องหลาย ชม.):
+    เดิมโค้ดอ่าน/เขียน offset ผ่าน kvdb ทุกรอบ loop — ถ้า kv_set เขียนไม่สำเร็จแบบเงียบๆ (บั๊กเดิมใน
+    kvstore.py ที่คืน True เสมอ) offset จะไม่ขยับ รอบถัดไปเลยไปดึงคำสั่งเดิมซ้ำมาตอบอีก วนซ้ำไปเรื่อยๆ
+    ตอนนี้เก็บ offset ไว้ในตัวแปรความจำของ process เอง (known_offset) เป็น "ความจริงหลัก" ระหว่าง
+    instance นี้ยังรันอยู่ — อ่านจาก kvdb แค่ครั้งเดียวตอนเริ่ม loop (กู้คืนหลัง restart/deploy ใหม่)
+    หลังจากนั้นแต่ละรอบจะเขียนขึ้น kvdb แบบ best-effort เท่านั้น (เผื่อ instance ตายจะได้กู้คืนต่อได้)
+    แต่ต่อให้เขียนพลาด ตัวแปรในหน่วยความจำก็ยังจำตำแหน่งล่าสุดถูกต้อง ไม่ทำให้ตอบคำสั่งเดิมซ้ำอีก
     """
     token = config.get("telegram_token")
     owner_id = config.get("telegram_owner_id")
@@ -381,6 +393,14 @@ def run_polling_loop(config, symbol="XAUUSD"):
     bucket = config["kvdb_bucket"]
     print(f"[Telegram Bot] เริ่ม polling loop แล้ว (instance={_INSTANCE_ID})")
 
+    # อ่าน offset เริ่มต้นจาก kvdb แค่ครั้งเดียวตอนเริ่ม instance (กู้คืนหลัง restart/deploy)
+    # จากนี้ไปตัวแปรนี้คือ "ความจริงหลัก" ของ instance นี้ ไม่อ่านย้อนกลับจาก kvdb อีกระหว่าง loop
+    raw = kv_get(bucket, "telegram_last_update_id")
+    try:
+        known_offset = int(raw) if raw else None
+    except (TypeError, ValueError):
+        known_offset = None
+
     while True:
         try:
             if not _acquire_or_renew_lock(bucket):
@@ -388,18 +408,19 @@ def run_polling_loop(config, symbol="XAUUSD"):
                 time.sleep(3)
                 continue
 
-            last_offset_raw = kv_get(bucket, "telegram_last_update_id")
-            try:
-                last_offset = int(last_offset_raw) if last_offset_raw else None
-            except (TypeError, ValueError):
-                last_offset = None
-            offset = (last_offset + 1) if last_offset is not None else None
-
+            offset = (known_offset + 1) if known_offset is not None else None
             updates = _get_updates(token, offset=offset, timeout=30)
 
             for update in updates:
                 update_id = update.get("update_id", 0)
-                kv_set(bucket, "telegram_last_update_id", str(update_id))
+                # อัปเดตตัวแปรในหน่วยความจำก่อนเสมอ (เชื่อถือได้ทันที ไม่ต้องรอ kvdb)
+                known_offset = max(known_offset or 0, update_id)
+                # เขียนขึ้น kvdb แบบ best-effort เผื่อ instance ตายจะได้กู้คืนต่อได้ถูกจุด
+                # ถ้าเขียนพลาด (เช่นโดน rate limit) แค่ log ไว้ — ไม่กระทบการทำงานของ instance นี้
+                # เพราะ known_offset ในหน่วยความจำยังถูกต้องอยู่ ไม่วนไปตอบคำสั่งเดิมซ้ำแน่นอน
+                if not kv_set(bucket, "telegram_last_update_id", str(known_offset)):
+                    print(f"[Telegram Bot Error] บันทึก offset ({known_offset}) ลง kvdb ไม่สำเร็จ "
+                          f"— ใช้ค่าในหน่วยความจำต่อไปก่อน (ไม่กระทบการตอบคำสั่งรอบนี้)")
 
                 message = update.get("message") or update.get("channel_post")
                 if not message:
@@ -410,7 +431,7 @@ def run_polling_loop(config, symbol="XAUUSD"):
                     continue  # ไม่ใช่เจ้าของบอท เมินเงียบๆ
 
                 # ข้ามคำสั่งเก่าที่ค้างคิวมาตั้งแต่ก่อน instance นี้เริ่ม (เช่นตอน resume จาก suspend)
-                # offset ยัง advance ปกติด้านบนแล้ว (kv_set) แค่ไม่ประมวลผล/ไม่ตอบกลับคำสั่งที่ตกยุคนี้
+                # offset ยัง advance ปกติด้านบนแล้ว แค่ไม่ประมวลผล/ไม่ตอบกลับคำสั่งที่ตกยุคนี้
                 msg_age = time.time() - message.get("date", time.time())
                 if msg_age > STALE_MESSAGE_SECONDS:
                     print(f"[Telegram Bot] ข้ามคำสั่งเก่า (อายุ {msg_age:.0f} วิ) — เกิน {STALE_MESSAGE_SECONDS} วิ")
