@@ -8,8 +8,9 @@ telegram_bot.py
 การตอบสนองจะช้าสุดประมาณ 5 นาที ไม่ใช่ real-time เป๊ะๆ — ถ้าต้องการตอบทันทีจริงต้องเปลี่ยนไปรันบน
 server ที่ฟัง webhook ตลอดเวลาแทน (คนละสถาปัตยกรรมกับที่ใช้อยู่ตอนนี้)
 
-ความปลอดภัย: ประมวลผลคำสั่งเฉพาะจาก TELEGRAM_OWNER_ID เท่านั้น (ดู config.py) คนอื่นในกลุ่ม
-พิมพ์คำสั่งเดียวกันจะถูกเมินเงียบๆ ไม่มีการตอบกลับใดๆ ทั้งสิ้น
+ความปลอดภัย: ประมวลผลคำสั่งจาก TELEGRAM_OWNER_ID (เจ้าของบอท ใช้ได้ทุกที่) และจากใครก็ตามที่พิมพ์
+มาจากกลุ่มที่ตั้งไว้ใน TELEGRAM_GROUP_CHAT_ID เท่านั้น (ดู config.py) คนนอกเหนือจากนี้พิมพ์คำสั่ง
+จะถูกเมินเงียบๆ ไม่มีการตอบกลับใดๆ ทั้งสิ้น
 """
 
 import time
@@ -280,6 +281,10 @@ def handle_telegram_commands(config, ctx):
     ต้องตั้ง telegram_owner_id ไว้ใน config ไม่งั้นจะไม่ประมวลผลคำสั่งใดๆ เลย (ปลอดภัยไว้ก่อน)
     ctx คือ dict ข้อมูลที่คำนวณไว้แล้วในรอบนี้ (df_ind, structure, entry_signal, bias_4h, session_info,
     news_blackout, symbol, config) ส่งต่อให้ command handler แต่ละตัวใช้ ไม่ต้องคำนวณซ้ำ
+
+    สิทธิ์ใช้คำสั่ง: เจ้าของบอท (telegram_owner_id) ใช้ได้จากทุกที่ (แชทเดี่ยว/กลุ่มไหนก็ได้) และ
+    ใครก็ตามที่พิมพ์คำสั่งมาจากกลุ่มที่ตั้งไว้ใน telegram_group_chat_id ก็ใช้คำสั่งได้ด้วยเช่นกัน —
+    คนนอกกลุ่มนั้น (ไม่ใช่เจ้าของบอท และไม่ได้พิมพ์จากกลุ่มที่อนุญาต) จะถูกเมินเงียบๆ เหมือนเดิม
     """
     token = config.get("telegram_token")
     owner_id = config.get("telegram_owner_id")
@@ -306,8 +311,12 @@ def handle_telegram_commands(config, ctx):
             continue
 
         sender_id = str(message.get("from", {}).get("id", ""))
-        if sender_id != str(owner_id):
-            continue  # ไม่ใช่เจ้าของบอท เมินคำสั่งนี้ทิ้งเงียบๆ ไม่ตอบกลับใดๆ
+        chat_id_check = message.get("chat", {}).get("id", "")
+        group_chat_id = config.get("telegram_group_chat_id")
+        is_owner = sender_id == str(owner_id)
+        is_allowed_group = group_chat_id and str(chat_id_check) == str(group_chat_id)
+        if not is_owner and not is_allowed_group:
+            continue  # ไม่ใช่เจ้าของบอท และไม่ได้พิมพ์จากกลุ่มที่อนุญาต เมินคำสั่งนี้ทิ้งเงียบๆ
 
         # ข้ามคำสั่งเก่าที่ค้างคิวมานาน (เช่นตอน Render suspend ไปนานแล้วเพิ่ง resume) ไม่ไล่ตอบย้อนหลัง
         msg_age = time.time() - message.get("date", time.time())
@@ -427,8 +436,12 @@ def run_polling_loop(config, symbol="XAUUSD"):
                     continue
 
                 sender_id = str(message.get("from", {}).get("id", ""))
-                if sender_id != str(owner_id):
-                    continue  # ไม่ใช่เจ้าของบอท เมินเงียบๆ
+                chat_id_check = message.get("chat", {}).get("id", "")
+                group_chat_id = config.get("telegram_group_chat_id")
+                is_owner = sender_id == str(owner_id)
+                is_allowed_group = group_chat_id and str(chat_id_check) == str(group_chat_id)
+                if not is_owner and not is_allowed_group:
+                    continue  # ไม่ใช่เจ้าของบอท และไม่ได้พิมพ์จากกลุ่มที่อนุญาต เมินเงียบๆ
 
                 # ข้ามคำสั่งเก่าที่ค้างคิวมาตั้งแต่ก่อน instance นี้เริ่ม (เช่นตอน resume จาก suspend)
                 # offset ยัง advance ปกติด้านบนแล้ว แค่ไม่ประมวลผล/ไม่ตอบกลับคำสั่งที่ตกยุคนี้
