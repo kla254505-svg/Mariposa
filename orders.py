@@ -7,12 +7,14 @@ from tp import calc_risk_reward
 ORDERS_KEY_PREFIX = "open_orders"
 STATUS_EMOJI = {"running": "💸", "win": "✅", "loss": "❌"}
 PLAN_LABEL = {
-    "plan1_pullback": "แผนที่ 1 (Pullback)",
+    "plan1_pullback": "แผนที่ 1 (Pullback ยืนยันแล้ว)",
+    "plan1_pullback_early": "แผนที่ 1 (เข้าก่อนยืนยัน)",
     "plan2_breakout": "แผนที่ 2 (Breakout)",
     "plan3_counter_trend": "แผนที่ 3 (สวนเทรนด์)",
 }
 PLAN_SHORT = {
     "plan1_pullback": "1",
+    "plan1_pullback_early": "1e",
     "plan2_breakout": "2",
     "plan3_counter_trend": "3",
 }
@@ -178,7 +180,7 @@ def build_stats_message(symbol, stats):
 
     lines = [f"📊 <b>สถิติผลลัพธ์: {symbol}</b>", ""]
 
-    plan_order = ["plan1_pullback", "plan2_breakout", "plan3_counter_trend"]
+    plan_order = ["plan1_pullback", "plan1_pullback_early", "plan2_breakout", "plan3_counter_trend"]
     for plan in plan_order:
         s = stats.get(plan)
         if not s:
@@ -205,7 +207,9 @@ def build_stats_message(symbol, stats):
     lines.append("")
     lines.append(
         "หมายเหตุ: Expectancy คำนวณจาก RR ตามแผนตอนเปิดออเดอร์ ไม่ใช่ราคาปิดจริงเป๊ะๆ "
-        "ใช้เป็นตัวชี้วัดเบื้องต้นว่าแผนไหนน่าจะมี edge มากกว่ากัน"
+        "ใช้เป็นตัวชี้วัดเบื้องต้นว่าแผนไหนน่าจะมี edge มากกว่ากัน "
+        "เทียบ \"แผนที่ 1 (เข้าก่อนยืนยัน)\" กับ \"แผนที่ 1 (Pullback ยืนยันแล้ว)\" ได้ว่าการรอ "
+        "5M Trigger ก่อนเข้าจริงช่วยเพิ่มความแม่นยำหรือไม่"
     )
 
     return "\n".join(lines)

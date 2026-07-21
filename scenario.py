@@ -155,6 +155,50 @@ def detect_counter_trend_trigger(df, structure):
     return None
 
 
+def get_breakout_status(df, structure, config):
+    """
+    คืนระยะห่างปัจจุบันจากจุดทะลุ (breakout) ทั้งสองฝั่ง ไม่ว่าจะทะลุแล้วหรือยัง — ต่างจาก
+    detect_breakout_trigger ที่คืน None เฉยๆ ถ้ายังไม่ทะลุ ใช้แสดงผลใน /order2 ให้เห็นว่าราคา
+    ห่างจากจุด trigger อีกเท่าไหร่ คืน None ถ้าข้อมูล swing ไม่พอ
+    """
+    swings = structure.get("last_swings", [])
+    if len(swings) < 2 or not len(df):
+        return None
+
+    highs = [p["price"] for p in swings if p["type"] == "high"]
+    lows = [p["price"] for p in swings if p["type"] == "low"]
+    current_price = df["close"].iloc[-1]
+    atr_val = df["atr"].iloc[-1] if "atr" in df.columns else 0
+    buffer = config.get("breakout_confirm_atr_mult", 0.3) * atr_val
+
+    status = {}
+    if highs:
+        target = highs[-1] + buffer
+        status["up_level"] = highs[-1]
+        status["up_target"] = target
+        status["up_distance"] = target - current_price
+    if lows:
+        target = lows[-1] - buffer
+        status["down_level"] = lows[-1]
+        status["down_target"] = target
+        status["down_distance"] = current_price - target
+
+    return status if status else None
+
+
+def get_counter_trend_status(df, structure):
+    """
+    คืนสถานะ Checklist สวนเทรนด์ปัจจุบัน (แต่ละข้อผ่าน/ไม่ผ่าน) ไม่ว่าจะครบ 3/3 หรือยัง — ต่างจาก
+    detect_counter_trend_trigger ที่คืน None เฉยๆ ถ้ายังไม่ครบ ใช้แสดงผลใน /order3 ให้เห็นว่าขาดข้อไหนอยู่
+    คืน None ถ้าตลาด sideway (ไม่มีเทรนด์หลักให้สวน)
+    """
+    result = _evaluate_counter_trend_checklist(df, structure)
+    if result is None:
+        return None
+    direction, checklist = result
+    return {"direction": direction, "checklist": checklist}
+
+
 def calc_breakout_order(breakout, structure, df, config):
     """
     คำนวณ Entry/SL/TP ให้แผนที่ 2 (Breakout) — จุดเดียวที่ใช้ร่วมกันทั้ง main.py (ตอน trigger จริง
