@@ -1,7 +1,7 @@
 """
 telegram_bot.py
 ระบบรับคำสั่งจาก Telegram (Interactive Commands) เพิ่มเติมจากที่บอทส่งแจ้งเตือนอัตโนมัติอยู่แล้ว
-รองรับ: /order /trend /news /status /summary
+รองรับ: /order /trend /news /status /summary /stats
 
 ข้อจำกัดสำคัญที่ควรรู้ก่อนใช้: บอทนี้รันบน GitHub Actions แบบ cron (ไม่ใช่ server ที่ฟังตลอดเวลา)
 คำสั่งที่พิมพ์จะถูกประมวลผล "ตอนที่บอทรันรอบถัดไป" เท่านั้น ไม่ใช่ตอบทันที ถ้า cron ตั้งไว้ทุก 5 นาที
@@ -20,10 +20,13 @@ import requests
 from datetime import datetime, timedelta, timezone
 
 from kvstore import kv_get, kv_set
-from orders import update_orders_status, build_orders_dashboard
+from orders import update_orders_status, build_orders_dashboard, calc_stats, build_stats_message
 from news import fetch_usd_calendar_events
 from news_scheduler import THAI_TZ, is_in_news_blackout
-from scenario import detect_breakout_trigger, detect_counter_trend_trigger
+from scenario import (
+    detect_breakout_trigger, detect_counter_trend_trigger,
+    calc_breakout_order, calc_counter_trend_order,
+)
 from zones import calc_premium_discount_zone
 
 TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
@@ -141,88 +144,6 @@ def _reply(token, chat_id, text):
         print(f"[Telegram Bot Error] ส่งข้อความตอบกลับล้มเหลว: {e}")
 
 
-def _plan2_breakout_order(breakout, structure, df_ind, config):
-    """
-    คำนวณ SL/TP ให้แผนที่ 2 (Breakout):
-    - SL แบบอิงจุดที่ทะลุ (structure-based): วางไว้เลยระดับที่ทะลุ (breakout['level']) กลับไปอีกฝั่ง
-      นิดหน่อย (buffer = sl_buffer_atr × ATR เฉลี่ย ตัวเดียวกับที่ main.py ใช้ตอน tighten SL ของ Plan 1)
-      ตรรกะ: ถ้าราคาย้อนกลับผ่านระดับเดิมไปอีกฝั่ง breakout ครั้งนี้ถือว่าล้มเหลว (false breakout)
-    - TP แบบ Measured move: วัดความสูงของ range ที่ราคาสะสมตัวก่อนทะลุ (จาก swing ฝั่งตรงข้ามล่าสุด
-      ก่อนถึงระดับที่ทะลุ ณ ตอนนี้เก็บไว้ใน structure['last_swings']) แล้ว project ระยะเท่ากันจากจุดที่
-      ทะลุจริงเป็นเป้าหมาย เป็นวิธีมาตรฐานของ breakout trading ที่ผูกเป้าหมายกับโครงสร้างราคาจริง
-      ไม่ใช่ตัวเลข RR ลอยๆ (สอดคล้องกับตรรกะเดียวกับที่ใช้เลือก SL ด้านบน)
-
-    คืน None ถ้าหาข้อมูล swing ที่จำเป็นไม่ได้ (กันไม่ให้ /order พังทั้งคำสั่งเพราะแผนเสริมคำนวณไม่ได้)
-    """
-    try:
-        from tp import calc_risk_reward
-
-        atr_period = config.get("sl_atr_avg_period", 20)
-        current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
-        buffer = config.get("sl_buffer_atr", 0.5) * current_atr
-
-        level = breakout["level"]
-        direction = breakout["direction"]
-        entry_price = breakout["price"]
-        swings = structure.get("last_swings", [])
-
-        if direction == "bullish":
-            stop_loss = level - buffer
-            lows = [p["price"] for p in swings if p["type"] == "low"]
-            if not lows:
-                return None
-            range_height = level - lows[-1]
-            take_profit = entry_price + range_height
-        else:
-            stop_loss = level + buffer
-            highs = [p["price"] for p in swings if p["type"] == "high"]
-            if not highs:
-                return None
-            range_height = highs[-1] - level
-            take_profit = entry_price - range_height
-
-        if range_height <= 0:
-            return None  # range หาความสูงไม่ได้จริง (swing ผิดปกติ) กันเผื่อไว้
-
-        rr = calc_risk_reward(entry_price, stop_loss, take_profit)
-        return {"stop_loss": stop_loss, "take_profit": take_profit, "rr": rr}
-    except Exception:
-        return None
-
-
-def _plan3_counter_order(counter, df_ind, config):
-    """
-    คำนวณ SL/TP ให้แผนที่ 3 (สวนเทรนด์):
-    - SL: วางไว้เลยจุด high/low ล่าสุด (จุดที่ราคาเพิ่งเด้งกลับมา เป็นสัญญาณของการสวนเทรนด์) ไปอีกนิดหน่อย
-      (buffer เดียวกับแผนที่ 2) ถ้าราคาทะลุจุดนั้นไปอีก แปลว่าที่คาดว่าจะกลับตัวยังไม่เกิดขึ้นจริง
-    - TP: เล็งที่ Equilibrium ของ Premium/Discount zone (สูตรเดียวกับที่ /trend ใช้แสดงผล) เพราะการ
-      สวนเทรนด์มักเป็นแค่การพักตัวระยะสั้นกลับไปแถวกึ่งกลาง range ไม่ใช่การกลับเทรนด์เต็มรูปแบบ
-      การตั้งเป้าไกลแบบ RR multiple เหมือน Plan 1 อาจเกินจริงสำหรับการเทรดสวนเทรนด์
-    """
-    try:
-        from tp import calc_risk_reward
-
-        atr_period = config.get("sl_atr_avg_period", 20)
-        current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
-        buffer = config.get("sl_buffer_atr", 0.5) * current_atr
-
-        direction = counter["direction"]
-        entry_price = df_ind["close"].iloc[-1]  # สวนเทรนด์เข้าที่ตลาด ไม่มีโซนรอเหมือน Plan 1
-
-        pd_zone = calc_premium_discount_zone(df_ind, config.get("structure_lookback", 50))
-        take_profit = pd_zone["equilibrium"]
-
-        if direction == "bullish":
-            stop_loss = df_ind["low"].tail(20).min() - buffer
-        else:
-            stop_loss = df_ind["high"].tail(20).max() + buffer
-
-        rr = calc_risk_reward(entry_price, stop_loss, take_profit)
-        return {"entry_price": entry_price, "stop_loss": stop_loss, "take_profit": take_profit, "rr": rr}
-    except Exception:
-        return None
-
-
 def _cmd_order(ctx):
     """
     เช็คทั้ง 3 แผน คืนเฉพาะแผนที่ตอนนี้เข้าเงื่อนไขจริงๆ เท่านั้น ตามที่ระบุไว้ในดีไซน์
@@ -230,8 +151,10 @@ def _cmd_order(ctx):
     ทั้ง 3 แผนคำนวณ Entry/SL/TP ให้พร้อมตั้ง Limit Order ได้ทันที:
       - แผนที่ 1 (Pullback): สูตรเดียวกับที่ main.py ใช้ส่ง Alert อัตโนมัติจริง (ATR เฉลี่ยย้อนหลัง)
         ถ้ายังไม่ยืนยัน 5M Trigger จะมีคำเตือนกำกับไว้ เพราะราคาอาจยังไม่กลับตัวจริง
-      - แผนที่ 2 (Breakout): ดู _plan2_breakout_order — SL อิงจุดที่ทะลุ, TP แบบ Measured move
-      - แผนที่ 3 (สวนเทรนด์): ดู _plan3_counter_order — SL อิงจุด high/low ล่าสุด, TP เล็ง Equilibrium
+      - แผนที่ 2 (Breakout) และแผนที่ 3 (สวนเทรนด์): ใช้ calc_breakout_order/calc_counter_trend_order
+        จาก scenario.py — จุดเดียวกับที่ main.py ใช้คำนวณตอน trigger จริงเพื่อบันทึกลง Order Dashboard
+        (กันตรรกะคำนวณ SL/TP ซ้ำซ้อนสองที่ ถ้าแก้สูตรต้องแก้ที่ scenario.py จุดเดียว ทั้งคู่จะได้ตัวเลข
+        ตรงกันเป๊ะเสมอ)
     """
     lines = ["📥 <b>เช็คโอกาสเข้าไม้ตอนนี้</b>", ""]
     found_any = False
@@ -239,8 +162,9 @@ def _cmd_order(ctx):
     entry_signal = ctx["entry_signal"]
     config = ctx["config"]
     df_ind = ctx["df_ind"]
+    structure = ctx["structure"]
 
-    if entry_signal.get("valid") and entry_signal.get("direction") == ctx["structure"]["trend"]:
+    if entry_signal.get("valid") and entry_signal.get("direction") == structure["trend"]:
         direction_th = "LONG" if entry_signal["direction"] == "bullish" else "SHORT"
         lines.append(f"✅ แผนที่ 1 (Pullback): {direction_th}")
 
@@ -274,27 +198,27 @@ def _cmd_order(ctx):
             )
         found_any = True
 
-    breakout = detect_breakout_trigger(ctx["df_ind"], ctx["structure"], ctx["config"])
+    breakout = detect_breakout_trigger(df_ind, structure, config)
     if breakout:
         direction_th = "LONG" if breakout["direction"] == "bullish" else "SHORT"
         lines.append(
             f"✅ แผนที่ 2 (Breakout): {direction_th} ทะลุ {breakout['level']:.4f} "
             f"ที่ราคา {breakout['price']:.4f}"
         )
-        plan2_order = _plan2_breakout_order(breakout, ctx["structure"], df_ind, config)
+        plan2_order = calc_breakout_order(breakout, structure, df_ind, config)
         if plan2_order:
-            lines.append(f"   Entry: {breakout['price']:.4f}")
+            lines.append(f"   Entry: {plan2_order['entry_price']:.4f}")
             lines.append(f"   SL: {plan2_order['stop_loss']:.4f}")
             lines.append(f"   TP (Measured move): {plan2_order['take_profit']:.4f} (RR {plan2_order['rr']})")
         else:
             lines.append("   (หาข้อมูล swing ไม่พอสำหรับคำนวณ SL/TP ของแผนนี้)")
         found_any = True
 
-    counter = detect_counter_trend_trigger(ctx["df_ind"], ctx["structure"])
+    counter = detect_counter_trend_trigger(df_ind, structure)
     if counter:
         direction_th = "LONG" if counter["direction"] == "bullish" else "SHORT"
         lines.append(f"✅ แผนที่ 3 (สวนเทรนด์): {direction_th} — Checklist ครบ 3/3 ข้อ")
-        plan3_order = _plan3_counter_order(counter, df_ind, config)
+        plan3_order = calc_counter_trend_order(counter, df_ind, config)
         if plan3_order:
             lines.append(f"   Entry: {plan3_order['entry_price']:.4f}")
             lines.append(f"   SL: {plan3_order['stop_loss']:.4f}")
@@ -399,12 +323,23 @@ def _cmd_summary(ctx):
     return build_orders_dashboard(symbol, orders, current_price)
 
 
+def _cmd_stats(ctx):
+    """แสดง win rate/expectancy แยกรายแผน (1/2/3) จากออเดอร์ที่ปิดแล้วทั้งหมดใน Order Dashboard"""
+    config = ctx["config"]
+    symbol = ctx["symbol"]
+    current_price = ctx["df_ind"]["close"].iloc[-1]
+    orders = update_orders_status(config["kvdb_bucket"], symbol, current_price)
+    stats = calc_stats(orders)
+    return build_stats_message(symbol, stats)
+
+
 COMMAND_HANDLERS = {
     "order": _cmd_order,
     "trend": _cmd_trend,
     "news": _cmd_news,
     "status": _cmd_status,
     "summary": _cmd_summary,
+    "stats": _cmd_stats,
 }
 
 

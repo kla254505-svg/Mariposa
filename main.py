@@ -19,6 +19,7 @@ from chart import build_entry_chart
 from scenario import (
     build_hourly_briefing, build_pullback_plan,
     detect_breakout_trigger, detect_counter_trend_trigger,
+    calc_breakout_order, calc_counter_trend_order,
 )
 from dashboard import build_dashboard_message
 from session import get_session_info
@@ -392,7 +393,8 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
         # --- บันทึกออเดอร์ไว้ให้ /summary และสรุปรายวันเช็คผล TP/SL ย้อนหลังได้ (ทำเสมอ ไม่ว่าจะ push หรือไม่) ---
         try:
             add_order(config["kvdb_bucket"], symbol, entry_signal["direction"],
-                      entry_signal["entry_price"], stop_loss, take_profits, confidence["score"])
+                      entry_signal["entry_price"], stop_loss, take_profits, confidence["score"],
+                      plan="plan1_pullback")
         except Exception as e:
             print(f"[Order Tracking Error] {e}")
 
@@ -468,6 +470,10 @@ if __name__ == "__main__":
 
             # --- Plan 2/3 จาก Hourly Briefing (Breakout / สวนเทรนด์): เช็คทุกรอบว่า "เข้าออเดอร์จริง" หรือยัง ---
             # ไม่ใช่แค่ข้อความในบรีฟฟิ่งเฉยๆ แล้ว ถ้าทริกเกอร์จริงจะยิง Telegram (แชทเดิม + กลุ่ม) พร้อมหมายเหตุ
+            # และตอนนี้จะบันทึกลง Order Dashboard ด้วย (add_order) เพื่อให้ /stats วัด win rate/expectancy
+            # แยกรายแผนได้ครบทั้ง 3 แผน ไม่ใช่แค่ Plan 1 เหมือนเดิม — ใช้ calc_breakout_order/
+            # calc_counter_trend_order จาก scenario.py (จุดเดียวกับที่ /order ใน telegram_bot.py ใช้
+            # แสดงผล กันตรรกะคำนวณ SL/TP ซ้ำซ้อนสองที่)
             #
             # กันสแปมแบบ "state-based" แทน cooldown ตามเวลา: เดิมใช้ is_in_cooldown/mark_alert_sent (ตามนาที)
             # แต่พบว่าพอเวลาผ่านไปเกิน cooldown มันเตือนซ้ำระดับ Breakout เดิมที่ยังไม่มีสวิงใหม่เกิดขึ้นจริง
@@ -527,6 +533,30 @@ if __name__ == "__main__":
                         "ควรพิจารณาความเสี่ยงเพิ่มเติมเอง หรือลดขนาดไม้ก่อนเข้า"
                     )
 
+                    # --- คำนวณ SL/TP ของแผนนี้แล้วบันทึกลง Order Dashboard (ให้ /stats วัดผลได้) ---
+                    # ใช้ calc_breakout_order/calc_counter_trend_order จาก scenario.py จุดเดียวกับที่
+                    # telegram_bot.py ใช้แสดงผลใน /order — ถ้าคำนวณไม่สำเร็จ (หา swing/ATR ไม่ได้) จะข้าม
+                    # การบันทึกออเดอร์ไปเงียบๆ แต่ยังคงส่ง Telegram alert ตามปกติ (ไม่ให้ alert หายเพราะ
+                    # แค่บันทึกสถิติพลาด)
+                    try:
+                        if plan_key == "plan2_breakout":
+                            calc_order = calc_breakout_order(trigger, structure_plan, df_ind_plan, CONFIG)
+                        else:
+                            calc_order = calc_counter_trend_order(trigger, df_ind_plan, CONFIG)
+
+                        if calc_order:
+                            add_order(
+                                CONFIG["kvdb_bucket"], display_symbol, calc_order["direction"],
+                                calc_order["entry_price"], calc_order["stop_loss"],
+                                {"TP1": calc_order["take_profit"]}, score=None, plan=plan_key,
+                            )
+                            plan_msg += (
+                                f"\n\nEntry: {calc_order['entry_price']:.4f} | SL: {calc_order['stop_loss']:.4f} | "
+                                f"TP: {calc_order['take_profit']:.4f} (RR {calc_order['rr']})"
+                            )
+                    except Exception as e:
+                        print(f"[Plan {plan_key} Order Tracking Error] {e}")
+
                     if CONFIG.get("push_notifications_enabled", True):
                         plan_alert_targets = [CONFIG["telegram_chat_id"]]
                         if CONFIG.get("telegram_group_chat_id"):
@@ -538,7 +568,7 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"[Plan 2/3 Trigger Error] {display_symbol}: {e}")
 
-            # หมายเหตุ: การตอบคำสั่ง Telegram (/order /trend /news /status /summary) ย้ายไปทำที่
+            # หมายเหตุ: การตอบคำสั่ง Telegram (/order /trend /news /status /summary /stats) ย้ายไปทำที่
             # run_bot.py บน Render แล้ว (รันแบบ polling loop ตลอดเวลา ตอบเร็วกว่านี้มาก)
             # main.py ตัวนี้ (บน GitHub Actions cron) ทำหน้าที่แค่วิเคราะห์ + ส่ง Alert เท่านั้น
             # ห้ามเรียก handle_telegram_commands() ที่นี่ซ้ำ เพราะจะแย่ง offset ของ getUpdates กับ Render

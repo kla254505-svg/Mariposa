@@ -6,6 +6,7 @@ scenario.py
 from candles import detect_engulfing, detect_pin_bar, detect_macd_cross, detect_rsi_divergence
 from risk import calc_stop_loss
 from tp import calc_take_profits, calc_risk_reward
+from zones import calc_premium_discount_zone
 
 
 def build_pullback_plan(df, structure, entry_signal, config):
@@ -152,6 +153,93 @@ def detect_counter_trend_trigger(df, structure):
     if all(checklist.values()):
         return {"direction": counter_direction, "checklist": checklist}
     return None
+
+
+def calc_breakout_order(breakout, structure, df, config):
+    """
+    คำนวณ Entry/SL/TP ให้แผนที่ 2 (Breakout) — จุดเดียวที่ใช้ร่วมกันทั้ง main.py (ตอน trigger จริง
+    เพื่อบันทึกออเดอร์ลง Order Dashboard) และ telegram_bot.py (ตอนแสดงผลใน /order)
+
+    - SL แบบอิงจุดที่ทะลุ (structure-based): วางไว้เลยระดับที่ทะลุ (breakout['level']) กลับไปอีกฝั่ง
+      นิดหน่อย (buffer = sl_buffer_atr × ATR เฉลี่ย ตัวเดียวกับที่ main.py ใช้ตอน tighten SL ของ Plan 1)
+      ตรรกะ: ถ้าราคาย้อนกลับผ่านระดับเดิมไปอีกฝั่ง breakout ครั้งนี้ถือว่าล้มเหลว (false breakout)
+    - TP แบบ Measured move: วัดความสูงของ range ที่ราคาสะสมตัวก่อนทะลุ (จาก swing ฝั่งตรงข้ามล่าสุด
+      ก่อนถึงระดับที่ทะลุ ณ ตอนนี้เก็บไว้ใน structure['last_swings']) แล้ว project ระยะเท่ากันจากจุดที่
+      ทะลุจริงเป็นเป้าหมาย เป็นวิธีมาตรฐานของ breakout trading ที่ผูกเป้าหมายกับโครงสร้างราคาจริง
+      ไม่ใช่ตัวเลข RR ลอยๆ (สอดคล้องกับตรรกะเดียวกับที่ใช้เลือก SL ด้านบน)
+
+    คืน None ถ้าหาข้อมูล swing ที่จำเป็นไม่ได้ (กันไม่ให้ผู้เรียกพังเพราะแผนเสริมคำนวณไม่ได้)
+    """
+    try:
+        atr_period = config.get("sl_atr_avg_period", 20)
+        current_atr = df["atr"].tail(atr_period).mean() if "atr" in df.columns and len(df) else 0
+        buffer = config.get("sl_buffer_atr", 0.5) * current_atr
+
+        level = breakout["level"]
+        direction = breakout["direction"]
+        entry_price = breakout["price"]
+        swings = structure.get("last_swings", [])
+
+        if direction == "bullish":
+            stop_loss = level - buffer
+            lows = [p["price"] for p in swings if p["type"] == "low"]
+            if not lows:
+                return None
+            range_height = level - lows[-1]
+            take_profit = entry_price + range_height
+        else:
+            stop_loss = level + buffer
+            highs = [p["price"] for p in swings if p["type"] == "high"]
+            if not highs:
+                return None
+            range_height = highs[-1] - level
+            take_profit = entry_price - range_height
+
+        if range_height <= 0:
+            return None  # range หาความสูงไม่ได้จริง (swing ผิดปกติ) กันเผื่อไว้
+
+        rr = calc_risk_reward(entry_price, stop_loss, take_profit)
+        return {
+            "direction": direction, "entry_price": entry_price,
+            "stop_loss": stop_loss, "take_profit": take_profit, "rr": rr,
+        }
+    except Exception:
+        return None
+
+
+def calc_counter_trend_order(counter, df, config):
+    """
+    คำนวณ Entry/SL/TP ให้แผนที่ 3 (สวนเทรนด์) — จุดเดียวที่ใช้ร่วมกันทั้ง main.py และ telegram_bot.py
+
+    - SL: วางไว้เลยจุด high/low ล่าสุด (จุดที่ราคาเพิ่งเด้งกลับมา เป็นสัญญาณของการสวนเทรนด์) ไปอีกนิดหน่อย
+      (buffer เดียวกับแผนที่ 2) ถ้าราคาทะลุจุดนั้นไปอีก แปลว่าที่คาดว่าจะกลับตัวยังไม่เกิดขึ้นจริง
+    - TP: เล็งที่ Equilibrium ของ Premium/Discount zone (สูตรเดียวกับที่ /trend ใช้แสดงผล) เพราะการ
+      สวนเทรนด์มักเป็นแค่การพักตัวระยะสั้นกลับไปแถวกึ่งกลาง range ไม่ใช่การกลับเทรนด์เต็มรูปแบบ
+      การตั้งเป้าไกลแบบ RR multiple เหมือน Plan 1 อาจเกินจริงสำหรับการเทรดสวนเทรนด์
+    """
+    try:
+        atr_period = config.get("sl_atr_avg_period", 20)
+        current_atr = df["atr"].tail(atr_period).mean() if "atr" in df.columns and len(df) else 0
+        buffer = config.get("sl_buffer_atr", 0.5) * current_atr
+
+        direction = counter["direction"]
+        entry_price = df["close"].iloc[-1]  # สวนเทรนด์เข้าที่ตลาด ไม่มีโซนรอเหมือน Plan 1
+
+        pd_zone = calc_premium_discount_zone(df, config.get("structure_lookback", 50))
+        take_profit = pd_zone["equilibrium"]
+
+        if direction == "bullish":
+            stop_loss = df["low"].tail(20).min() - buffer
+        else:
+            stop_loss = df["high"].tail(20).max() + buffer
+
+        rr = calc_risk_reward(entry_price, stop_loss, take_profit)
+        return {
+            "direction": direction, "entry_price": entry_price,
+            "stop_loss": stop_loss, "take_profit": take_profit, "rr": rr,
+        }
+    except Exception:
+        return None
 
 
 def build_summary(structure, entry_signal):
