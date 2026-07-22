@@ -2,6 +2,8 @@
 telegram_bot.py
 ระบบรับคำสั่งจาก Telegram (Interactive Commands) เพิ่มเติมจากที่บอทส่งแจ้งเตือนอัตโนมัติอยู่แล้ว
 รองรับ: /order /order1 /order2 /order3 /trend /news /status /summary /stats /confirm1 /confirm2 /confirm3
+(/order, /order1-3 บันทึกลง Order Dashboard ให้อัตโนมัติทันทีที่เจอจุดเข้าอยู่แล้ว ส่วน /confirm1-3
+ใช้กดยืนยัน/บันทึกซ้ำแบบเจาะจงเองได้อีกที มีระบบกันบันทึกซ้ำร่วมกันทั้งหมด ไม่ทำให้ข้อมูลซ้ำซ้อน)
 
 ข้อจำกัดสำคัญที่ควรรู้ก่อนใช้: บอทนี้รันบน GitHub Actions แบบ cron (ไม่ใช่ server ที่ฟังตลอดเวลา)
 คำสั่งที่พิมพ์จะถูกประมวลผล "ตอนที่บอทรันรอบถัดไป" เท่านั้น ไม่ใช่ตอบทันที ถ้า cron ตั้งไว้ทุก 5 นาที
@@ -148,13 +150,28 @@ def _reply(token, chat_id, text):
         print(f"[Telegram Bot Error] ส่งข้อความตอบกลับล้มเหลว: {e}")
 
 
+def _has_similar_running_order(bucket, symbol, plan, direction, entry_price, threshold):
+    """เช็คว่ามีออเดอร์ที่ยัง running อยู่ ของ plan/ทิศทางเดียวกัน ราคาใกล้เคียงกัน (ภายใน threshold) แล้วหรือยัง
+    ใช้กันไม่ให้ /order, /order1-3 บันทึกออเดอร์ซ้ำถ้าเช็คซ้ำหลายครั้ง หรือของเดิม main.py บันทึก
+    อัตโนมัติไปแล้ว (Plan 2/3 ที่ trigger จริงจะถูก main.py บันทึกเองด้วยอยู่แล้ว)"""
+    for o in load_orders(bucket, symbol):
+        if (o["status"] == "running" and o.get("plan") == plan
+                and o["direction"] == direction
+                and abs(o["entry_price"] - entry_price) < threshold):
+            return True
+    return False
+
+
 def _cmd_order(ctx):
     """
     เช็คทั้ง 3 แผน คืนเฉพาะแผนที่ตอนนี้เข้าเงื่อนไขจริงๆ เท่านั้น ตามที่ระบุไว้ในดีไซน์
 
-    ทั้ง 3 แผนคำนวณ Entry/SL/TP ให้พร้อมตั้ง Limit Order ได้ทันที:
+    ทั้ง 3 แผนคำนวณ Entry/SL/TP ให้พร้อมตั้ง Limit Order ได้ทันที และ "บันทึกลง Order Dashboard
+    ให้อัตโนมัติทันที" ที่เจอจุดเข้า (ไม่ต้องพิมพ์คำสั่งยืนยันแยกต่างหากอีกแล้ว) มีระบบกันบันทึกซ้ำ
+    (_has_similar_running_order) ถ้าเช็คซ้ำหลายครั้งขณะจุดเข้ายังไม่เปลี่ยน จะไม่บันทึกซ้ำเข้าไปอีก:
       - แผนที่ 1 (Pullback): สูตรเดียวกับที่ main.py ใช้ส่ง Alert อัตโนมัติจริง (ATR เฉลี่ยย้อนหลัง)
-        ถ้ายังไม่ยืนยัน 5M Trigger จะมีคำเตือนกำกับไว้ เพราะราคาอาจยังไม่กลับตัวจริง
+        ถ้ายังไม่ยืนยัน 5M Trigger จะบันทึกแยกเป็น plan "plan1_pullback_early" (คนละกลุ่มกับที่ยืนยัน
+        แล้ว "plan1_pullback") เพื่อให้ /stats เทียบได้ว่าเข้าก่อนยืนยันกับรอยืนยันแล้วเข้า อันไหนแม่นกว่า
       - แผนที่ 2 (Breakout) และแผนที่ 3 (สวนเทรนด์): ใช้ calc_breakout_order/calc_counter_trend_order
         จาก scenario.py — จุดเดียวกับที่ main.py ใช้คำนวณตอน trigger จริงเพื่อบันทึกลง Order Dashboard
         (กันตรรกะคำนวณ SL/TP ซ้ำซ้อนสองที่ ถ้าแก้สูตรต้องแก้ที่ scenario.py จุดเดียว ทั้งคู่จะได้ตัวเลข
@@ -167,6 +184,8 @@ def _cmd_order(ctx):
     config = ctx["config"]
     df_ind = ctx["df_ind"]
     structure = ctx["structure"]
+    symbol = ctx["symbol"]
+    bucket = config["kvdb_bucket"]
 
     if entry_signal.get("valid") and entry_signal.get("direction") == structure["trend"]:
         direction_th = "LONG" if entry_signal["direction"] == "bullish" else "SHORT"
@@ -189,16 +208,24 @@ def _cmd_order(ctx):
             lines.append(f"   SL: {stop_loss:.4f}")
             for name, price in take_profits.items():
                 lines.append(f"   {name}: {price:.4f} (RR {rr[name]})")
-        except Exception as e:
-            lines.append(f"   (คำนวณ SL/TP ไม่สำเร็จ: {e})")
 
-        if entry_signal.get("trigger", {}).get("confirmed"):
-            lines.append("   5M Trigger ยืนยันแล้ว ✅ — พร้อมเข้าจริงตามตัวเลขข้างต้น")
-        else:
+            confirmed = bool(entry_signal.get("trigger", {}).get("confirmed"))
+            plan_key = "plan1_pullback" if confirmed else "plan1_pullback_early"
+            threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+            if _has_similar_running_order(bucket, symbol, plan_key, entry_signal["direction"],
+                                           entry_signal["entry_price"], threshold):
+                lines.append("   📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
+            else:
+                add_order(bucket, symbol, entry_signal["direction"], entry_signal["entry_price"],
+                          stop_loss, take_profits, score=None, plan=plan_key)
+                tag = "ยืนยันแล้ว" if confirmed else "เข้าก่อนยืนยัน"
+                lines.append(f"   📌 บันทึกลง Order Dashboard แล้ว ({tag})")
+        except Exception as e:
+            lines.append(f"   (คำนวณ/บันทึก SL/TP ไม่สำเร็จ: {e})")
+
+        if not entry_signal.get("trigger", {}).get("confirmed"):
             lines.append(
-                "   ⚠️ ยังไม่ยืนยัน 5M Trigger — ถ้าตั้ง Limit Order ล่วงหน้าตามนี้ ราคาอาจยังไม่กลับตัวจริง "
-                "เข้าก่อนเวลาอาจโดนสวนได้ ควรพิจารณาความเสี่ยงเพิ่มเติมเอง หรือรอให้ /order ขึ้น "
-                "\"ยืนยันแล้ว\" ก่อนค่อยตั้งจริง"
+                "   ⚠️ ยังไม่ยืนยัน 5M Trigger — ราคาอาจยังไม่กลับตัวจริง เข้าก่อนเวลาอาจโดนสวนได้"
             )
         found_any = True
 
@@ -214,6 +241,18 @@ def _cmd_order(ctx):
             lines.append(f"   Entry: {plan2_order['entry_price']:.4f}")
             lines.append(f"   SL: {plan2_order['stop_loss']:.4f}")
             lines.append(f"   TP (Measured move): {plan2_order['take_profit']:.4f} (RR {plan2_order['rr']})")
+
+            atr_period = config.get("sl_atr_avg_period", 20)
+            current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
+            threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+            if _has_similar_running_order(bucket, symbol, "plan2_breakout", plan2_order["direction"],
+                                           plan2_order["entry_price"], threshold):
+                lines.append("   📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
+            else:
+                add_order(bucket, symbol, plan2_order["direction"], plan2_order["entry_price"],
+                          plan2_order["stop_loss"], {"TP1": plan2_order["take_profit"]},
+                          score=None, plan="plan2_breakout")
+                lines.append("   📌 บันทึกลง Order Dashboard แล้ว")
         else:
             lines.append("   (หาข้อมูล swing ไม่พอสำหรับคำนวณ SL/TP ของแผนนี้)")
         found_any = True
@@ -227,7 +266,19 @@ def _cmd_order(ctx):
             lines.append(f"   Entry: {plan3_order['entry_price']:.4f}")
             lines.append(f"   SL: {plan3_order['stop_loss']:.4f}")
             lines.append(f"   TP (Equilibrium): {plan3_order['take_profit']:.4f} (RR {plan3_order['rr']})")
-            lines.append("   ⚠️ แผนสวนเทรนด์เสี่ยงสูงกว่าแผนอื่น ควรลดขนาดไม้/พิจารณาความเสี่ยงเพิ่มเติมเอง")
+            lines.append("   ⚠️ แผนสวนเทรนด์เสี่ยงสูงกว่าแผนอื่น ควรลดขนาดไม้")
+
+            atr_period = config.get("sl_atr_avg_period", 20)
+            current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
+            threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+            if _has_similar_running_order(bucket, symbol, "plan3_counter_trend", plan3_order["direction"],
+                                           plan3_order["entry_price"], threshold):
+                lines.append("   📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
+            else:
+                add_order(bucket, symbol, plan3_order["direction"], plan3_order["entry_price"],
+                          plan3_order["stop_loss"], {"TP1": plan3_order["take_profit"]},
+                          score=None, plan="plan3_counter_trend")
+                lines.append("   📌 บันทึกลง Order Dashboard แล้ว")
         else:
             lines.append("   (คำนวณ SL/TP ของแผนนี้ไม่สำเร็จ)")
         found_any = True
@@ -243,11 +294,14 @@ def _cmd_order(ctx):
 
 
 def _cmd_order1(ctx):
-    """แสดงเฉพาะสถานะแผนที่ 1 (Pullback) — ถ้ายังไม่เข้าเงื่อนไข จะบอกเหตุผล/สถานะปัจจุบันด้วย"""
+    """แสดงเฉพาะสถานะแผนที่ 1 (Pullback) — ถ้าเข้าเงื่อนไข จะบันทึกลง Order Dashboard ให้อัตโนมัติทันที
+    ถ้ายังไม่เข้าเงื่อนไข จะบอกเหตุผล/สถานะปัจจุบันแทน"""
     entry_signal = ctx["entry_signal"]
     structure = ctx["structure"]
     config = ctx["config"]
     df_ind = ctx["df_ind"]
+    symbol = ctx["symbol"]
+    bucket = config["kvdb_bucket"]
 
     lines = ["📥 <b>แผนที่ 1 (Pullback)</b>", ""]
     active = entry_signal.get("valid") and entry_signal.get("direction") == structure["trend"]
@@ -272,16 +326,23 @@ def _cmd_order1(ctx):
             lines.append(f"SL: {stop_loss:.4f}")
             for name, price in take_profits.items():
                 lines.append(f"{name}: {price:.4f} (RR {rr[name]})")
-        except Exception as e:
-            lines.append(f"(คำนวณ SL/TP ไม่สำเร็จ: {e})")
 
-        if entry_signal.get("trigger", {}).get("confirmed"):
-            lines.append("5M Trigger ยืนยันแล้ว ✅ — พิมพ์ /confirm1 เพื่อบันทึกลง Order Dashboard")
-        else:
-            lines.append(
-                "⚠️ ยังไม่ยืนยัน 5M Trigger — ราคาอาจยังไม่กลับตัวจริง ถ้าจะเข้าก่อนยืนยัน "
-                "พิมพ์ /confirm1 เพื่อบันทึกเป็นข้อมูลแยกไว้เทียบผลลัพธ์ทีหลัง"
-            )
+            confirmed = bool(entry_signal.get("trigger", {}).get("confirmed"))
+            plan_key = "plan1_pullback" if confirmed else "plan1_pullback_early"
+            threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+            if _has_similar_running_order(bucket, symbol, plan_key, entry_signal["direction"],
+                                           entry_signal["entry_price"], threshold):
+                lines.append("📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
+            else:
+                add_order(bucket, symbol, entry_signal["direction"], entry_signal["entry_price"],
+                          stop_loss, take_profits, score=None, plan=plan_key)
+                tag = "ยืนยันแล้ว" if confirmed else "เข้าก่อนยืนยัน"
+                lines.append(f"📌 บันทึกลง Order Dashboard แล้ว ({tag})")
+        except Exception as e:
+            lines.append(f"(คำนวณ/บันทึก SL/TP ไม่สำเร็จ: {e})")
+
+        if not entry_signal.get("trigger", {}).get("confirmed"):
+            lines.append("⚠️ ยังไม่ยืนยัน 5M Trigger — ราคาอาจยังไม่กลับตัวจริง เข้าก่อนเวลาอาจโดนสวนได้")
     else:
         trend_th = TREND_LABEL.get(structure.get("trend"), "-")
         lines.append(f"ยังไม่เข้าเงื่อนไขตอนนี้ครับ (เทรนด์หลัก 15M ตอนนี้: {trend_th})")
@@ -296,10 +357,13 @@ def _cmd_order1(ctx):
 
 
 def _cmd_order2(ctx):
-    """แสดงเฉพาะสถานะแผนที่ 2 (Breakout) — ถ้ายังไม่ทะลุ จะบอกระยะห่างจากจุด trigger ทั้งสองฝั่ง"""
+    """แสดงเฉพาะสถานะแผนที่ 2 (Breakout) — ถ้าทะลุแล้ว จะบันทึกลง Order Dashboard ให้อัตโนมัติทันที
+    ถ้ายังไม่ทะลุ จะบอกระยะห่างจากจุด trigger ทั้งสองฝั่งแทน"""
     df_ind = ctx["df_ind"]
     structure = ctx["structure"]
     config = ctx["config"]
+    symbol = ctx["symbol"]
+    bucket = config["kvdb_bucket"]
 
     lines = ["📥 <b>แผนที่ 2 (Breakout)</b>", ""]
     breakout = detect_breakout_trigger(df_ind, structure, config)
@@ -314,7 +378,17 @@ def _cmd_order2(ctx):
             lines.append(f"Entry: {order['entry_price']:.4f}")
             lines.append(f"SL: {order['stop_loss']:.4f}")
             lines.append(f"TP (Measured move): {order['take_profit']:.4f} (RR {order['rr']})")
-            lines.append("พิมพ์ /confirm2 เพื่อบันทึกลง Order Dashboard")
+
+            atr_period = config.get("sl_atr_avg_period", 20)
+            current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
+            threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+            if _has_similar_running_order(bucket, symbol, "plan2_breakout", order["direction"],
+                                           order["entry_price"], threshold):
+                lines.append("📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
+            else:
+                add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+                          {"TP1": order["take_profit"]}, score=None, plan="plan2_breakout")
+                lines.append("📌 บันทึกลง Order Dashboard แล้ว")
         else:
             lines.append("(หาข้อมูล swing ไม่พอสำหรับคำนวณ SL/TP ของแผนนี้)")
     else:
@@ -336,10 +410,13 @@ def _cmd_order2(ctx):
 
 
 def _cmd_order3(ctx):
-    """แสดงเฉพาะสถานะแผนที่ 3 (สวนเทรนด์) — ถ้ายังไม่ครบ checklist จะบอกว่าขาดข้อไหนอยู่"""
+    """แสดงเฉพาะสถานะแผนที่ 3 (สวนเทรนด์) — ถ้าครบ checklist แล้ว จะบันทึกลง Order Dashboard ให้อัตโนมัติทันที
+    ถ้ายังไม่ครบ จะบอกว่าขาดข้อไหนอยู่แทน"""
     df_ind = ctx["df_ind"]
     structure = ctx["structure"]
     config = ctx["config"]
+    symbol = ctx["symbol"]
+    bucket = config["kvdb_bucket"]
 
     lines = ["📥 <b>แผนที่ 3 (สวนเทรนด์)</b>", ""]
     counter = detect_counter_trend_trigger(df_ind, structure)
@@ -353,7 +430,17 @@ def _cmd_order3(ctx):
             lines.append(f"SL: {order['stop_loss']:.4f}")
             lines.append(f"TP (Equilibrium): {order['take_profit']:.4f} (RR {order['rr']})")
             lines.append("⚠️ แผนสวนเทรนด์เสี่ยงสูงกว่าแผนอื่น ควรลดขนาดไม้")
-            lines.append("พิมพ์ /confirm3 เพื่อบันทึกลง Order Dashboard")
+
+            atr_period = config.get("sl_atr_avg_period", 20)
+            current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
+            threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+            if _has_similar_running_order(bucket, symbol, "plan3_counter_trend", order["direction"],
+                                           order["entry_price"], threshold):
+                lines.append("📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
+            else:
+                add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+                          {"TP1": order["take_profit"]}, score=None, plan="plan3_counter_trend")
+                lines.append("📌 บันทึกลง Order Dashboard แล้ว")
         else:
             lines.append("(คำนวณ SL/TP ของแผนนี้ไม่สำเร็จ)")
     else:
@@ -466,26 +553,16 @@ def _cmd_stats(ctx):
     return build_stats_message(symbol, stats)
 
 
-def _has_similar_running_order(bucket, symbol, plan, direction, entry_price, threshold):
-    """เช็คว่ามีออเดอร์ที่ยัง running อยู่ ของ plan/ทิศทางเดียวกัน ราคาใกล้เคียงกัน (ภายใน threshold) แล้วหรือยัง
-    ใช้กันไม่ให้ /confirm1-3 บันทึกออเดอร์ซ้ำถ้ากดซ้ำ หรือของเดิม main.py บันทึกอัตโนมัติไปแล้ว"""
-    for o in load_orders(bucket, symbol):
-        if (o["status"] == "running" and o.get("plan") == plan
-                and o["direction"] == direction
-                and abs(o["entry_price"] - entry_price) < threshold):
-            return True
-    return False
-
-
 def _cmd_confirm1(ctx):
     """
-    บันทึกออเดอร์แผนที่ 1 (Pullback) ที่กำลังเห็นตอนนี้ลง Order Dashboard ด้วยตัวเอง (manual confirm)
+    บันทึกออเดอร์แผนที่ 1 (Pullback) ที่กำลังเห็นตอนนี้ลง Order Dashboard ทันที (manual confirm)
     ใช้ตอนตัดสินใจตั้ง Limit Order ตามจุด Entry ที่ /order หรือ /order1 แสดงไว้ โดยไม่ต้องรอให้ main.py
     ยิง Alert อัตโนมัติ (ซึ่งจะยิงก็ต่อเมื่อผ่านทุกฟิลเตอร์ 4H/1H/ADX/Session/Score/5M Trigger ครบ)
 
-    ถ้ายังไม่มี 5M Trigger ยืนยัน จะบันทึกแยกเป็น plan "plan1_pullback_early" (คนละกลุ่มกับที่ระบบ
-    auto-confirm บันทึกไว้เป็น "plan1_pullback") เพื่อให้ /stats เปรียบเทียบได้ว่า "เข้าก่อนยืนยัน"
-    กับ "รอยืนยันแล้วค่อยเข้า" อันไหนแม่นกว่ากันจริงๆ จากข้อมูลจริงที่สะสมไป
+    ถ้ายังไม่มี 5M Trigger ยืนยัน จะบันทึกแยกเป็น plan "plan1_pullback_early" (คนละกลุ่มกับที่ยืนยัน
+    แล้ว "plan1_pullback") เพื่อให้ /stats เปรียบเทียบได้ว่า "เข้าก่อนยืนยัน" กับ "รอยืนยันแล้วค่อยเข้า"
+    อันไหนแม่นกว่ากันจริงๆ จากข้อมูลจริงที่สะสมไป — มีระบบกันบันทึกซ้ำ (_has_similar_running_order)
+    เดียวกับที่ /order ใช้ ถ้ากด /confirm1 ซ้ำหรือ /order เพิ่งบันทึกจุดเดียวกันไปแล้ว จะไม่บันทึกซ้ำ
     """
     entry_signal = ctx["entry_signal"]
     structure = ctx["structure"]
@@ -528,7 +605,7 @@ def _cmd_confirm1(ctx):
 
 
 def _cmd_confirm2(ctx):
-    """บันทึกออเดอร์แผนที่ 2 (Breakout) ที่กำลังทะลุอยู่ตอนนี้ลง Order Dashboard ด้วยตัวเอง"""
+    """บันทึกออเดอร์แผนที่ 2 (Breakout) ที่กำลังทะลุอยู่ตอนนี้ลง Order Dashboard ทันที"""
     df_ind = ctx["df_ind"]
     structure = ctx["structure"]
     config = ctx["config"]
@@ -561,7 +638,7 @@ def _cmd_confirm2(ctx):
 
 
 def _cmd_confirm3(ctx):
-    """บันทึกออเดอร์แผนที่ 3 (สวนเทรนด์) ที่ Checklist ครบ 3/3 อยู่ตอนนี้ลง Order Dashboard ด้วยตัวเอง"""
+    """บันทึกออเดอร์แผนที่ 3 (สวนเทรนด์) ที่ Checklist ครบ 3/3 อยู่ตอนนี้ลง Order Dashboard ทันที"""
     df_ind = ctx["df_ind"]
     structure = ctx["structure"]
     config = ctx["config"]
