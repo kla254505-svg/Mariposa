@@ -32,12 +32,31 @@ def load_orders(bucket, symbol):
 
 
 def save_orders(bucket, symbol, orders):
-    kv_set(bucket, f"{ORDERS_KEY_PREFIX}_{symbol}", json.dumps(orders))
+    """
+    บันทึกลิสต์ออเดอร์ลง kvdb.io คืนค่า True/False ตามผลจริง (ไม่ใช่แค่ยิง request ไปเฉยๆ)
+
+    บั๊กเดิม: ฟังก์ชันนี้เรียก kv_set() แต่ไม่เคยเช็ค/คืนค่าผลลัพธ์เลย ทำให้ add_order() ด้านล่าง
+    รายงานว่า "บันทึกสำเร็จ" เสมอแม้ kv_set จะเขียนไม่ผ่านจริง (เช่นโดน rate limit ตอน kvdb.io
+    ถูกเรียกถี่จากการทดสอบหนัก) ผู้ใช้เห็นข้อความ "บันทึกลง Order Dashboard แล้ว" ทั้งที่ /summary
+    และ /stats ว่างเปล่า เพราะไม่มีอะไรถูกเขียนลง kvdb จริงๆ
+
+    ตอนนี้ลอง retry 1 ครั้งกันเคส rate limit ชั่วคราว (เว้น 1 วิ) ก่อนจะยอมรับว่าล้มเหลวจริง
+    """
+    import time
+    key = f"{ORDERS_KEY_PREFIX}_{symbol}"
+    payload = json.dumps(orders)
+    if kv_set(bucket, key, payload):
+        return True
+    time.sleep(1)
+    return kv_set(bucket, key, payload)
 
 
 def add_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, score, plan="plan1_pullback"):
     """
     บันทึกออเดอร์ใหม่ตอนที่ Alert ถูกส่งจริง (ไม่ว่าจะเป็นแผนที่ 1/2/3)
+    คืนค่า order dict ถ้าบันทึกสำเร็จจริง หรือ None ถ้าบันทึกไม่สำเร็จ (kvdb เขียนพลาดแม้ retry แล้ว)
+    — ผู้เรียก (telegram_bot.py/main.py) ต้องเช็คค่าที่คืนมาก่อนบอกผู้ใช้ว่า "บันทึกสำเร็จ"
+    ห้ามสมมติว่าสำเร็จเสมอเหมือนเดิม
 
     plan: "plan1_pullback" | "plan2_breakout" | "plan3_counter_trend" — ใช้แยกคำนวณสถิติ
     (win rate/expectancy) รายแผนใน calc_stats() ด้านล่าง ค่า default เป็น plan1_pullback
@@ -68,7 +87,11 @@ def add_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, s
         "status": "running",
     }
     orders.append(order)
-    save_orders(bucket, symbol, orders)
+    success = save_orders(bucket, symbol, orders)
+    if not success:
+        print(f"[Order Tracking Error] บันทึกออเดอร์ (symbol={symbol}, plan={plan}) ลง kvdb ไม่สำเร็จ "
+              f"แม้ retry แล้ว — ออเดอร์นี้จะไม่ปรากฏใน /summary หรือ /stats")
+        return None
     return order
 
 
@@ -106,7 +129,9 @@ def update_orders_status(bucket, symbol, current_price):
                 changed = True
 
     if changed:
-        save_orders(bucket, symbol, orders)
+        if not save_orders(bucket, symbol, orders):
+            print(f"[Order Tracking Error] บันทึกสถานะ win/loss ที่เปลี่ยนไป (symbol={symbol}) ลง kvdb "
+                  f"ไม่สำเร็จ — ผลลัพธ์ที่เพิ่งเปลี่ยนอาจหายไปตอน process นี้ปิดตัว")
 
     return orders
 

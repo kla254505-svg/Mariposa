@@ -392,9 +392,11 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
 
         # --- บันทึกออเดอร์ไว้ให้ /summary และสรุปรายวันเช็คผล TP/SL ย้อนหลังได้ (ทำเสมอ ไม่ว่าจะ push หรือไม่) ---
         try:
-            add_order(config["kvdb_bucket"], symbol, entry_signal["direction"],
-                      entry_signal["entry_price"], stop_loss, take_profits, confidence["score"],
-                      plan="plan1_pullback")
+            result = add_order(config["kvdb_bucket"], symbol, entry_signal["direction"],
+                                entry_signal["entry_price"], stop_loss, take_profits, confidence["score"],
+                                plan="plan1_pullback")
+            if result is None:
+                print(f"[Order Tracking Error] บันทึกออเดอร์ Plan 1 ({symbol}) ลง kvdb ไม่สำเร็จ")
         except Exception as e:
             print(f"[Order Tracking Error] {e}")
 
@@ -545,11 +547,14 @@ if __name__ == "__main__":
                             calc_order = calc_counter_trend_order(trigger, df_ind_plan, CONFIG)
 
                         if calc_order:
-                            add_order(
+                            saved = add_order(
                                 CONFIG["kvdb_bucket"], display_symbol, calc_order["direction"],
                                 calc_order["entry_price"], calc_order["stop_loss"],
                                 {"TP1": calc_order["take_profit"]}, score=None, plan=plan_key,
                             )
+                            if saved is None:
+                                print(f"[Order Tracking Error] บันทึกออเดอร์ {plan_key} ({display_symbol}) "
+                                      f"ลง kvdb ไม่สำเร็จ")
                             plan_msg += (
                                 f"\n\nEntry: {calc_order['entry_price']:.4f} | SL: {calc_order['stop_loss']:.4f} | "
                                 f"TP: {calc_order['take_profit']:.4f} (RR {calc_order['rr']})"

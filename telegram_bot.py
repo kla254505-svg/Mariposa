@@ -216,10 +216,13 @@ def _cmd_order(ctx):
                                            entry_signal["entry_price"], threshold):
                 lines.append("   📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
             else:
-                add_order(bucket, symbol, entry_signal["direction"], entry_signal["entry_price"],
-                          stop_loss, take_profits, score=None, plan=plan_key)
-                tag = "ยืนยันแล้ว" if confirmed else "เข้าก่อนยืนยัน"
-                lines.append(f"   📌 บันทึกลง Order Dashboard แล้ว ({tag})")
+                saved = add_order(bucket, symbol, entry_signal["direction"], entry_signal["entry_price"],
+                                   stop_loss, take_profits, score=None, plan=plan_key)
+                if saved:
+                    tag = "ยืนยันแล้ว" if confirmed else "เข้าก่อนยืนยัน"
+                    lines.append(f"   📌 บันทึกลง Order Dashboard แล้ว ({tag})")
+                else:
+                    lines.append("   ⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
         except Exception as e:
             lines.append(f"   (คำนวณ/บันทึก SL/TP ไม่สำเร็จ: {e})")
 
@@ -249,10 +252,13 @@ def _cmd_order(ctx):
                                            plan2_order["entry_price"], threshold):
                 lines.append("   📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
             else:
-                add_order(bucket, symbol, plan2_order["direction"], plan2_order["entry_price"],
-                          plan2_order["stop_loss"], {"TP1": plan2_order["take_profit"]},
-                          score=None, plan="plan2_breakout")
-                lines.append("   📌 บันทึกลง Order Dashboard แล้ว")
+                saved = add_order(bucket, symbol, plan2_order["direction"], plan2_order["entry_price"],
+                                   plan2_order["stop_loss"], {"TP1": plan2_order["take_profit"]},
+                                   score=None, plan="plan2_breakout")
+                if saved:
+                    lines.append("   📌 บันทึกลง Order Dashboard แล้ว")
+                else:
+                    lines.append("   ⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
         else:
             lines.append("   (หาข้อมูล swing ไม่พอสำหรับคำนวณ SL/TP ของแผนนี้)")
         found_any = True
@@ -275,10 +281,13 @@ def _cmd_order(ctx):
                                            plan3_order["entry_price"], threshold):
                 lines.append("   📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
             else:
-                add_order(bucket, symbol, plan3_order["direction"], plan3_order["entry_price"],
-                          plan3_order["stop_loss"], {"TP1": plan3_order["take_profit"]},
-                          score=None, plan="plan3_counter_trend")
-                lines.append("   📌 บันทึกลง Order Dashboard แล้ว")
+                saved = add_order(bucket, symbol, plan3_order["direction"], plan3_order["entry_price"],
+                                   plan3_order["stop_loss"], {"TP1": plan3_order["take_profit"]},
+                                   score=None, plan="plan3_counter_trend")
+                if saved:
+                    lines.append("   📌 บันทึกลง Order Dashboard แล้ว")
+                else:
+                    lines.append("   ⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
         else:
             lines.append("   (คำนวณ SL/TP ของแผนนี้ไม่สำเร็จ)")
         found_any = True
@@ -334,10 +343,13 @@ def _cmd_order1(ctx):
                                            entry_signal["entry_price"], threshold):
                 lines.append("📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
             else:
-                add_order(bucket, symbol, entry_signal["direction"], entry_signal["entry_price"],
-                          stop_loss, take_profits, score=None, plan=plan_key)
-                tag = "ยืนยันแล้ว" if confirmed else "เข้าก่อนยืนยัน"
-                lines.append(f"📌 บันทึกลง Order Dashboard แล้ว ({tag})")
+                saved = add_order(bucket, symbol, entry_signal["direction"], entry_signal["entry_price"],
+                                   stop_loss, take_profits, score=None, plan=plan_key)
+                if saved:
+                    tag = "ยืนยันแล้ว" if confirmed else "เข้าก่อนยืนยัน"
+                    lines.append(f"📌 บันทึกลง Order Dashboard แล้ว ({tag})")
+                else:
+                    lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
         except Exception as e:
             lines.append(f"(คำนวณ/บันทึก SL/TP ไม่สำเร็จ: {e})")
 
@@ -386,9 +398,12 @@ def _cmd_order2(ctx):
                                            order["entry_price"], threshold):
                 lines.append("📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
             else:
-                add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-                          {"TP1": order["take_profit"]}, score=None, plan="plan2_breakout")
-                lines.append("📌 บันทึกลง Order Dashboard แล้ว")
+                saved = add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+                                   {"TP1": order["take_profit"]}, score=None, plan="plan2_breakout")
+                if saved:
+                    lines.append("📌 บันทึกลง Order Dashboard แล้ว")
+                else:
+                    lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
         else:
             lines.append("(หาข้อมูล swing ไม่พอสำหรับคำนวณ SL/TP ของแผนนี้)")
     else:
@@ -438,9 +453,12 @@ def _cmd_order3(ctx):
                                            order["entry_price"], threshold):
                 lines.append("📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
             else:
-                add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-                          {"TP1": order["take_profit"]}, score=None, plan="plan3_counter_trend")
-                lines.append("📌 บันทึกลง Order Dashboard แล้ว")
+                saved = add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+                                   {"TP1": order["take_profit"]}, score=None, plan="plan3_counter_trend")
+                if saved:
+                    lines.append("📌 บันทึกลง Order Dashboard แล้ว")
+                else:
+                    lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
         else:
             lines.append("(คำนวณ SL/TP ของแผนนี้ไม่สำเร็จ)")
     else:
@@ -593,8 +611,10 @@ def _cmd_confirm1(ctx):
                                    entry_signal["entry_price"], threshold):
         return "📥 มีออเดอร์ลักษณะเดียวกันที่บันทึกไว้แล้ว (ยัง running อยู่) ไม่บันทึกซ้ำครับ"
 
-    add_order(bucket, symbol, entry_signal["direction"], entry_signal["entry_price"],
-              stop_loss, take_profits, score=None, plan=plan_key)
+    saved = add_order(bucket, symbol, entry_signal["direction"], entry_signal["entry_price"],
+                       stop_loss, take_profits, score=None, plan=plan_key)
+    if not saved:
+        return "⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองพิมพ์ /confirm1 ใหม่อีกครั้งครับ"
 
     tag = "ยืนยันแล้ว (5M Trigger)" if confirmed else "เข้าก่อนยืนยัน (early)"
     return (
@@ -628,8 +648,10 @@ def _cmd_confirm2(ctx):
                                    order["entry_price"], threshold):
         return "📥 มีออเดอร์ลักษณะเดียวกันที่บันทึกไว้แล้ว (ยัง running อยู่) ไม่บันทึกซ้ำครับ"
 
-    add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-              {"TP1": order["take_profit"]}, score=None, plan="plan2_breakout")
+    saved = add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+                       {"TP1": order["take_profit"]}, score=None, plan="plan2_breakout")
+    if not saved:
+        return "⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองพิมพ์ /confirm2 ใหม่อีกครั้งครับ"
     return (
         f"✅ บันทึกออเดอร์แผนที่ 2 ลง Order Dashboard แล้วครับ\n"
         f"Entry: {order['entry_price']:.4f} | SL: {order['stop_loss']:.4f} | "
@@ -661,8 +683,10 @@ def _cmd_confirm3(ctx):
                                    order["entry_price"], threshold):
         return "📥 มีออเดอร์ลักษณะเดียวกันที่บันทึกไว้แล้ว (ยัง running อยู่) ไม่บันทึกซ้ำครับ"
 
-    add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-              {"TP1": order["take_profit"]}, score=None, plan="plan3_counter_trend")
+    saved = add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+                       {"TP1": order["take_profit"]}, score=None, plan="plan3_counter_trend")
+    if not saved:
+        return "⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองพิมพ์ /confirm3 ใหม่อีกครั้งครับ"
     return (
         f"✅ บันทึกออเดอร์แผนที่ 3 ลง Order Dashboard แล้วครับ\n"
         f"Entry: {order['entry_price']:.4f} | SL: {order['stop_loss']:.4f} | "
