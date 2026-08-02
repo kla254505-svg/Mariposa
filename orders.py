@@ -11,12 +11,14 @@ PLAN_LABEL = {
     "plan1_pullback_early": "แผนที่ 1 (เข้าก่อนยืนยัน)",
     "plan2_breakout": "แผนที่ 2 (Breakout)",
     "plan3_counter_trend": "แผนที่ 3 (สวนเทรนด์)",
+    "plan4_daily_continuation": "แผนที่ 4 (Daily Continuation)",
 }
 PLAN_SHORT = {
     "plan1_pullback": "1",
     "plan1_pullback_early": "1e",
     "plan2_breakout": "2",
     "plan3_counter_trend": "3",
+    "plan4_daily_continuation": "4",
 }
 
 
@@ -205,7 +207,8 @@ def build_stats_message(symbol, stats):
 
     lines = [f"📊 <b>สถิติผลลัพธ์: {symbol}</b>", ""]
 
-    plan_order = ["plan1_pullback", "plan1_pullback_early", "plan2_breakout", "plan3_counter_trend"]
+    plan_order = ["plan1_pullback", "plan1_pullback_early", "plan2_breakout",
+                  "plan3_counter_trend", "plan4_daily_continuation"]
     for plan in plan_order:
         s = stats.get(plan)
         if not s:

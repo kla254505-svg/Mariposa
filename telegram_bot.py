@@ -1,9 +1,11 @@
 """
 telegram_bot.py
 ระบบรับคำสั่งจาก Telegram (Interactive Commands) เพิ่มเติมจากที่บอทส่งแจ้งเตือนอัตโนมัติอยู่แล้ว
-รองรับ: /order /order1 /order2 /order3 /trend /news /status /summary /stats /confirm1 /confirm2 /confirm3
-(/order, /order1-3 บันทึกลง Order Dashboard ให้อัตโนมัติทันทีที่เจอจุดเข้าอยู่แล้ว ส่วน /confirm1-3
-ใช้กดยืนยัน/บันทึกซ้ำแบบเจาะจงเองได้อีกที มีระบบกันบันทึกซ้ำร่วมกันทั้งหมด ไม่ทำให้ข้อมูลซ้ำซ้อน)
+รองรับ: /order /order1 /order2 /order3 /order4 /trend /news /status /summary /stats
+/confirm1 /confirm2 /confirm3 /confirm4
+(/order, /order1-4 บันทึกลง Order Dashboard ให้อัตโนมัติทันทีที่เจอจุดเข้าอยู่แล้ว ส่วน /confirm1-4
+ใช้กดยืนยัน/บันทึกซ้ำแบบเจาะจงเองได้อีกที มีระบบกันบันทึกซ้ำร่วมกันทั้งหมด ไม่ทำให้ข้อมูลซ้ำซ้อน
+แผนที่ 4 ต่างจากแผน 1-3 ตรงที่ถือยาวเป็นชั่วโมง-วัน อ้างอิง Daily range แทน day-trade แบบเดียวกัน)
 
 ข้อจำกัดสำคัญที่ควรรู้ก่อนใช้: บอทนี้รันบน GitHub Actions แบบ cron (ไม่ใช่ server ที่ฟังตลอดเวลา)
 คำสั่งที่พิมพ์จะถูกประมวลผล "ตอนที่บอทรันรอบถัดไป" เท่านั้น ไม่ใช่ตอบทันที ถ้า cron ตั้งไว้ทุก 5 นาที
@@ -32,6 +34,7 @@ from scenario import (
     detect_breakout_trigger, detect_counter_trend_trigger,
     calc_breakout_order, calc_counter_trend_order,
     get_breakout_status, get_counter_trend_status,
+    get_daily_bias_and_range, detect_plan4_signal, calc_plan4_order,
 )
 from zones import calc_premium_discount_zone
 
@@ -476,6 +479,123 @@ def _cmd_order3(ctx):
     return "\n".join(lines)
 
 
+def _fetch_plan4_context(symbol, config):
+    """
+    ดึงข้อมูลที่แผนที่ 4 ต้องใช้เพิ่มเติมจากที่ ctx ปกติมีอยู่แล้ว (Daily range + 5 นาทีล่าสุด)
+    แยกออกมาเป็นฟังก์ชันต่างหาก ไม่รวมเข้า _build_command_context หลัก เพราะ /order /order1-3
+    ส่วนใหญ่ไม่ต้องใช้ข้อมูลนี้ กันไม่ให้ทุกคำสั่งช้าลง/ยิง API เพิ่มโดยไม่จำเป็น
+    คืน (daily_range, df_5m) หรือ (None, None) ถ้าดึงไม่สำเร็จ
+    """
+    try:
+        from fetch_data import fetch_twelvedata
+        from indicator import add_indicators
+
+        symbol_map = {"XAUUSD": "XAU/USD"}
+        td_symbol = symbol_map.get(symbol, symbol)
+
+        daily_df = fetch_twelvedata(symbol=td_symbol, interval="1day", outputsize=3,
+                                     api_key=config["twelvedata_api_key"])
+        daily_range = get_daily_bias_and_range(daily_df)
+        if not daily_range:
+            return None, None
+
+        df_5m = fetch_twelvedata(symbol=td_symbol, interval="5min", outputsize=20,
+                                  api_key=config["twelvedata_api_key"])
+        df_5m = add_indicators(df_5m, config)
+        return daily_range, df_5m
+    except Exception as e:
+        print(f"[Plan 4 Context Error] {e}")
+        return None, None
+
+
+def _cmd_order4(ctx):
+    """
+    แผนที่ 4 — Continuation Pattern ภายในกรอบ Daily Range (ดูนิยามเต็มใน scenario.py)
+    ต่างจากแผน 1-3 ตรงที่ถือยาวเป็นชั่วโมง-วัน ไม่ใช่ day-trade แบบเดียวกัน และไม่มี partial TP
+    (TP เป้าเดียว = ขอบตรงข้ามของ Daily range วันก่อนหน้า)
+    """
+    symbol = ctx["symbol"]
+    config = ctx["config"]
+    bucket = config["kvdb_bucket"]
+
+    lines = ["📥 <b>แผนที่ 4 (Daily Continuation)</b>", ""]
+
+    daily_range, df_5m = _fetch_plan4_context(symbol, config)
+    if not daily_range or df_5m is None:
+        return "📥 ดึงข้อมูลสำหรับแผนที่ 4 ไม่สำเร็จตอนนี้ครับ ลองใหม่อีกครั้ง"
+
+    bias_th = "LONG (discount)" if daily_range["bias"] == "bullish" else "SHORT (premium)"
+    lines.append(f"Bias ตอนนี้ (จาก Daily range เมื่อวาน): {bias_th}")
+    lines.append(f"  Daily High เมื่อวาน: {daily_range['prev_high']:.4f}")
+    lines.append(f"  Daily Low เมื่อวาน: {daily_range['prev_low']:.4f}")
+    lines.append("")
+
+    signal = detect_plan4_signal(df_5m)
+    if signal and signal["direction"] == daily_range["bias"]:
+        direction_th = "LONG" if signal["direction"] == "bullish" else "SHORT"
+        order = calc_plan4_order(signal, daily_range)
+        if order:
+            lines.append(f"✅ เข้าเงื่อนไข: {direction_th}")
+            lines.append(f"Entry: {order['entry_price']:.4f}")
+            lines.append(f"SL: {order['stop_loss']:.4f}")
+            lines.append(f"TP (ขอบ Daily range ฝั่งตรงข้าม): {order['take_profit']:.4f} (RR {order['rr']})")
+            lines.append("⚠️ แผนนี้ถือยาวเป็นชั่วโมง-วัน ไม่ใช่ day-trade แบบแผน 1-3")
+
+            threshold = config.get("min_sl_distance", 10.0)
+            if _has_similar_running_order(bucket, symbol, "plan4_daily_continuation", order["direction"],
+                                           order["entry_price"], threshold):
+                lines.append("📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
+            else:
+                saved = add_order(bucket, symbol, order["direction"], order["entry_price"],
+                                   order["stop_loss"], {"TP1": order["take_profit"]},
+                                   score=None, plan="plan4_daily_continuation")
+                if saved:
+                    lines.append("📌 บันทึกลง Order Dashboard แล้ว")
+                else:
+                    lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
+        else:
+            lines.append("(คำนวณ SL/TP ของแผนนี้ไม่สำเร็จ — TP อาจอยู่ผิดฝั่งของ Entry)")
+    else:
+        lines.append("ยังไม่เข้าเงื่อนไขตอนนี้ครับ (รอ pattern เขียว/แดงต่อเนื่องตามทิศทาง bias ก่อน)")
+
+    return "\n".join(lines)
+
+
+def _cmd_confirm4(ctx):
+    """บันทึกออเดอร์แผนที่ 4 ที่เข้าเงื่อนไขอยู่ตอนนี้ลง Order Dashboard ทันที (manual confirm)"""
+    symbol = ctx["symbol"]
+    config = ctx["config"]
+    bucket = config["kvdb_bucket"]
+
+    daily_range, df_5m = _fetch_plan4_context(symbol, config)
+    if not daily_range or df_5m is None:
+        return "📥 ดึงข้อมูลสำหรับแผนที่ 4 ไม่สำเร็จตอนนี้ครับ ลองใหม่อีกครั้ง"
+
+    signal = detect_plan4_signal(df_5m)
+    if not (signal and signal["direction"] == daily_range["bias"]):
+        return "📥 ตอนนี้ยังไม่เข้าเงื่อนไขตามแผนที่ 4 ให้ยืนยันครับ ลองเช็ค /order4 ก่อน"
+
+    order = calc_plan4_order(signal, daily_range)
+    if not order:
+        return "คำนวณ SL/TP ไม่สำเร็จ (TP อาจอยู่ผิดฝั่งของ Entry)"
+
+    threshold = config.get("min_sl_distance", 10.0)
+    if _has_similar_running_order(bucket, symbol, "plan4_daily_continuation", order["direction"],
+                                   order["entry_price"], threshold):
+        return "📥 มีออเดอร์ลักษณะเดียวกันที่บันทึกไว้แล้ว (ยัง running อยู่) ไม่บันทึกซ้ำครับ"
+
+    saved = add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+                       {"TP1": order["take_profit"]}, score=None, plan="plan4_daily_continuation")
+    if not saved:
+        return "⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองพิมพ์ /confirm4 ใหม่อีกครั้งครับ"
+
+    return (
+        f"✅ บันทึกออเดอร์แผนที่ 4 ลง Order Dashboard แล้วครับ\n"
+        f"Entry: {order['entry_price']:.4f} | SL: {order['stop_loss']:.4f} | "
+        f"TP: {order['take_profit']:.4f} (RR {order['rr']})"
+    )
+
+
 def _cmd_trend(ctx):
     structure = ctx["structure"]
     bias_4h = ctx["bias_4h"] or {}
@@ -699,6 +819,7 @@ COMMAND_HANDLERS = {
     "order1": _cmd_order1,
     "order2": _cmd_order2,
     "order3": _cmd_order3,
+    "order4": _cmd_order4,
     "trend": _cmd_trend,
     "news": _cmd_news,
     "status": _cmd_status,
@@ -707,6 +828,7 @@ COMMAND_HANDLERS = {
     "confirm1": _cmd_confirm1,
     "confirm2": _cmd_confirm2,
     "confirm3": _cmd_confirm3,
+    "confirm4": _cmd_confirm4,
 }
 
 

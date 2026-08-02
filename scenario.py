@@ -322,3 +322,87 @@ def build_hourly_briefing(symbol, timeframe, df, structure, entry_signal, config
         summary,
     ]
     return "\n".join(lines)
+
+
+def get_daily_bias_and_range(daily_df):
+    """
+    คืน dict {"bias","prev_high","prev_low","equilibrium"} จากข้อมูล Daily ที่ดึงมา (daily_df)
+    สมมติว่าแถวสุดท้าย = วันนี้ที่ยังไม่จบ, แถวรองสุดท้าย = "วันก่อนหน้าที่ปิดสมบูรณ์แล้ว"
+    ใช้เฉพาะ high/low ของวันก่อนหน้าเท่านั้น (กันมองอนาคต ห้ามใช้ high/low ของวันนี้ที่ยังไม่จบ)
+
+    bias: "bullish" ถ้าราคาปิดล่าสุดอยู่ discount (ครึ่งล่าง) ของช่วงวันก่อนหน้า -> เล่น LONG เป็นหลัก
+          "bearish" ถ้าอยู่ premium (ครึ่งบน) -> เล่น SHORT เป็นหลัก
+    คืน None ถ้าข้อมูลไม่พอ (ต้องมีอย่างน้อย 2 แท่ง)
+    """
+    if daily_df is None or len(daily_df) < 2:
+        return None
+    prev_high = daily_df["high"].iloc[-2]
+    prev_low = daily_df["low"].iloc[-2]
+    equilibrium = (prev_high + prev_low) / 2
+    current_price = daily_df["close"].iloc[-1]
+    bias = "bullish" if current_price < equilibrium else "bearish"
+    return {"bias": bias, "prev_high": prev_high, "prev_low": prev_low, "equilibrium": equilibrium}
+
+
+def detect_plan4_signal(df_5m):
+    """
+    แผนที่ 4 — Continuation Pattern ภายในกรอบ Daily Range
+    เช็ค 4 แท่งล่าสุดของ df_5m (5 นาที) ว่าตรง pattern ที่ล็อกนิยามไว้หรือไม่:
+      ฝั่ง LONG: เขียวติดกัน 2 แท่ง -> แดง 1 แท่ง (พักตัว) -> แท่งถัดมาปิดทะลุ high ของแท่งพักตัว
+                 "และ" เป็นแท่งเขียวด้วยในตัวเอง (ทำหน้าที่ breakout + confirmation พร้อมกัน)
+      ฝั่ง SHORT: กลับด้านทั้งหมด
+    ต้องเรียกเฉพาะตอนที่ bias จาก get_daily_bias_and_range() ตรงกับทิศทางที่ detect ได้เท่านั้น
+    (ฟังก์ชันนี้ detect ทั้ง 2 ทิศทางพร้อมกัน ให้ผู้เรียกกรองตาม bias เอง)
+
+    คืน None ถ้ายังไม่เกิด หรือ dict {"direction","entry","sl"} ถ้าเกิดที่แท่งล่าสุด
+    """
+    if df_5m is None or len(df_5m) < 4:
+        return None
+
+    trend2, trend1, pause, confirm = df_5m.iloc[-4], df_5m.iloc[-3], df_5m.iloc[-2], df_5m.iloc[-1]
+    atr = confirm["atr"] if "atr" in df_5m.columns else 0
+
+    def _is_green(b):
+        return b["close"] > b["open"]
+
+    def _is_red(b):
+        return b["close"] < b["open"]
+
+    # ลองฝั่ง LONG ก่อน
+    if _is_green(trend2) and _is_green(trend1) and _is_red(pause):
+        if confirm["close"] > pause["high"] and _is_green(confirm):
+            sl = pause["low"] - 0.3 * (atr or 0)
+            return {"direction": "bullish", "entry": confirm["close"], "sl": sl}
+
+    # ลองฝั่ง SHORT
+    if _is_red(trend2) and _is_red(trend1) and _is_green(pause):
+        if confirm["close"] < pause["low"] and _is_red(confirm):
+            sl = pause["high"] + 0.3 * (atr or 0)
+            return {"direction": "bearish", "entry": confirm["close"], "sl": sl}
+
+    return None
+
+
+def calc_plan4_order(signal, daily_range):
+    """
+    คำนวณ Entry/SL/TP ของแผนที่ 4 — TP เป้าเดียว = ขอบตรงข้ามของ Daily range วันก่อนหน้า
+    (ไม่มี partial TP/RR multiple แบบแผนอื่น ปล่อยไหลจนถึงเป้านี้เป้าเดียวตามที่ตกลงกันไว้)
+    คืน None ถ้าคำนวณแล้วไม่สมเหตุสมผล (เช่น TP อยู่ผิดฝั่งของ Entry)
+    """
+    entry = signal["entry"]
+    sl = signal["sl"]
+    direction = signal["direction"]
+
+    if direction == "bullish":
+        risk = entry - sl
+        tp = daily_range["prev_high"]
+        if risk <= 0 or tp <= entry:
+            return None
+    else:
+        risk = sl - entry
+        tp = daily_range["prev_low"]
+        if risk <= 0 or tp >= entry:
+            return None
+
+    rr = calc_risk_reward(entry, sl, tp)
+    return {"direction": direction, "entry_price": entry, "stop_loss": sl, "take_profit": tp, "rr": rr}

@@ -20,6 +20,7 @@ from scenario import (
     build_hourly_briefing, build_pullback_plan,
     detect_breakout_trigger, detect_counter_trend_trigger,
     calc_breakout_order, calc_counter_trend_order,
+    get_daily_bias_and_range, detect_plan4_signal, calc_plan4_order,
 )
 from dashboard import build_dashboard_message
 from session import get_session_info
@@ -74,6 +75,32 @@ def set_cached_htf_context(kvdb_bucket, symbol, higher_tf_trend, bias_4h):
         default=float,
     )
     kv_set(kvdb_bucket, f"htf_ctx_{symbol}", payload)
+
+
+def get_cached_daily_range(kvdb_bucket, symbol):
+    """
+    แผนที่ 4 ใช้ Daily range ของ "วันก่อนหน้า" ซึ่งไม่เปลี่ยนตลอดทั้งวัน — cache ไว้ตามวันที่ปัจจุบัน
+    (ต่างจาก HTF cache ที่รีเฟรชทุก 30 นาที เพราะ Daily range ไม่จำเป็นต้องสดขนาดนั้น รีเฟรชวันละครั้งพอ)
+    คืนค่า dict {"bias","prev_high","prev_low","equilibrium"} หรือ None ถ้ายังไม่มี cache/ข้ามวันแล้ว
+    """
+    raw = kv_get(kvdb_bucket, f"daily_range_{symbol}")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if data.get("date") != today_key:
+        return None
+    return data.get("daily_range")
+
+
+def set_cached_daily_range(kvdb_bucket, symbol, daily_range):
+    """บันทึก Daily range ที่เพิ่งคำนวณลง kvdb ให้รอบถัดไปในวันเดียวกันใช้ซ้ำได้ ไม่ต้องดึง Daily ใหม่ทุกรอบ"""
+    today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    payload = json.dumps({"date": today_key, "daily_range": daily_range}, default=float)
+    kv_set(kvdb_bucket, f"daily_range_{symbol}", payload)
 
 
 def should_send_hourly_briefing(kvdb_bucket, symbol):
@@ -572,6 +599,64 @@ if __name__ == "__main__":
                     kv_set(CONFIG["kvdb_bucket"], state_key, dedup_value)
             except Exception as e:
                 print(f"[Plan 2/3 Trigger Error] {display_symbol}: {e}")
+
+            # --- Plan 4 (Daily Continuation): ต่างจากแผน 1-3 ตรงที่อ้างอิง Daily range ไม่ใช่ 15M/5M ---
+            # ใช้ df_5m ที่ดึงมาแล้วตอนต้นรอบนี้ (ตัวเดียวกับที่ Plan 1 ใช้หา 5M Trigger) ไม่ต้องดึงซ้ำ
+            # แต่ต้องดึง Daily เพิ่ม 1 ครั้ง — cache ไว้ทั้งวัน (get/set_cached_daily_range) ประหยัด quota
+            # dedup แบบเดียวกับ Plan 2/3: บันทึก state ตาม entry/direction กันแจ้งซ้ำขณะเงื่อนไขเดิมยังจริงอยู่
+            try:
+                daily_range = get_cached_daily_range(CONFIG["kvdb_bucket"], display_symbol)
+                if daily_range is None:
+                    daily_df = fetch_twelvedata(
+                        symbol=td_symbol, interval="1day", outputsize=3,
+                        api_key=CONFIG["twelvedata_api_key"]
+                    )
+                    daily_range = get_daily_bias_and_range(daily_df)
+                    if daily_range:
+                        set_cached_daily_range(CONFIG["kvdb_bucket"], display_symbol, daily_range)
+
+                if daily_range:
+                    plan4_signal = detect_plan4_signal(df_5m)
+                    if plan4_signal and plan4_signal["direction"] == daily_range["bias"]:
+                        plan4_order = calc_plan4_order(plan4_signal, daily_range)
+                        if plan4_order:
+                            state_key = f"plan_state_{display_symbol}_plan4_daily_continuation"
+                            dedup_value = f"{plan4_order['direction']}:{plan4_order['entry_price']:.4f}"
+                            prev_value = kv_get(CONFIG["kvdb_bucket"], state_key)
+
+                            if prev_value != dedup_value:
+                                if not is_in_news_blackout(CONFIG["kvdb_bucket"], display_symbol)[0]:
+                                    direction_th = "LONG (ซื้อ)" if plan4_order["direction"] == "bullish" else "SHORT (ขาย)"
+                                    plan4_msg = (
+                                        f"🚨 <b>ออเดอร์เข้า — Daily Continuation (แผนที่ 4)</b>\n"
+                                        f"Symbol: {display_symbol} | ทิศทาง: {direction_th}\n"
+                                        f"Entry: {plan4_order['entry_price']:.4f} | "
+                                        f"SL: {plan4_order['stop_loss']:.4f} | "
+                                        f"TP: {plan4_order['take_profit']:.4f} (RR {plan4_order['rr']})\n\n"
+                                        "หมายเหตุ: แผนนี้ถือยาวเป็นชั่วโมง-วัน อ้างอิง Daily range ไม่ใช่ "
+                                        "day-trade แบบแผน 1-3 ไม่มี partial TP ปล่อยไหลจนถึงเป้าเดียวนี้เท่านั้น "
+                                        "ยังไม่เคยผ่านการ backtest มาก่อน ควรพิจารณาความเสี่ยงเพิ่มเติมเอง"
+                                    )
+                                    if CONFIG.get("push_notifications_enabled", True):
+                                        plan4_targets = [CONFIG["telegram_chat_id"]]
+                                        if CONFIG.get("telegram_group_chat_id"):
+                                            plan4_targets.append(CONFIG["telegram_group_chat_id"])
+                                        for target_chat_id in plan4_targets:
+                                            send_telegram_alert(CONFIG["telegram_token"], target_chat_id, plan4_msg)
+
+                                    saved = add_order(
+                                        CONFIG["kvdb_bucket"], display_symbol, plan4_order["direction"],
+                                        plan4_order["entry_price"], plan4_order["stop_loss"],
+                                        {"TP1": plan4_order["take_profit"]}, score=None,
+                                        plan="plan4_daily_continuation",
+                                    )
+                                    if saved is None:
+                                        print(f"[Order Tracking Error] บันทึกออเดอร์ plan4_daily_continuation "
+                                              f"({display_symbol}) ลง kvdb ไม่สำเร็จ")
+
+                                    kv_set(CONFIG["kvdb_bucket"], state_key, dedup_value)
+            except Exception as e:
+                print(f"[Plan 4 Trigger Error] {display_symbol}: {e}")
 
             # หมายเหตุ: การตอบคำสั่ง Telegram (/order /trend /news /status /summary /stats) ย้ายไปทำที่
             # run_bot.py บน Render แล้ว (รันแบบ polling loop ตลอดเวลา ตอบเร็วกว่านี้มาก)
