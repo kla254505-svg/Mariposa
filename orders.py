@@ -42,14 +42,11 @@ def save_orders(bucket, symbol, orders):
     ถูกเรียกถี่จากการทดสอบหนัก) ผู้ใช้เห็นข้อความ "บันทึกลง Order Dashboard แล้ว" ทั้งที่ /summary
     และ /stats ว่างเปล่า เพราะไม่มีอะไรถูกเขียนลง kvdb จริงๆ
 
-    ตอนนี้ลอง retry 1 ครั้งกันเคส rate limit ชั่วคราว (เว้น 1 วิ) ก่อนจะยอมรับว่าล้มเหลวจริง
+    ไม่ต้อง retry เองที่นี่แล้ว — kv_set() ใน kvstore.py มี retry-with-backoff ในตัวอยู่แล้ว
+    (retry ซ้ำสองชั้นจะกลายเป็นรอนานเกินจำเป็นตอน kvdb.io ล่มจริงๆ)
     """
-    import time
     key = f"{ORDERS_KEY_PREFIX}_{symbol}"
     payload = json.dumps(orders)
-    if kv_set(bucket, key, payload):
-        return True
-    time.sleep(1)
     return kv_set(bucket, key, payload)
 
 
