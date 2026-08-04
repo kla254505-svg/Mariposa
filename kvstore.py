@@ -33,10 +33,15 @@ def _redis_command(*args):
     """
     ยิงคำสั่ง Redis ไปที่ Upstash ผ่าน REST command API (POST JSON array ไปที่ URL ฐานตรงๆ)
     คืน (ok, result): ok=True เฉพาะตอน HTTP 200 และ Upstash ไม่คืน error กลับมาเท่านั้น
+
+    ทุก failure path มี log บอกเหตุผลจริง (แต่ไม่ print ค่า UPSTASH_TOKEN เองเด็ดขาด แค่ความยาวพอ
+    ให้เดาได้ว่า copy-paste มาไม่ครบหรือเปล่า) — ก่อนหน้านี้ตอน fail จะเงียบสนิท ไม่รู้เลยว่าพังเพราะอะไร
     """
     if not UPSTASH_URL or not UPSTASH_TOKEN:
-        print("[kvstore] ยังไม่ได้ตั้งค่า UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN "
-              "(เช็ค GitHub Secrets ว่าใส่ครบหรือยัง)")
+        print(f"[kvstore] ยังไม่ได้ตั้งค่า UPSTASH_REDIS_REST_URL/TOKEN ครบ "
+              f"(URL ตั้งแล้ว: {bool(UPSTASH_URL)}, TOKEN ตั้งแล้ว: {bool(UPSTASH_TOKEN)}, "
+              f"ความยาว TOKEN: {len(UPSTASH_TOKEN)} ตัวอักษร — ถ้าสั้นผิดปกติ (ต่ำกว่า ~80) "
+              f"น่าจะ copy-paste ตอนตั้ง Secret มาไม่ครบ)")
         return False, None
 
     headers = {"Authorization": f"Bearer {UPSTASH_TOKEN}"}
@@ -46,12 +51,16 @@ def _redis_command(*args):
             if resp.status_code == 200:
                 data = resp.json()
                 if "error" in data:
+                    print(f"[kvstore] Upstash ตอบ error: {data['error']}")
                     return False, None  # error ระดับ Redis command เอง (ไม่ใช่ HTTP error) ไม่ต้อง retry
                 return True, data.get("result")
             if resp.status_code != 429 and resp.status_code < 500:
+                print(f"[kvstore] Upstash ตอบ HTTP {resp.status_code}: {resp.text[:200]} "
+                      f"(URL: {UPSTASH_URL}, TOKEN ยาว {len(UPSTASH_TOKEN)} ตัวอักษร)")
                 return False, None  # 4xx อื่นที่ไม่ใช่ rate limit (เช่น token ผิด) retry ไปก็ไม่ช่วย
-        except Exception:
-            pass
+            print(f"[kvstore] Upstash ตอบ HTTP {resp.status_code} (ลอง retry ต่อ)")
+        except Exception as e:
+            print(f"[kvstore] เรียก Upstash ไม่สำเร็จ: {type(e).__name__}: {e}")
         if attempt < _MAX_ATTEMPTS - 1:
             time.sleep(_BACKOFF_SECONDS[attempt])
     return False, None
