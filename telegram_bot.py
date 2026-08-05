@@ -26,8 +26,8 @@ from datetime import datetime, timedelta, timezone
 
 from kvstore import kv_get, kv_set
 from orders import (
-    load_orders, add_order, update_orders_status, build_orders_dashboard,
-    calc_stats, build_stats_message,
+    load_orders, add_order, add_pending_order, update_orders_status, update_pending_orders,
+    build_orders_dashboard, calc_stats, build_stats_message,
 )
 from news import fetch_usd_calendar_events
 from news_scheduler import THAI_TZ, is_in_news_blackout
@@ -38,6 +38,7 @@ from scenario import (
     get_daily_bias_and_range, detect_plan4_signal, calc_plan4_order,
 )
 from zones import calc_premium_discount_zone
+from zone_entry import find_zone_entry, calc_zone_entry_order
 
 TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
 STRENGTH_LABEL = {"strong": "(Strong)", "weak": "(Weak — กำลังก่อตัว)", "none": ""}
@@ -160,6 +161,19 @@ def _has_similar_running_order(bucket, symbol, plan, direction, entry_price, thr
     อัตโนมัติไปแล้ว (Plan 2/3 ที่ trigger จริงจะถูก main.py บันทึกเองด้วยอยู่แล้ว)"""
     for o in load_orders(bucket, symbol):
         if (o["status"] == "running" and o.get("plan") == plan
+                and o["direction"] == direction
+                and abs(o["entry_price"] - entry_price) < threshold):
+            return True
+    return False
+
+
+def _has_similar_pending_or_running_order(bucket, symbol, plan, direction, entry_price, threshold):
+    """เหมือน _has_similar_running_order() แต่เช็คทั้งสถานะ 'pending' ด้วย (ใช้กับแผน Set & Forget
+    เช่น /order5 เป็นต้นไป) — กันแจ้งเตือนซ้ำถ้า zone/confluence เดิมยังไม่หมดอายุ/ยัง fill ไม่ผ่าน
+    (ต่างจาก _has_similar_running_order เดิมที่เช็คแค่ 'running' เพราะแผน 1-4 บันทึกเป็น running
+    ทันทีอยู่แล้ว ไม่มีสถานะ pending มาเกี่ยว)"""
+    for o in load_orders(bucket, symbol):
+        if (o["status"] in ("pending", "running") and o.get("plan") == plan
                 and o["direction"] == direction
                 and abs(o["entry_price"] - entry_price) < threshold):
             return True
@@ -788,18 +802,84 @@ def _cmd_summary(ctx):
     config = ctx["config"]
     symbol = ctx["symbol"]
     current_price = ctx["df_ind"]["close"].iloc[-1]
-    orders = update_orders_status(config["kvdb_bucket"], symbol, current_price)
+    bucket = config["kvdb_bucket"]
+    # เช็ค pending -> running/expired ก่อนเสมอ (แผน Set & Forget อย่าง /order5) ให้ dashboard ตรง
+    # กับสถานะจริงล่าสุด ไม่ใช่รอให้มีคนพิมพ์ /order5 ซ้ำถึงจะขยับสถานะ
+    update_pending_orders(bucket, symbol, current_price, config.get("spread_buffer", 0.0))
+    orders = update_orders_status(bucket, symbol, current_price)
     return build_orders_dashboard(symbol, orders, current_price)
 
 
 def _cmd_stats(ctx):
-    """แสดง win rate/expectancy แยกรายแผน (1/2/3) จากออเดอร์ที่ปิดแล้วทั้งหมดใน Order Dashboard"""
+    """แสดง win rate/expectancy แยกรายแผน จากออเดอร์ที่ปิดแล้วทั้งหมดใน Order Dashboard"""
     config = ctx["config"]
     symbol = ctx["symbol"]
     current_price = ctx["df_ind"]["close"].iloc[-1]
-    orders = update_orders_status(config["kvdb_bucket"], symbol, current_price)
+    bucket = config["kvdb_bucket"]
+    update_pending_orders(bucket, symbol, current_price, config.get("spread_buffer", 0.0))
+    orders = update_orders_status(bucket, symbol, current_price)
     stats = calc_stats(orders)
     return build_stats_message(symbol, stats)
+
+
+def _cmd_order5(ctx):
+    """
+    กลุ่ม A — SMC Zone Entry แบบ Set & Forget (4H Bias -> Premium/Discount -> Confluence -> Limit Order)
+    ต่างจากแผน 1-4 ตรงที่ไม่รอราคาแตะ + ยืนยันด้วยแท่งเทียนก่อนแจ้งเตือน — เจอ zone/confluence ก็แจ้งทันที
+    บันทึกเป็นสถานะ 'pending' (ไม่ใช่ 'running' ทันทีแบบเดิม) รอราคาเดินทางมาถึง entry จริงก่อนถึงจะ
+    เริ่มนับสถิติ win/loss (ดู orders.add_pending_order()/update_pending_orders() สำหรับรายละเอียด
+    วงจรสถานะ และ zone_entry.py สำหรับ logic การหา zone)
+    """
+    config = ctx["config"]
+    bias_4h = ctx["bias_4h"]
+    df_ind = ctx["df_ind"]
+
+    lines = ["📥 <b>แผนที่ 5 (SMC Zone Entry — Set & Forget)</b>", ""]
+
+    result = find_zone_entry(bias_4h, df_ind, config)
+    if not result["valid"]:
+        lines.extend(result["reasons"])
+        return "\n".join(lines)
+
+    order = calc_zone_entry_order(result, df_ind, config)
+    if not order:
+        lines.extend(result["reasons"])
+        lines.append("(เจอ zone แล้ว แต่ RR ที่คำนวณได้ต่ำกว่าเกณฑ์ขั้นต่ำ — ยังไม่คุ้มเสี่ยง รอ zone ใหม่ที่ดีกว่านี้)")
+        return "\n".join(lines)
+
+    direction_th = "LONG" if order["direction"] == "bullish" else "SHORT"
+    lines.append(f"✅ เจอ Zone: {direction_th} (Set & Forget — วาง Limit ล่วงหน้าได้เลย)")
+    lines.extend(result["reasons"])
+    lines.append("")
+    lines.append(f"Entry (Limit): {order['entry_price']:.4f}")
+    lines.append(f"SL: {order['stop_loss']:.4f}")
+    lines.append(f"TP: {order['take_profit']:.4f} (RR {order['rr']})")
+
+    bucket = config["kvdb_bucket"]
+    symbol = ctx["symbol"]
+    atr_period = config.get("sl_atr_avg_period", 20)
+    current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
+    threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+
+    if _has_similar_pending_or_running_order(bucket, symbol, "plan5_zone_single", order["direction"],
+                                              order["entry_price"], threshold):
+        lines.append("")
+        lines.append("📌 (มี zone ลักษณะเดียวกันแจ้งเตือนไว้แล้ว ไม่แจ้งซ้ำ)")
+        return "\n".join(lines)
+
+    saved = add_pending_order(
+        bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+        {"TP1": order["take_profit"]}, score=None, plan="plan5_zone_single",
+        expires_in_hours=config.get("zone_entry_expires_hours", 8),
+    )
+    if saved:
+        lines.append("")
+        lines.append("⏳ บันทึกเป็น Pending แล้ว (รอราคาวิ่งมาถึง Entry ก่อนถึงจะเริ่มนับผล — เช็คสถานะที่ /summary)")
+    else:
+        lines.append("")
+        lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
+
+    return "\n".join(lines)
 
 
 
@@ -809,6 +889,7 @@ COMMAND_HANDLERS = {
     "order2": functools.partial(_cmd_order_n, plan_num=2),
     "order3": functools.partial(_cmd_order_n, plan_num=3),
     "order4": functools.partial(_cmd_order_n, plan_num=4),
+    "order5": _cmd_order5,
     "trend": _cmd_trend,
     "news": _cmd_news,
     "status": _cmd_status,

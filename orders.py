@@ -1,17 +1,21 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from kvstore import kv_get, kv_set
 from tp import calc_risk_reward
 
 ORDERS_KEY_PREFIX = "open_orders"
-STATUS_EMOJI = {"running": "💸", "win": "✅", "loss": "❌"}
+# pending: Set & Forget วาง limit ไว้ล่วงหน้า ยังไม่ fill จริง (แผน 5-8) — ไม่นับ win/loss จนกว่าจะ
+# เปลี่ยนเป็น running ก่อน (ราคามาถึง entry จริง) กัน /stats เพี้ยนจากออเดอร์ที่ไม่เคยเข้าไม้จริง
+# expired: pending ที่ราคาไม่มาถึง entry ภายในเวลาที่กำหนด (พลาดโอกาส) ก็ไม่นับ win/loss เหมือนกัน
+STATUS_EMOJI = {"pending": "⏳", "running": "💸", "win": "✅", "loss": "❌", "expired": "⌛"}
 PLAN_LABEL = {
     "plan1_pullback": "แผนที่ 1 (Pullback ยืนยันแล้ว)",
     "plan1_pullback_early": "แผนที่ 1 (เข้าก่อนยืนยัน)",
     "plan2_breakout": "แผนที่ 2 (Breakout)",
     "plan3_counter_trend": "แผนที่ 3 (สวนเทรนด์)",
     "plan4_daily_continuation": "แผนที่ 4 (Daily Continuation)",
+    "plan5_zone_single": "แผนที่ 5 (SMC Zone Entry — Set & Forget)",
 }
 PLAN_SHORT = {
     "plan1_pullback": "1",
@@ -19,6 +23,7 @@ PLAN_SHORT = {
     "plan2_breakout": "2",
     "plan3_counter_trend": "3",
     "plan4_daily_continuation": "4",
+    "plan5_zone_single": "5",
 }
 
 
@@ -42,11 +47,14 @@ def save_orders(bucket, symbol, orders):
     ถูกเรียกถี่จากการทดสอบหนัก) ผู้ใช้เห็นข้อความ "บันทึกลง Order Dashboard แล้ว" ทั้งที่ /summary
     และ /stats ว่างเปล่า เพราะไม่มีอะไรถูกเขียนลง kvdb จริงๆ
 
-    ไม่ต้อง retry เองที่นี่แล้ว — kv_set() ใน kvstore.py มี retry-with-backoff ในตัวอยู่แล้ว
-    (retry ซ้ำสองชั้นจะกลายเป็นรอนานเกินจำเป็นตอน kvdb.io ล่มจริงๆ)
+    ตอนนี้ลอง retry 1 ครั้งกันเคส rate limit ชั่วคราว (เว้น 1 วิ) ก่อนจะยอมรับว่าล้มเหลวจริง
     """
+    import time
     key = f"{ORDERS_KEY_PREFIX}_{symbol}"
     payload = json.dumps(orders)
+    if kv_set(bucket, key, payload):
+        return True
+    time.sleep(1)
     return kv_set(bucket, key, payload)
 
 
@@ -73,7 +81,10 @@ def add_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, s
         rr_tp1 = None
 
     order = {
-        "id": f"{symbol}_{int(datetime.now(timezone.utc).timestamp())}",
+        # ใช้ timestamp ระดับไมโครวินาที (ไม่ใช่แค่วินาที) กัน id ชนกันตอนมีออเดอร์หลายอันถูกสร้าง
+        # ในวินาทีเดียวกัน (int(timestamp()) ปัดเหลือวินาทีเดียว ชนกันได้ง่ายขึ้นเรื่อยๆ ตอนนี้มีหลาย
+        # แผนเช็คพร้อมกันในรอบเดียว) — เดิมใช้แค่ int(timestamp()) เสี่ยง id ซ้ำกันได้จริง
+        "id": f"{symbol}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
         "symbol": symbol,
         "plan": plan,
         "direction": direction,  # "bullish" หรือ "bearish"
@@ -92,6 +103,108 @@ def add_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, s
               f"แม้ retry แล้ว — ออเดอร์นี้จะไม่ปรากฏใน /summary หรือ /stats")
         return None
     return order
+
+
+def add_pending_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, score,
+                       plan, expires_in_hours=8):
+    """
+    บันทึกออเดอร์แบบ 'pending' (Set & Forget — แผน 5-8) — วาง Limit Order ไว้ล่วงหน้าตอนเจอ zone/pattern
+    ทันที ก่อนที่ราคาจะเดินทางมาถึงจริง ต่างจาก add_order() (แผน 1-4 เดิม) ที่บันทึกเป็น 'running'
+    ทันทีเพราะรอราคาแตะ + มี reaction ยืนยันมาก่อนแล้วถึงแจ้งเตือน (ถือว่าเข้าไม้จริงตั้งแต่แจ้ง)
+
+    วงจรสถานะของออเดอร์แบบนี้: pending -> running (พอราคามาถึง entry จริง ผ่าน update_pending_orders())
+    -> win/loss (เหมือนเดิม ผ่าน update_orders_status()) หรือ pending -> expired (ราคาไม่มาถึงภายใน
+    expires_in_hours ชม. — ถือว่าพลาดโอกาส ไม่นับ win/loss เพราะไม่เคยเข้าไม้จริง)
+
+    expires_in_hours: ปรับได้ตาม timeframe ของแต่ละแผนย่อยที่มาเรียกใช้ (เช่น zone จาก 4H บริบทSo
+    ควรอยู่ได้นานกว่า pattern จาก 15M) ค่า default 8 ชม.
+    """
+    orders = load_orders(bucket, symbol)
+    tp1 = take_profits.get("TP1") if take_profits else None
+    if tp1 is None and take_profits:
+        tp1 = next(iter(take_profits.values()))
+    try:
+        rr_tp1 = calc_risk_reward(entry_price, stop_loss, tp1) if tp1 is not None else None
+    except Exception:
+        rr_tp1 = None
+
+    now = datetime.now(timezone.utc)
+    order = {
+        "id": f"{symbol}_{now.strftime('%Y%m%d%H%M%S%f')}",
+        "symbol": symbol,
+        "plan": plan,
+        "direction": direction,  # "bullish" หรือ "bearish"
+        "entry_price": round(float(entry_price), 3),
+        "stop_loss": round(float(stop_loss), 3),
+        "take_profits": {k: round(float(v), 3) for k, v in take_profits.items()},
+        "rr_tp1": rr_tp1,
+        "score": score,
+        "opened_at": now.strftime("%H:%M"),
+        "created_at_iso": now.isoformat(),
+        "expires_at_iso": (now + timedelta(hours=expires_in_hours)).isoformat(),
+        "status": "pending",
+    }
+    orders.append(order)
+    success = save_orders(bucket, symbol, orders)
+    if not success:
+        print(f"[Order Tracking Error] บันทึก pending order (symbol={symbol}, plan={plan}) ลง kvdb "
+              f"ไม่สำเร็จ แม้ retry แล้ว — ออเดอร์นี้จะไม่ปรากฏใน /summary หรือ /stats")
+        return None
+    return order
+
+
+def update_pending_orders(bucket, symbol, current_price, spread_buffer=0.0):
+    """
+    เช็คทุกออเดอร์ที่ยัง 'pending' (Set & Forget ที่ยังไม่ fill จริง) ทุกรอบที่บอทรัน:
+    - ราคาเดินทางมาถึง entry_price (เผื่อ spread_buffer แล้ว) -> เปลี่ยนเป็น 'running' (เริ่มนับสถิติ
+      win/loss จากจุดนี้ ผ่าน update_orders_status() ในรอบถัดไป)
+    - หมดเวลาที่กำหนดไว้ (expires_at_iso) แล้วยังไม่ fill -> เปลี่ยนเป็น 'expired' (พลาดโอกาส
+      ไม่นับ win/loss เพราะไม่เคยเข้าไม้จริง)
+    เช็ค expiry ก่อนเช็ค fill เสมอ — ถ้าหมดอายุแล้วไม่ต้องเสียเวลาเช็คว่า fill หรือยัง
+    บันทึกกลับ kvdb เฉพาะตอนมีการเปลี่ยนสถานะจริง เหมือน update_orders_status()
+
+    spread_buffer: ราคาที่บอทเช็คมาจาก TwelveData (ราคากลาง) ไม่ใช่ bid/ask ของโบรกที่คุณเทรดจริง
+    ซึ่งมี spread คั่นอยู่ — ต้องให้ราคาเลยจุด Entry ไปอีก spread_buffer ก่อนถึงจะถือว่า fill จริง
+    กันเคสระบบบอกว่า "เข้าแล้ว" ทั้งที่โบรกจริงยังไม่ทันได้ fill ให้ (ตามที่ผู้ใช้ฟีดแบ็คมา)
+    ใช้เฉพาะจุดนี้จุดเดียว — ไม่กระทบการเช็ค TP/SL ใน update_orders_status() ซึ่งยังใช้ราคาตรงเป๊ะเหมือนเดิม
+    ค่า default 0.0 (ไม่มีผล) กันโค้ดเก่าที่เรียกไม่ครบ 4 อาร์กิวเมนต์พัง
+    """
+    orders = load_orders(bucket, symbol)
+    changed = False
+    now = datetime.now(timezone.utc)
+
+    for o in orders:
+        if o.get("status") != "pending":
+            continue
+
+        expires_at_iso = o.get("expires_at_iso")
+        if expires_at_iso:
+            try:
+                expires_at = datetime.fromisoformat(expires_at_iso)
+                if now >= expires_at:
+                    o["status"] = "expired"
+                    changed = True
+                    continue
+            except Exception:
+                pass  # parse ไม่ได้ (ข้อมูลเก่า/เพี้ยน) ถือว่ายังไม่หมดอายุ ปล่อยให้เช็ค fill ต่อไป
+
+        entry_price = o["entry_price"]
+        direction = o["direction"]
+        filled = (
+            (direction == "bullish" and current_price <= entry_price - spread_buffer) or
+            (direction == "bearish" and current_price >= entry_price + spread_buffer)
+        )
+        if filled:
+            o["status"] = "running"
+            o["filled_at"] = now.strftime("%H:%M")
+            changed = True
+
+    if changed:
+        if not save_orders(bucket, symbol, orders):
+            print(f"[Order Tracking Error] บันทึกสถานะ pending->running/expired (symbol={symbol}) "
+                  f"ลง kvdb ไม่สำเร็จ — ผลลัพธ์ที่เพิ่งเปลี่ยนอาจหายไปตอน process นี้ปิดตัว")
+
+    return orders
 
 
 def update_orders_status(bucket, symbol, current_price):
@@ -258,15 +371,25 @@ def build_orders_dashboard(symbol, orders, current_price):
         plan_tag = PLAN_SHORT.get(o.get("plan", "plan1_pullback"), "?")
         lines.append(
             f"{o['opened_at']} [P{plan_tag}] {o['symbol']} {o['entry_price']} {dir_th} "
-            f"run{emoji} {o['status']}"
+            f"{emoji} {o['status']}"
         )
 
     running = sum(1 for o in orders if o["status"] == "running")
     wins = sum(1 for o in orders if o["status"] == "win")
     losses = sum(1 for o in orders if o["status"] == "loss")
+    pending = sum(1 for o in orders if o["status"] == "pending")
+    expired = sum(1 for o in orders if o["status"] == "expired")
 
     lines.append("")
-    lines.append(f"กำลังรัน: {running} | Win ✅: {wins} | Loss ❌: {losses}")
+    summary_parts = []
+    if pending:
+        summary_parts.append(f"รอราคาถึง ⏳: {pending}")
+    summary_parts.append(f"กำลังรัน: {running}")
+    summary_parts.append(f"Win ✅: {wins}")
+    summary_parts.append(f"Loss ❌: {losses}")
+    if expired:
+        summary_parts.append(f"หมดอายุ ⌛: {expired}")
+    lines.append(" | ".join(summary_parts))
     lines.append("พิมพ์ /stats เพื่อดู win rate/expectancy แยกตามแผน")
 
     return "\n".join(lines)
