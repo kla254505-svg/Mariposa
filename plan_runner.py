@@ -17,6 +17,7 @@ from scenario import (
     get_daily_bias_and_range, detect_plan4_signal, calc_plan4_order,
 )
 from alert_dispatcher import send_alert_to_targets, save_plan_order
+from orders import load_orders, add_pending_order
 
 
 def check_plan2_plan3_triggers(df, config, symbol):
@@ -205,3 +206,73 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol):
                             kv_set(bucket, state_key, dedup_value)
     except Exception as e:
         print(f"[Plan 4 Trigger Error] {symbol}: {e}")
+
+
+def check_zone_entry_trigger(df, bias_4h, config, symbol):
+    """
+    กลุ่ม A (Set & Forget SMC Zone Entry — /order5) — เช็คทุกรอบว่ามี zone/confluence ใหม่ให้แจ้ง
+    เตือนอัตโนมัติไหม โดยไม่ต้องรอให้ผู้ใช้พิมพ์ /order5 เอง (เหมือน Plan 2/3/4)
+
+    ต่างจาก Plan 2/3/4 ตรงที่บันทึกเป็นสถานะ 'pending' (ผ่าน add_pending_order) ไม่ใช่ 'running' ทันที
+    เพราะเป็น Set & Forget — แจ้งก่อนราคาจะเดินทางมาถึง Entry จริง (ดู zone_entry.py/orders.py
+    สำหรับรายละเอียด logic การหา zone และวงจรสถานะ pending -> running -> win/loss/expired)
+
+    ใช้ bias_4h ที่ main.py cache ไว้แล้ว (ยืมจาก cache 30 นาทีที่มีอยู่แล้ว) ไม่ต้องคำนวณ 4H ใหม่
+    dedup แบบเดียวกับ telegram_bot.py's _has_similar_pending_or_running_order (เช็คทั้ง pending+running
+    กันแจ้งซ้ำ zone เดิมที่ยังไม่ fill/ยังไม่หมดอายุ)
+    """
+    from indicator import add_indicators
+    from zone_entry import find_zone_entry, calc_zone_entry_order
+
+    bucket = config["kvdb_bucket"]
+    try:
+        df_ind_plan = add_indicators(df, config)
+        result = find_zone_entry(bias_4h, df_ind_plan, config)
+        if not result["valid"]:
+            return
+
+        order = calc_zone_entry_order(result, df_ind_plan, config)
+        if not order:
+            return
+
+        plan_blackout, _ = is_in_news_blackout(bucket, symbol)
+        if plan_blackout:
+            return
+
+        atr_period = config.get("sl_atr_avg_period", 20)
+        current_atr = (
+            df_ind_plan["atr"].tail(atr_period).mean()
+            if "atr" in df_ind_plan.columns and len(df_ind_plan)
+            else 0
+        )
+        threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+
+        for o in load_orders(bucket, symbol):
+            if (o["status"] in ("pending", "running") and o.get("plan") == "plan5_zone_single"
+                    and o["direction"] == order["direction"]
+                    and abs(o["entry_price"] - order["entry_price"]) < threshold):
+                return  # มี zone ลักษณะเดียวกันแจ้งไปแล้ว (ยัง pending หรือ fill ไปแล้ว) ไม่แจ้งซ้ำ
+
+        direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
+        msg = (
+            f"🚨 <b>เจอ Zone ใหม่ — แผนที่ 5 (SMC Zone Entry, Set & Forget)</b>\n"
+            f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
+            + "\n".join(result["reasons"]) + "\n\n"
+            f"Entry (Limit): {order['entry_price']:.4f}\n"
+            f"SL: {order['stop_loss']:.4f}\n"
+            f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
+            "หมายเหตุ: แจ้งทันทีที่เจอ zone (Set \u0026 Forget) — วาง Limit Order ไว้รอได้เลย "
+            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (เช็คสถานะที่ /summary)"
+        )
+        send_alert_to_targets(config, msg)
+
+        saved = add_pending_order(
+            bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+            {"TP1": order["take_profit"]}, score=None, plan="plan5_zone_single",
+            expires_in_hours=config.get("zone_entry_expires_hours", 8),
+        )
+        if saved is None:
+            print(f"[Order Tracking Error] บันทึก pending order plan5_zone_single ({symbol}) "
+                  f"ลง kvdb ไม่สำเร็จ")
+    except Exception as e:
+        print(f"[Plan 5 Zone Entry Trigger Error] {symbol}: {e}")

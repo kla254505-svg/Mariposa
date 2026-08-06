@@ -22,7 +22,7 @@ from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
-from orders import add_order, update_orders_status, build_orders_dashboard
+from orders import add_order, update_orders_status, update_pending_orders, build_orders_dashboard
 import plan_runner
 from news_scheduler import (
     refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning,
@@ -463,7 +463,12 @@ if __name__ == "__main__":
 
             # --- เช็คราคาปัจจุบันเทียบ SL/TP1 ของออเดอร์ที่ยัง 'running' ทุกรอบ (ให้ /summary ข้อมูลสด) ---
             try:
-                update_orders_status(CONFIG["kvdb_bucket"], display_symbol, df["close"].iloc[-1])
+                current_price = df["close"].iloc[-1]
+                # เช็ค pending -> running/expired ก่อนเสมอ (แผน Set & Forget อย่าง Plan 5) ให้ auto-alert
+                # เจอสถานะสดล่าสุดทุกรอบ ไม่ใช่รอให้มีคนพิมพ์ /order5 หรือ /summary ซ้ำถึงจะขยับสถานะ
+                update_pending_orders(CONFIG["kvdb_bucket"], display_symbol, current_price,
+                                       CONFIG.get("spread_buffer", 0.0))
+                update_orders_status(CONFIG["kvdb_bucket"], display_symbol, current_price)
             except Exception as e:
                 print(f"[Order Status Update Error] {display_symbol}: {e}")
 
@@ -472,6 +477,10 @@ if __name__ == "__main__":
             # alert_dispatcher.py แล้ว (เดิมอยู่ตรงนี้ทั้งก้อน ~160 บรรทัด) main.py เหลือแค่เรียกใช้
             plan_runner.check_plan2_plan3_triggers(df, CONFIG, display_symbol)
             plan_runner.check_plan4_trigger(df_5m, CONFIG, display_symbol, td_symbol)
+
+            # --- กลุ่ม A (Set & Forget SMC Zone Entry — เดิมต้องพิมพ์ /order5 เองเท่านั้น) ---
+            # เช็คอัตโนมัติทุกรอบเหมือน Plan 2-4 แล้ว ไม่ต้องรอผู้ใช้พิมพ์คำสั่งเองอีกต่อไป
+            plan_runner.check_zone_entry_trigger(df, bias_4h, CONFIG, display_symbol)
 
             # หมายเหตุ: การตอบคำสั่ง Telegram (/order /trend /news /status /summary /stats) ย้ายไปทำที่
             # run_bot.py บน Render แล้ว (รันแบบ polling loop ตลอดเวลา ตอบเร็วกว่านี้มาก)
