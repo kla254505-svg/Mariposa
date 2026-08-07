@@ -247,7 +247,8 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
         )
         threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
-        for o in load_orders(bucket, symbol):
+        existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง dedup check และ save
+        for o in existing_orders:
             if (o["status"] in ("pending", "running") and o.get("plan") == "plan5_zone_single"
                     and o["direction"] == order["direction"]
                     and abs(o["entry_price"] - order["entry_price"]) < threshold):
@@ -269,7 +270,7 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
             {"TP1": order["take_profit"]}, score=None, plan="plan5_zone_single",
-            expires_in_hours=config.get("zone_entry_expires_hours", 8),
+            expires_in_hours=config.get("zone_entry_expires_hours", 8), existing_orders=existing_orders,
         )
         if saved is None:
             print(f"[Order Tracking Error] บันทึก pending order plan5_zone_single ({symbol}) "
@@ -312,7 +313,8 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
         )
         threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
-        for o in load_orders(bucket, symbol):
+        existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง dedup check และ save
+        for o in existing_orders:
             if (o["status"] in ("pending", "running") and o.get("plan") == "plan6_sweep_general"
                     and o["direction"] == order["direction"]
                     and abs(o["entry_price"] - order["entry_price"]) < threshold):
@@ -334,7 +336,7 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
             {"TP1": order["take_profit"]}, score=None, plan="plan6_sweep_general",
-            expires_in_hours=config.get("sweep_entry_expires_hours", 6),
+            expires_in_hours=config.get("sweep_entry_expires_hours", 6), existing_orders=existing_orders,
         )
         if saved is None:
             print(f"[Order Tracking Error] บันทึก pending order plan6_sweep_general ({symbol}) "

@@ -42,21 +42,16 @@ def load_orders(bucket, symbol):
 
 def save_orders(bucket, symbol, orders):
     """
-    บันทึกลิสต์ออเดอร์ลง kvdb.io คืนค่า True/False ตามผลจริง (ไม่ใช่แค่ยิง request ไปเฉยๆ)
+    บันทึกลิสต์ออเดอร์ลง Upstash Redis คืนค่า True/False ตามผลจริง (ไม่ใช่แค่ยิง request ไปเฉยๆ)
 
-    บั๊กเดิม: ฟังก์ชันนี้เรียก kv_set() แต่ไม่เคยเช็ค/คืนค่าผลลัพธ์เลย ทำให้ add_order() ด้านล่าง
-    รายงานว่า "บันทึกสำเร็จ" เสมอแม้ kv_set จะเขียนไม่ผ่านจริง (เช่นโดน rate limit ตอน kvdb.io
-    ถูกเรียกถี่จากการทดสอบหนัก) ผู้ใช้เห็นข้อความ "บันทึกลง Order Dashboard แล้ว" ทั้งที่ /summary
-    และ /stats ว่างเปล่า เพราะไม่มีอะไรถูกเขียนลง kvdb จริงๆ
-
-    ตอนนี้ลอง retry 1 ครั้งกันเคส rate limit ชั่วคราว (เว้น 1 วิ) ก่อนจะยอมรับว่าล้มเหลวจริง
+    ไม่ retry เองที่นี่แล้ว — kv_set() ใน kvstore.py มี retry-with-backoff ในตัวอยู่แล้ว (3 ครั้ง,
+    เว้น 1 วิ แล้ว 2 วิ) retry ซ้ำสองชั้นแบบเดิม (sleep(1) แล้วเรียก kv_set ซ้ำ ซึ่งข้างในมี retry
+    ของตัวเองอยู่แล้ว) ทำให้แต่ละคำสั่ง Set & Forget (เช่น /order5, /order6) ที่มีการเรียก
+    save_orders หลายครั้งต่อคำสั่ง (dedup check + บันทึกจริง) ช้าสะสมได้ถึงเกือบ 1-2 นาที
+    ตามที่ผู้ใช้แจ้งมา — จุดนี้คือสาเหตุหลัก
     """
-    import time
     key = f"{ORDERS_KEY_PREFIX}_{symbol}"
     payload = json.dumps(orders)
-    if kv_set(bucket, key, payload):
-        return True
-    time.sleep(1)
     return kv_set(bucket, key, payload)
 
 
@@ -108,7 +103,7 @@ def add_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, s
 
 
 def add_pending_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, score,
-                       plan, expires_in_hours=8):
+                       plan, expires_in_hours=8, existing_orders=None):
     """
     บันทึกออเดอร์แบบ 'pending' (Set & Forget — แผน 5-8) — วาง Limit Order ไว้ล่วงหน้าตอนเจอ zone/pattern
     ทันที ก่อนที่ราคาจะเดินทางมาถึงจริง ต่างจาก add_order() (แผน 1-4 เดิม) ที่บันทึกเป็น 'running'
@@ -120,8 +115,12 @@ def add_pending_order(bucket, symbol, direction, entry_price, stop_loss, take_pr
 
     expires_in_hours: ปรับได้ตาม timeframe ของแต่ละแผนย่อยที่มาเรียกใช้ (เช่น zone จาก 4H บริบทSo
     ควรอยู่ได้นานกว่า pattern จาก 15M) ค่า default 8 ชม.
+
+    existing_orders: ถ้าผู้เรียกโหลด orders list มาแล้ว (เช่น เพิ่งเช็ค dedup ผ่าน load_orders() ไป
+    ก่อนหน้า) ส่งเข้ามาตรงนี้เพื่อไม่ต้องยิง kv_get ซ้ำอีกรอบ — กันการโหลดซ้ำที่ทำให้แต่ละคำสั่ง
+    Set & Forget ช้าสะสม (dedup check + save เดิมโหลด orders 2 รอบแยกกัน ตอนนี้เหลือรอบเดียว)
     """
-    orders = load_orders(bucket, symbol)
+    orders = existing_orders if existing_orders is not None else load_orders(bucket, symbol)
     tp1 = take_profits.get("TP1") if take_profits else None
     if tp1 is None and take_profits:
         tp1 = next(iter(take_profits.values()))

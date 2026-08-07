@@ -168,12 +168,17 @@ def _has_similar_running_order(bucket, symbol, plan, direction, entry_price, thr
     return False
 
 
-def _has_similar_pending_or_running_order(bucket, symbol, plan, direction, entry_price, threshold):
+def _has_similar_pending_or_running_order(orders_list, plan, direction, entry_price, threshold):
     """เหมือน _has_similar_running_order() แต่เช็คทั้งสถานะ 'pending' ด้วย (ใช้กับแผน Set & Forget
     เช่น /order5 เป็นต้นไป) — กันแจ้งเตือนซ้ำถ้า zone/confluence เดิมยังไม่หมดอายุ/ยัง fill ไม่ผ่าน
     (ต่างจาก _has_similar_running_order เดิมที่เช็คแค่ 'running' เพราะแผน 1-4 บันทึกเป็น running
-    ทันทีอยู่แล้ว ไม่มีสถานะ pending มาเกี่ยว)"""
-    for o in load_orders(bucket, symbol):
+    ทันทีอยู่แล้ว ไม่มีสถานะ pending มาเกี่ยว)
+
+    รับ orders_list ที่โหลดมาแล้วโดยตรง (ไม่ใช่ bucket/symbol) เพราะผู้เรียกส่วนใหญ่ต้องใช้ orders
+    list เดิมต่อใน add_pending_order() อยู่แล้ว (ผ่าน existing_orders) — เดิมฟังก์ชันนี้โหลดเอง
+    แยกต่างหาก ทำให้แต่ละคำสั่ง Set & Forget ยิง kv_get ซ้ำ 2 รอบโดยไม่จำเป็น (เจอว่าเป็นสาเหตุหนึ่ง
+    ที่ทำให้ /order5, /order6 ตอบช้าลงมาก — ล็อกจุดนี้ทิ้งไปพร้อมกับแก้ save_orders retry ซ้อนกัน)"""
+    for o in orders_list:
         if (o["status"] in ("pending", "running") and o.get("plan") == plan
                 and o["direction"] == direction
                 and abs(o["entry_price"] - entry_price) < threshold):
@@ -862,7 +867,8 @@ def _cmd_order5(ctx):
     current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
     threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
-    if _has_similar_pending_or_running_order(bucket, symbol, "plan5_zone_single", order["direction"],
+    existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง dedup check และ save ด้านล่าง
+    if _has_similar_pending_or_running_order(existing_orders, "plan5_zone_single", order["direction"],
                                               order["entry_price"], threshold):
         lines.append("")
         lines.append("📌 (มี zone ลักษณะเดียวกันแจ้งเตือนไว้แล้ว ไม่แจ้งซ้ำ)")
@@ -871,7 +877,7 @@ def _cmd_order5(ctx):
     saved = add_pending_order(
         bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
         {"TP1": order["take_profit"]}, score=None, plan="plan5_zone_single",
-        expires_in_hours=config.get("zone_entry_expires_hours", 8),
+        expires_in_hours=config.get("zone_entry_expires_hours", 8), existing_orders=existing_orders,
     )
     if saved:
         lines.append("")
@@ -923,7 +929,8 @@ def _cmd_order6(ctx):
     current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
     threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
-    if _has_similar_pending_or_running_order(bucket, symbol, "plan6_sweep_general", order["direction"],
+    existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง dedup check และ save ด้านล่าง
+    if _has_similar_pending_or_running_order(existing_orders, "plan6_sweep_general", order["direction"],
                                               order["entry_price"], threshold):
         lines.append("")
         lines.append("📌 (มีโอกาสลักษณะเดียวกันแจ้งเตือนไว้แล้ว ไม่แจ้งซ้ำ)")
@@ -932,7 +939,7 @@ def _cmd_order6(ctx):
     saved = add_pending_order(
         bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
         {"TP1": order["take_profit"]}, score=None, plan="plan6_sweep_general",
-        expires_in_hours=config.get("sweep_entry_expires_hours", 6),
+        expires_in_hours=config.get("sweep_entry_expires_hours", 6), existing_orders=existing_orders,
     )
     if saved:
         lines.append("")
