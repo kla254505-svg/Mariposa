@@ -39,6 +39,7 @@ from scenario import (
 )
 from zones import calc_premium_discount_zone
 from zone_entry import find_zone_entry, calc_zone_entry_order
+from liquidity_sweep_entry import find_sweep_entry, calc_sweep_entry_order
 
 TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
 STRENGTH_LABEL = {"strong": "(Strong)", "weak": "(Weak — กำลังก่อตัว)", "none": ""}
@@ -882,6 +883,67 @@ def _cmd_order5(ctx):
     return "\n".join(lines)
 
 
+def _cmd_order6(ctx):
+    """
+    กลุ่ม C — Liquidity Sweep + Displacement แบบ Set & Forget (กวาด Liquidity แล้วกลับตัว + ยืนยัน
+    ด้วย FVG ที่เกิดหลังการกวาด) ไม่ผูกกับทิศทาง 4H bias เป็นพิเศษเหมือนกลุ่ม A เพราะโดยธรรมชาติของ
+    กลยุทธ์นี้คือหาจุดกลับตัวจากการกวาดสภาพคล่อง ซึ่งเป็นได้ทั้ง pullback ตามเทรนด์ใหญ่หรือกลับตัวสวน
+    เทรนด์ใหญ่ก็ได้ (ดู liquidity_sweep_entry.py สำหรับรายละเอียด logic)
+
+    บันทึกเป็นสถานะ 'pending' เหมือนกลุ่ม A (Set & Forget — แจ้งก่อนราคาจะมาถึง Entry จริง)
+    """
+    config = ctx["config"]
+    bias_4h = ctx["bias_4h"]
+    df_ind = ctx["df_ind"]
+
+    lines = ["📥 <b>แผนที่ 6 (Liquidity Sweep + Displacement — Set & Forget)</b>", ""]
+
+    result = find_sweep_entry(df_ind, bias_4h, config)
+    if not result["valid"]:
+        lines.extend(result["reasons"])
+        return "\n".join(lines)
+
+    order = calc_sweep_entry_order(result, df_ind, config)
+    if not order:
+        lines.extend(result["reasons"])
+        lines.append("(เจอการกวาด + Displacement แล้ว แต่ RR ที่คำนวณได้ต่ำกว่าเกณฑ์ขั้นต่ำ — ยังไม่คุ้มเสี่ยง)")
+        return "\n".join(lines)
+
+    direction_th = "LONG" if order["direction"] == "bullish" else "SHORT"
+    lines.append(f"✅ เจอโอกาส: {direction_th} (Set & Forget — วาง Limit ล่วงหน้าได้เลย)")
+    lines.extend(result["reasons"])
+    lines.append("")
+    lines.append(f"Entry (Limit): {order['entry_price']:.4f}")
+    lines.append(f"SL: {order['stop_loss']:.4f}")
+    lines.append(f"TP: {order['take_profit']:.4f} (RR {order['rr']})")
+
+    bucket = config["kvdb_bucket"]
+    symbol = ctx["symbol"]
+    atr_period = config.get("sl_atr_avg_period", 20)
+    current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
+    threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+
+    if _has_similar_pending_or_running_order(bucket, symbol, "plan6_sweep_general", order["direction"],
+                                              order["entry_price"], threshold):
+        lines.append("")
+        lines.append("📌 (มีโอกาสลักษณะเดียวกันแจ้งเตือนไว้แล้ว ไม่แจ้งซ้ำ)")
+        return "\n".join(lines)
+
+    saved = add_pending_order(
+        bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+        {"TP1": order["take_profit"]}, score=None, plan="plan6_sweep_general",
+        expires_in_hours=config.get("sweep_entry_expires_hours", 6),
+    )
+    if saved:
+        lines.append("")
+        lines.append("⏳ บันทึกเป็น Pending แล้ว (รอราคาวิ่งมาถึง Entry ก่อนถึงจะเริ่มนับผล — เช็คสถานะที่ /summary)")
+    else:
+        lines.append("")
+        lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
+
+    return "\n".join(lines)
+
+
 
 COMMAND_HANDLERS = {
     "order": _cmd_order,
@@ -890,6 +952,7 @@ COMMAND_HANDLERS = {
     "order3": functools.partial(_cmd_order_n, plan_num=3),
     "order4": functools.partial(_cmd_order_n, plan_num=4),
     "order5": _cmd_order5,
+    "order6": _cmd_order6,
     "trend": _cmd_trend,
     "news": _cmd_news,
     "status": _cmd_status,

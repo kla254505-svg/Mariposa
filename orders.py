@@ -16,6 +16,7 @@ PLAN_LABEL = {
     "plan3_counter_trend": "แผนที่ 3 (สวนเทรนด์)",
     "plan4_daily_continuation": "แผนที่ 4 (Daily Continuation)",
     "plan5_zone_single": "แผนที่ 5 (SMC Zone Entry — Set & Forget)",
+    "plan6_sweep_general": "แผนที่ 6 (Liquidity Sweep + Displacement — Set & Forget)",
 }
 PLAN_SHORT = {
     "plan1_pullback": "1",
@@ -24,6 +25,7 @@ PLAN_SHORT = {
     "plan3_counter_trend": "3",
     "plan4_daily_continuation": "4",
     "plan5_zone_single": "5",
+    "plan6_sweep_general": "6",
 }
 
 

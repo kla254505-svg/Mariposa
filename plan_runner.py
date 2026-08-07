@@ -276,3 +276,68 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
                   f"ลง kvdb ไม่สำเร็จ")
     except Exception as e:
         print(f"[Plan 5 Zone Entry Trigger Error] {symbol}: {e}")
+
+
+def check_sweep_entry_trigger(df, bias_4h, config, symbol):
+    """
+    กลุ่ม C (Liquidity Sweep + Displacement — /order6) — เช็คทุกรอบว่ามีการกวาด Liquidity แล้ว
+    กลับตัว + ยืนยันด้วย FVG ให้แจ้งเตือนอัตโนมัติไหม โดยไม่ต้องรอผู้ใช้พิมพ์ /order6 เอง
+    (เหมือน check_zone_entry_trigger ของกลุ่ม A แต่ engine คนละตัว — ดู liquidity_sweep_entry.py)
+
+    บันทึกเป็นสถานะ 'pending' เหมือนกลุ่ม A (Set & Forget) dedup แบบเดียวกัน (เช็ค pending+running)
+    """
+    from indicator import add_indicators
+    from liquidity_sweep_entry import find_sweep_entry, calc_sweep_entry_order
+
+    bucket = config["kvdb_bucket"]
+    try:
+        df_ind_plan = add_indicators(df, config)
+        result = find_sweep_entry(df_ind_plan, bias_4h, config)
+        if not result["valid"]:
+            return
+
+        order = calc_sweep_entry_order(result, df_ind_plan, config)
+        if not order:
+            return
+
+        plan_blackout, _ = is_in_news_blackout(bucket, symbol)
+        if plan_blackout:
+            return
+
+        atr_period = config.get("sl_atr_avg_period", 20)
+        current_atr = (
+            df_ind_plan["atr"].tail(atr_period).mean()
+            if "atr" in df_ind_plan.columns and len(df_ind_plan)
+            else 0
+        )
+        threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+
+        for o in load_orders(bucket, symbol):
+            if (o["status"] in ("pending", "running") and o.get("plan") == "plan6_sweep_general"
+                    and o["direction"] == order["direction"]
+                    and abs(o["entry_price"] - order["entry_price"]) < threshold):
+                return  # มีโอกาสลักษณะเดียวกันแจ้งไปแล้ว ไม่แจ้งซ้ำ
+
+        direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
+        msg = (
+            f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 6 (Liquidity Sweep + Displacement, Set \u0026 Forget)</b>\n"
+            f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
+            + "\n".join(result["reasons"]) + "\n\n"
+            f"Entry (Limit): {order['entry_price']:.4f}\n"
+            f"SL: {order['stop_loss']:.4f}\n"
+            f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
+            "หมายเหตุ: แจ้งทันทีที่เจอโอกาส (Set \u0026 Forget) — วาง Limit Order ไว้รอได้เลย "
+            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (เช็คสถานะที่ /summary)"
+        )
+        send_alert_to_targets(config, msg)
+
+        saved = add_pending_order(
+            bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+            {"TP1": order["take_profit"]}, score=None, plan="plan6_sweep_general",
+            expires_in_hours=config.get("sweep_entry_expires_hours", 6),
+        )
+        if saved is None:
+            print(f"[Order Tracking Error] บันทึก pending order plan6_sweep_general ({symbol}) "
+                  f"ลง kvdb ไม่สำเร็จ")
+    except Exception as e:
+        print(f"[Plan 6 Liquidity Sweep Trigger Error] {symbol}: {e}")
