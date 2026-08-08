@@ -40,6 +40,7 @@ from scenario import (
 from zones import calc_premium_discount_zone
 from zone_entry import find_zone_entry, calc_zone_entry_order
 from liquidity_sweep_entry import find_sweep_entry, calc_sweep_entry_order
+from qm_pattern_entry import find_qm_pattern, calc_qm_entry_order
 
 TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
 STRENGTH_LABEL = {"strong": "(Strong)", "weak": "(Weak — กำลังก่อตัว)", "none": ""}
@@ -951,6 +952,66 @@ def _cmd_order6(ctx):
     return "\n".join(lines)
 
 
+def _cmd_order7(ctx):
+    """
+    กลุ่ม D — Quasimodo (QM) Pattern แบบ Set & Forget: หาโครงสร้างสวิง 4 จุด H-L-HH-LL (หรือกระจก
+    L-H-LL-HH) แล้วรอราคาย่อกลับมาทดสอบระดับ QML (Left Shoulder) — ดู qm_pattern_entry.py สำหรับ
+    รายละเอียด logic การหาโครงสร้าง
+
+    บันทึกเป็นสถานะ 'pending' เหมือนกลุ่ม A/C (Set & Forget)
+    """
+    config = ctx["config"]
+    df_ind = ctx["df_ind"]
+
+    lines = ["📥 <b>แผนที่ 7 (Quasimodo Pattern — Set & Forget)</b>", ""]
+
+    result = find_qm_pattern(df_ind, config)
+    if not result["valid"]:
+        lines.extend(result["reasons"])
+        return "\n".join(lines)
+
+    order = calc_qm_entry_order(result, config)
+    if not order:
+        lines.extend(result["reasons"])
+        lines.append("(เจอโครงสร้าง QM แล้ว แต่ RR ที่คำนวณได้ต่ำกว่าเกณฑ์ขั้นต่ำ — ยังไม่คุ้มเสี่ยง)")
+        return "\n".join(lines)
+
+    direction_th = "LONG" if order["direction"] == "bullish" else "SHORT"
+    lines.append(f"✅ เจอโอกาส: {direction_th} (Set & Forget — วาง Limit ล่วงหน้าได้เลย)")
+    lines.extend(result["reasons"])
+    lines.append("")
+    lines.append(f"Entry (Limit): {order['entry_price']:.4f}")
+    lines.append(f"SL: {order['stop_loss']:.4f}")
+    lines.append(f"TP: {order['take_profit']:.4f} (RR {order['rr']})")
+
+    bucket = config["kvdb_bucket"]
+    symbol = ctx["symbol"]
+    atr_period = config.get("sl_atr_avg_period", 20)
+    current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
+    threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+
+    existing_orders = load_orders(bucket, symbol)
+    if _has_similar_pending_or_running_order(existing_orders, "plan7_qm_pattern", order["direction"],
+                                              order["entry_price"], threshold):
+        lines.append("")
+        lines.append("📌 (มีโอกาสลักษณะเดียวกันแจ้งเตือนไว้แล้ว ไม่แจ้งซ้ำ)")
+        return "\n".join(lines)
+
+    saved = add_pending_order(
+        bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+        {"TP1": order["take_profit"]}, score=None, plan="plan7_qm_pattern",
+        expires_in_hours=config.get("qm_entry_expires_hours", 8), existing_orders=existing_orders,
+    )
+    if saved:
+        lines.append("")
+        lines.append("⏳ บันทึกเป็น Pending แล้ว (รอราคาวิ่งมาถึง Entry ก่อนถึงจะเริ่มนับผล — เช็คสถานะที่ /summary)")
+    else:
+        lines.append("")
+        lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
+
+    return "\n".join(lines)
+
+
 
 COMMAND_HANDLERS = {
     "order": _cmd_order,
@@ -960,6 +1021,7 @@ COMMAND_HANDLERS = {
     "order4": functools.partial(_cmd_order_n, plan_num=4),
     "order5": _cmd_order5,
     "order6": _cmd_order6,
+    "order7": _cmd_order7,
     "trend": _cmd_trend,
     "news": _cmd_news,
     "status": _cmd_status,

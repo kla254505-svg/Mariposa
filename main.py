@@ -485,6 +485,9 @@ if __name__ == "__main__":
             # --- กลุ่ม C (Liquidity Sweep + Displacement — เดิมต้องพิมพ์ /order6 เองเท่านั้น) ---
             plan_runner.check_sweep_entry_trigger(df, bias_4h, CONFIG, display_symbol)
 
+            # --- กลุ่ม D (Quasimodo Pattern — เดิมต้องพิมพ์ /order7 เองเท่านั้น) ---
+            plan_runner.check_qm_pattern_trigger(df, CONFIG, display_symbol)
+
             # หมายเหตุ: การตอบคำสั่ง Telegram (/order /trend /news /status /summary /stats) ย้ายไปทำที่
             # run_bot.py บน Render แล้ว (รันแบบ polling loop ตลอดเวลา ตอบเร็วกว่านี้มาก)
             # main.py ตัวนี้ (บน GitHub Actions cron) ทำหน้าที่แค่วิเคราะห์ + ส่ง Alert เท่านั้น

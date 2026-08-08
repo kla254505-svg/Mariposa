@@ -343,3 +343,70 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
                   f"ลง kvdb ไม่สำเร็จ")
     except Exception as e:
         print(f"[Plan 6 Liquidity Sweep Trigger Error] {symbol}: {e}")
+
+
+def check_qm_pattern_trigger(df, config, symbol):
+    """
+    กลุ่ม D (Quasimodo Pattern — /order7) — เช็คทุกรอบว่ามีโครงสร้าง QM (H-L-HH-LL หรือกระจก)
+    ให้แจ้งเตือนอัตโนมัติไหม โดยไม่ต้องรอผู้ใช้พิมพ์ /order7 เอง (เหมือน check_zone_entry_trigger/
+    check_sweep_entry_trigger ของกลุ่ม A/C แต่ engine คนละตัว — ดู qm_pattern_entry.py)
+
+    บันทึกเป็นสถานะ 'pending' เหมือนกลุ่ม A/C (Set & Forget) dedup แบบเดียวกัน (เช็ค pending+running)
+    ไม่ต้องใช้ bias_4h เพราะกลุ่ม D หาโครงสร้างจาก swing points ของ timeframe เข้าไม้เองล้วนๆ
+    """
+    from indicator import add_indicators
+    from qm_pattern_entry import find_qm_pattern, calc_qm_entry_order
+
+    bucket = config["kvdb_bucket"]
+    try:
+        df_ind_plan = add_indicators(df, config)
+        result = find_qm_pattern(df_ind_plan, config)
+        if not result["valid"]:
+            return
+
+        order = calc_qm_entry_order(result, config)
+        if not order:
+            return
+
+        plan_blackout, _ = is_in_news_blackout(bucket, symbol)
+        if plan_blackout:
+            return
+
+        atr_period = config.get("sl_atr_avg_period", 20)
+        current_atr = (
+            df_ind_plan["atr"].tail(atr_period).mean()
+            if "atr" in df_ind_plan.columns and len(df_ind_plan)
+            else 0
+        )
+        threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+
+        existing_orders = load_orders(bucket, symbol)
+        for o in existing_orders:
+            if (o["status"] in ("pending", "running") and o.get("plan") == "plan7_qm_pattern"
+                    and o["direction"] == order["direction"]
+                    and abs(o["entry_price"] - order["entry_price"]) < threshold):
+                return  # มีโอกาสลักษณะเดียวกันแจ้งไปแล้ว ไม่แจ้งซ้ำ
+
+        direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
+        msg = (
+            f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 7 (Quasimodo Pattern, Set \u0026 Forget)</b>\n"
+            f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
+            + "\n".join(result["reasons"]) + "\n\n"
+            f"Entry (Limit): {order['entry_price']:.4f}\n"
+            f"SL: {order['stop_loss']:.4f}\n"
+            f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
+            "หมายเหตุ: แจ้งทันทีที่เจอโครงสร้าง (Set \u0026 Forget) — วาง Limit Order ไว้รอได้เลย "
+            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (เช็คสถานะที่ /summary)"
+        )
+        send_alert_to_targets(config, msg)
+
+        saved = add_pending_order(
+            bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+            {"TP1": order["take_profit"]}, score=None, plan="plan7_qm_pattern",
+            expires_in_hours=config.get("qm_entry_expires_hours", 8), existing_orders=existing_orders,
+        )
+        if saved is None:
+            print(f"[Order Tracking Error] บันทึก pending order plan7_qm_pattern ({symbol}) "
+                  f"ลง kvdb ไม่สำเร็จ")
+    except Exception as e:
+        print(f"[Plan 7 QM Pattern Trigger Error] {symbol}: {e}")

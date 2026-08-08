@@ -17,6 +17,7 @@ PLAN_LABEL = {
     "plan4_daily_continuation": "แผนที่ 4 (Daily Continuation)",
     "plan5_zone_single": "แผนที่ 5 (SMC Zone Entry — Set & Forget)",
     "plan6_sweep_general": "แผนที่ 6 (Liquidity Sweep + Displacement — Set & Forget)",
+    "plan7_qm_pattern": "แผนที่ 7 (Quasimodo Pattern — Set & Forget)",
 }
 PLAN_SHORT = {
     "plan1_pullback": "1",
@@ -26,6 +27,7 @@ PLAN_SHORT = {
     "plan4_daily_continuation": "4",
     "plan5_zone_single": "5",
     "plan6_sweep_general": "6",
+    "plan7_qm_pattern": "7",
 }
 
 
