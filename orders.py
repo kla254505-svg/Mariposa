@@ -18,6 +18,7 @@ PLAN_LABEL = {
     "plan5_zone_single": "แผนที่ 5 (SMC Zone Entry — Set & Forget)",
     "plan6_sweep_general": "แผนที่ 6 (Liquidity Sweep + Displacement — Set & Forget)",
     "plan7_qm_pattern": "แผนที่ 7 (Quasimodo Pattern — Set & Forget)",
+    "plan8_flag_pattern": "แผนที่ 8 (Flag Pattern — Set & Forget)",
 }
 PLAN_SHORT = {
     "plan1_pullback": "1",
@@ -28,6 +29,7 @@ PLAN_SHORT = {
     "plan5_zone_single": "5",
     "plan6_sweep_general": "6",
     "plan7_qm_pattern": "7",
+    "plan8_flag_pattern": "8",
 }
 
 
@@ -105,15 +107,23 @@ def add_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, s
 
 
 def add_pending_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, score,
-                       plan, expires_in_hours=8, existing_orders=None):
+                       plan, current_price, expires_in_hours=8, existing_orders=None):
     """
-    บันทึกออเดอร์แบบ 'pending' (Set & Forget — แผน 5-8) — วาง Limit Order ไว้ล่วงหน้าตอนเจอ zone/pattern
-    ทันที ก่อนที่ราคาจะเดินทางมาถึงจริง ต่างจาก add_order() (แผน 1-4 เดิม) ที่บันทึกเป็น 'running'
-    ทันทีเพราะรอราคาแตะ + มี reaction ยืนยันมาก่อนแล้วถึงแจ้งเตือน (ถือว่าเข้าไม้จริงตั้งแต่แจ้ง)
+    บันทึกออเดอร์แบบ 'pending' (Set & Forget — แผน 5-8) — วาง Limit/Stop Order ไว้ล่วงหน้าตอนเจอ
+    zone/pattern ทันที ก่อนที่ราคาจะเดินทางมาถึงจริง ต่างจาก add_order() (แผน 1-4 เดิม) ที่บันทึกเป็น
+    'running' ทันทีเพราะรอราคาแตะ + มี reaction ยืนยันมาก่อนแล้วถึงแจ้งเตือน (ถือว่าเข้าไม้จริงตั้งแต่แจ้ง)
 
     วงจรสถานะของออเดอร์แบบนี้: pending -> running (พอราคามาถึง entry จริง ผ่าน update_pending_orders())
     -> win/loss (เหมือนเดิม ผ่าน update_orders_status()) หรือ pending -> expired (ราคาไม่มาถึงภายใน
     expires_in_hours ชม. — ถือว่าพลาดโอกาส ไม่นับ win/loss เพราะไม่เคยเข้าไม้จริง)
+
+    current_price: ราคาตอนที่สร้างออเดอร์นี้ — ใช้คำนวณ 'entry_side' (entry อยู่ต่ำ/สูงกว่าราคาตอนนี้)
+    เก็บไว้ตัดสินทิศทางการเช็ค fill ใน update_pending_orders() แทนการอนุมานจาก direction (bullish/
+    bearish) เพราะ Limit กับ Stop มีทิศทางการ fill ตรงข้ามกันแม้ direction เดียวกัน:
+      - Buy Limit (bullish, entry ต่ำกว่าราคาปัจจุบัน — รอย่อลงมาเข้า แบบกลุ่ม A/C/D) fill เมื่อราคาลง
+      - Buy Stop (bullish, entry สูงกว่าราคาปัจจุบัน — รอทะลุขึ้นไปเข้า แบบ breakout กลุ่ม B) fill เมื่อราคาขึ้น
+    ถ้าใช้ direction เป็นตัวตัดสินอย่างเดียว (โค้ดเดิมก่อนแก้) จะเช็ค fill ผิดทิศทางสำหรับ Stop order
+    ทันที (กลุ่ม A/C/D ไม่มีปัญหานี้เพราะเป็น Limit ล้วนบังเอิญ entry_side ตรงกับ direction เป๊ะ)
 
     expires_in_hours: ปรับได้ตาม timeframe ของแต่ละแผนย่อยที่มาเรียกใช้ (เช่น zone จาก 4H บริบทSo
     ควรอยู่ได้นานกว่า pattern จาก 15M) ค่า default 8 ชม.
@@ -138,6 +148,7 @@ def add_pending_order(bucket, symbol, direction, entry_price, stop_loss, take_pr
         "plan": plan,
         "direction": direction,  # "bullish" หรือ "bearish"
         "entry_price": round(float(entry_price), 3),
+        "entry_side": "below" if entry_price <= current_price else "above",
         "stop_loss": round(float(stop_loss), 3),
         "take_profits": {k: round(float(v), 3) for k, v in take_profits.items()},
         "rr_tp1": rr_tp1,
@@ -166,6 +177,12 @@ def update_pending_orders(bucket, symbol, current_price, spread_buffer=0.0):
     เช็ค expiry ก่อนเช็ค fill เสมอ — ถ้าหมดอายุแล้วไม่ต้องเสียเวลาเช็คว่า fill หรือยัง
     บันทึกกลับ kvdb เฉพาะตอนมีการเปลี่ยนสถานะจริง เหมือน update_orders_status()
 
+    เช็ค fill จาก 'entry_side' (entry อยู่ต่ำ/สูงกว่าราคาตอนสร้างออเดอร์) ไม่ใช่ direction — กัน
+    เช็คผิดทิศทางสำหรับ Stop order (เช่น breakout pattern กลุ่ม B ที่ entry อยู่สูงกว่าราคาปัจจุบัน
+    รอราคาขึ้นไปทะลุ ต่างจาก Limit ของกลุ่ม A/C/D ที่ entry อยู่ต่ำกว่า รอราคาย่อลงมา)
+    ออเดอร์เก่าที่ไม่มี entry_side (สร้างก่อนแก้จุดนี้) จะ fallback ไปใช้ direction แบบเดิม (สมมติเป็น
+    Limit เสมอ ตรงกับพฤติกรรมเดิมของกลุ่ม A/C/D ที่ผ่านมา ไม่กระทบออเดอร์ที่มีอยู่แล้ว)
+
     spread_buffer: ราคาที่บอทเช็คมาจาก TwelveData (ราคากลาง) ไม่ใช่ bid/ask ของโบรกที่คุณเทรดจริง
     ซึ่งมี spread คั่นอยู่ — ต้องให้ราคาเลยจุด Entry ไปอีก spread_buffer ก่อนถึงจะถือว่า fill จริง
     กันเคสระบบบอกว่า "เข้าแล้ว" ทั้งที่โบรกจริงยังไม่ทันได้ fill ให้ (ตามที่ผู้ใช้ฟีดแบ็คมา)
@@ -192,10 +209,14 @@ def update_pending_orders(bucket, symbol, current_price, spread_buffer=0.0):
                 pass  # parse ไม่ได้ (ข้อมูลเก่า/เพี้ยน) ถือว่ายังไม่หมดอายุ ปล่อยให้เช็ค fill ต่อไป
 
         entry_price = o["entry_price"]
-        direction = o["direction"]
+        entry_side = o.get("entry_side")
+        if entry_side is None:
+            # ออเดอร์เก่าก่อนแก้จุดนี้ — fallback ตาม direction แบบเดิม (Limit เสมอ)
+            entry_side = "below" if o["direction"] == "bullish" else "above"
+
         filled = (
-            (direction == "bullish" and current_price <= entry_price - spread_buffer) or
-            (direction == "bearish" and current_price >= entry_price + spread_buffer)
+            (entry_side == "below" and current_price <= entry_price - spread_buffer) or
+            (entry_side == "above" and current_price >= entry_price + spread_buffer)
         )
         if filled:
             o["status"] = "running"

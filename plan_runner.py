@@ -270,6 +270,7 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
             {"TP1": order["take_profit"]}, score=None, plan="plan5_zone_single",
+            current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("zone_entry_expires_hours", 8), existing_orders=existing_orders,
         )
         if saved is None:
@@ -336,6 +337,7 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
             {"TP1": order["take_profit"]}, score=None, plan="plan6_sweep_general",
+            current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("sweep_entry_expires_hours", 6), existing_orders=existing_orders,
         )
         if saved is None:
@@ -403,6 +405,7 @@ def check_qm_pattern_trigger(df, config, symbol):
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
             {"TP1": order["take_profit"]}, score=None, plan="plan7_qm_pattern",
+            current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("qm_entry_expires_hours", 8), existing_orders=existing_orders,
         )
         if saved is None:
@@ -410,3 +413,71 @@ def check_qm_pattern_trigger(df, config, symbol):
                   f"ลง kvdb ไม่สำเร็จ")
     except Exception as e:
         print(f"[Plan 7 QM Pattern Trigger Error] {symbol}: {e}")
+
+
+def check_flag_pattern_trigger(df, config, symbol):
+    """
+    กลุ่ม B (Flag Pattern — /order8) — เช็คทุกรอบว่ามี pole + พักตัวแคบ (Flag) ให้แจ้งเตือนอัตโนมัติ
+    ไหม โดยไม่ต้องรอผู้ใช้พิมพ์ /order8 เอง (เหมือน check_qm_pattern_trigger ของกลุ่ม D แต่ engine
+    คนละตัว — ดู flag_pattern_entry.py)
+
+    บันทึกเป็นสถานะ 'pending' เหมือนกลุ่มอื่น (Set & Forget) แต่เป็น Stop order (entry_side='above'/
+    'below' คำนวณอัตโนมัติใน add_pending_order() จาก current_price ที่ส่งเข้าไป) dedup แบบเดียวกัน
+    """
+    from indicator import add_indicators
+    from flag_pattern_entry import find_flag_pattern, calc_flag_entry_order
+
+    bucket = config["kvdb_bucket"]
+    try:
+        df_ind_plan = add_indicators(df, config)
+        result = find_flag_pattern(df_ind_plan, config)
+        if not result["valid"]:
+            return
+
+        order = calc_flag_entry_order(result, config)
+        if not order:
+            return
+
+        plan_blackout, _ = is_in_news_blackout(bucket, symbol)
+        if plan_blackout:
+            return
+
+        atr_period = config.get("sl_atr_avg_period", 20)
+        current_atr = (
+            df_ind_plan["atr"].tail(atr_period).mean()
+            if "atr" in df_ind_plan.columns and len(df_ind_plan)
+            else 0
+        )
+        threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
+
+        existing_orders = load_orders(bucket, symbol)
+        for o in existing_orders:
+            if (o["status"] in ("pending", "running") and o.get("plan") == "plan8_flag_pattern"
+                    and o["direction"] == order["direction"]
+                    and abs(o["entry_price"] - order["entry_price"]) < threshold):
+                return  # มีโอกาสลักษณะเดียวกันแจ้งไปแล้ว ไม่แจ้งซ้ำ
+
+        direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
+        msg = (
+            f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 8 (Flag Pattern, Set \u0026 Forget)</b>\n"
+            f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
+            + "\n".join(result["reasons"]) + "\n\n"
+            f"Entry (Stop): {order['entry_price']:.4f}\n"
+            f"SL: {order['stop_loss']:.4f}\n"
+            f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
+            "หมายเหตุ: แจ้งทันทีที่เจอ pattern (Set \u0026 Forget) — วาง Stop Order รอ breakout ได้เลย "
+            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะทะลุกรอบไปถึง Entry (เช็คสถานะที่ /summary)"
+        )
+        send_alert_to_targets(config, msg)
+
+        saved = add_pending_order(
+            bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
+            {"TP1": order["take_profit"]}, score=None, plan="plan8_flag_pattern",
+            current_price=df_ind_plan["close"].iloc[-1],
+            expires_in_hours=config.get("flag_entry_expires_hours", 6), existing_orders=existing_orders,
+        )
+        if saved is None:
+            print(f"[Order Tracking Error] บันทึก pending order plan8_flag_pattern ({symbol}) "
+                  f"ลง kvdb ไม่สำเร็จ")
+    except Exception as e:
+        print(f"[Plan 8 Flag Pattern Trigger Error] {symbol}: {e}")
