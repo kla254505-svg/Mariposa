@@ -1,11 +1,15 @@
 """
 telegram_bot.py
 ระบบรับคำสั่งจาก Telegram (Interactive Commands) เพิ่มเติมจากที่บอทส่งแจ้งเตือนอัตโนมัติอยู่แล้ว
-รองรับ: /order /order1 /order2 /order3 /order4 /trend /news /status /summary /stats
-/confirm1 /confirm2 /confirm3 /confirm4
-(/order, /order1-4 บันทึกลง Order Dashboard ให้อัตโนมัติทันทีที่เจอจุดเข้าอยู่แล้ว ส่วน /confirm1-4
-ใช้กดยืนยัน/บันทึกซ้ำแบบเจาะจงเองได้อีกที มีระบบกันบันทึกซ้ำร่วมกันทั้งหมด ไม่ทำให้ข้อมูลซ้ำซ้อน
-แผนที่ 4 ต่างจากแผน 1-3 ตรงที่ถือยาวเป็นชั่วโมง-วัน อ้างอิง Daily range แทน day-trade แบบเดียวกัน)
+รองรับ: /order /trend /news /status /summary /stats
+
+/order รวมทั้ง 8 แผนไว้คำสั่งเดียว: เช็คเงื่อนไขของแผนที่ 1-8 พร้อมกันในรอบเดียว แล้วสรุปผลรวมเป็น
+ข้อความเดียว (ยาว อาจถูกแบ่งส่งหลายข้อความถ้าเกินลิมิตของ Telegram — ดู _reply/_split_message)
+ไม่มีระบบ Confirm และไม่บันทึกลง Order Dashboard อีกต่อไป (ตัดออกทั้งหมดตามที่ผู้ใช้ร้องขอ เพราะ
+ระบบยืนยันเดิมทำให้ตัดสินใจเข้าเทรดช้า/ไม่ยอมเทรด และการเขียนข้อมูลทุกครั้งที่เช็คทำให้ตอบช้า/หน่วง)
+/order แสดงผลตามสภาพจริงล้วนๆ (detect-and-display) — การบันทึกข้อมูลออเดอร์ ผู้ใช้แยกไปทำเองข้างนอก
+แล้ว ทุกแผนคำนวณ "คะแนน" (Score) ของตัวเองเทียบกันเสมอ (ดู plan_score.py) เรียงจากมากไปน้อย พร้อม
+ไฮไลต์แผนที่ทิศทางตรงกับเทรนด์หลัก (4H Bias หรือ 15M Structure) ให้เห็นชัดเวลาสัญญาณสวนทางกัน
 
 ข้อจำกัดสำคัญที่ควรรู้ก่อนใช้: บอทนี้รันบน GitHub Actions แบบ cron (ไม่ใช่ server ที่ฟังตลอดเวลา)
 คำสั่งที่พิมพ์จะถูกประมวลผล "ตอนที่บอทรันรอบถัดไป" เท่านั้น ไม่ใช่ตอบทันที ถ้า cron ตั้งไว้ทุก 5 นาที
@@ -20,21 +24,17 @@ server ที่ฟัง webhook ตลอดเวลาแทน (คนล�
 import time
 import json
 import uuid
-import functools
+import html
 import requests
 from datetime import datetime, timedelta, timezone
 
 from kvstore import kv_get, kv_set
-from orders import (
-    load_orders, add_order, add_pending_order, update_orders_status, update_pending_orders,
-    build_orders_dashboard, calc_stats, build_stats_message,
-)
+from orders import update_orders_status, update_pending_orders, build_orders_dashboard, calc_stats, build_stats_message
 from news import fetch_usd_calendar_events
 from news_scheduler import THAI_TZ, is_in_news_blackout
 from scenario import (
     detect_breakout_trigger, detect_counter_trend_trigger,
     calc_breakout_order, calc_counter_trend_order,
-    get_breakout_status, get_counter_trend_status,
     get_daily_bias_and_range, detect_plan4_signal, calc_plan4_order,
 )
 from zones import calc_premium_discount_zone
@@ -42,6 +42,7 @@ from zone_entry import find_zone_entry, calc_zone_entry_order
 from liquidity_sweep_entry import find_sweep_entry, calc_sweep_entry_order
 from qm_pattern_entry import find_qm_pattern, calc_qm_entry_order
 from flag_pattern_entry import find_flag_pattern, calc_flag_entry_order
+from plan_score import generic_plan_score, determine_master_trend
 
 TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
 STRENGTH_LABEL = {"strong": "(Strong)", "weak": "(Weak — กำลังก่อตัว)", "none": ""}
@@ -78,6 +79,19 @@ def _get_cached_bias_4h(config, symbol):
     try:
         data = json.loads(raw)
         return data.get("bias_4h")
+    except Exception:
+        return None
+
+
+def _get_cached_higher_tf_trend(config, symbol):
+    """เหมือน _get_cached_bias_4h() แต่ดึงฟิลด์ higher_tf_trend (1H) จาก kv payload เดียวกัน
+    ใช้เสริมความแม่นยำของคะแนนแผนที่ 1 (bonus 1H alignment ใน score.py) โดยไม่ต้องยิง TwelveData เพิ่ม"""
+    raw = kv_get(config["kvdb_bucket"], f"htf_ctx_{symbol}")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return data.get("higher_tf_trend")
     except Exception:
         return None
 
@@ -123,6 +137,7 @@ def _build_command_context(symbol, config):
         "structure": structure,
         "entry_signal": entry_signal,
         "bias_4h": bias_4h,
+        "higher_tf_trend": _get_cached_higher_tf_trend(config, symbol),
         "session_info": get_session_info(config),
         "news_blackout": is_in_news_blackout(config["kvdb_bucket"], symbol),
     }
@@ -147,191 +162,84 @@ def _get_updates(token, offset=None, timeout=5):
     return []
 
 
-def _reply(token, chat_id, text):
+# --- Telegram: กันข้อความยาว/ตัวอักษรพิเศษตีกันจนส่งไม่สำเร็จ ---
+# /order รวม 8 แผนในข้อความเดียวอาจยาวเกิน 4096 ตัวอักษรที่ Telegram รับได้ต่อข้อความง่ายๆ เลย
+# TELEGRAM_MAX_LEN เผื่อ buffer ไว้ต่ำกว่าลิมิตจริงเล็กน้อย กันกรณีนับความยาวคลาดเคลื่อน (unicode/emoji)
+TELEGRAM_MAX_LEN = 3800
+
+
+def _split_message(text, max_len=TELEGRAM_MAX_LEN):
+    """แบ่งข้อความยาวเป็นหลายก้อน ตัดที่ขอบบรรทัด (ไม่ตัดกลางคำ/กลาง HTML tag) แต่ละก้อนที่ได้
+    ยังคง <b>...</b> ปิดครบในตัวเอง เพราะข้อความต้นทางเปิด-ปิด tag ในบรรทัดเดียวกันเสมอ ไม่มี tag
+    ที่คร่อมข้ามหลายบรรทัด จึงตัดตรงขอบบรรทัดได้อย่างปลอดภัย"""
+    if len(text) <= max_len:
+        return [text]
+
+    parts = []
+    current = ""
+    for line in text.split("\n"):
+        # บรรทัดเดียวยาวเกิน max_len เอง (เคสหายาก) — ตัดดิบๆ ตามความยาวไปก่อน กันข้อความไม่ถูกส่งเลย
+        while len(line) > max_len:
+            if current:
+                parts.append(current)
+                current = ""
+            parts.append(line[:max_len])
+            line = line[max_len:]
+
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > max_len:
+            if current:
+                parts.append(current)
+            current = line
+        else:
+            current = candidate
+
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _esc(value):
+    """HTML-escape ค่าที่จะแทรกลงข้อความ Telegram (parse_mode=HTML) กันตัวอักษรพิเศษ (&, <, >)
+    ในข้อมูลไดนามิก (เช่น symbol/label ที่อาจมาจากภายนอกในอนาคต) ไปตีกับ tag ที่เราคุมเองจนส่งไม่สำเร็จ
+    ใช้กับ "ค่าที่แทรกเข้าไป" เท่านั้น ห้ามใช้ครอบทั้งข้อความที่มี <b> ของเราเองอยู่แล้ว"""
+    return html.escape(str(value), quote=False)
+
+
+def _send_single(token, chat_id, text, parse_mode="HTML"):
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
+        payload = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        resp = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", data=payload, timeout=10)
+        data = resp.json()
+        if not data.get("ok"):
+            if parse_mode:
+                # มักเป็นเพราะตัวอักษรพิเศษตีกับ HTML parsing — ลองส่งใหม่แบบ plain text (ตัด parse_mode
+                # ทิ้ง) กันข้อความหายไปเฉยๆ แค่ tag ตัวหนา/ตัวเอียงจะหายไปด้วย ยังดีกว่าไม่ส่งอะไรเลย
+                print(f"[Telegram Bot Error] sendMessage แบบ HTML ล้มเหลว ({data.get('description')}) "
+                      f"— ลองส่งใหม่แบบ plain text")
+                return _send_single(token, chat_id, text, parse_mode=None)
+            print(f"[Telegram Bot Error] sendMessage ล้มเหลว: {data}")
+            return False
+        return True
     except Exception as e:
         print(f"[Telegram Bot Error] ส่งข้อความตอบกลับล้มเหลว: {e}")
+        return False
 
 
-def _has_similar_running_order(bucket, symbol, plan, direction, entry_price, threshold):
-    """เช็คว่ามีออเดอร์ที่ยัง running อยู่ ของ plan/ทิศทางเดียวกัน ราคาใกล้เคียงกัน (ภายใน threshold) แล้วหรือยัง
-    ใช้กันไม่ให้ /order, /order1-3 บันทึกออเดอร์ซ้ำถ้าเช็คซ้ำหลายครั้ง หรือของเดิม main.py บันทึก
-    อัตโนมัติไปแล้ว (Plan 2/3 ที่ trigger จริงจะถูก main.py บันทึกเองด้วยอยู่แล้ว)"""
-    for o in load_orders(bucket, symbol):
-        if (o["status"] == "running" and o.get("plan") == plan
-                and o["direction"] == direction
-                and abs(o["entry_price"] - entry_price) < threshold):
-            return True
-    return False
-
-
-def _has_similar_pending_or_running_order(orders_list, plan, direction, entry_price, threshold):
-    """เหมือน _has_similar_running_order() แต่เช็คทั้งสถานะ 'pending' ด้วย (ใช้กับแผน Set & Forget
-    เช่น /order5 เป็นต้นไป) — กันแจ้งเตือนซ้ำถ้า zone/confluence เดิมยังไม่หมดอายุ/ยัง fill ไม่ผ่าน
-    (ต่างจาก _has_similar_running_order เดิมที่เช็คแค่ 'running' เพราะแผน 1-4 บันทึกเป็น running
-    ทันทีอยู่แล้ว ไม่มีสถานะ pending มาเกี่ยว)
-
-    รับ orders_list ที่โหลดมาแล้วโดยตรง (ไม่ใช่ bucket/symbol) เพราะผู้เรียกส่วนใหญ่ต้องใช้ orders
-    list เดิมต่อใน add_pending_order() อยู่แล้ว (ผ่าน existing_orders) — เดิมฟังก์ชันนี้โหลดเอง
-    แยกต่างหาก ทำให้แต่ละคำสั่ง Set & Forget ยิง kv_get ซ้ำ 2 รอบโดยไม่จำเป็น (เจอว่าเป็นสาเหตุหนึ่ง
-    ที่ทำให้ /order5, /order6 ตอบช้าลงมาก — ล็อกจุดนี้ทิ้งไปพร้อมกับแก้ save_orders retry ซ้อนกัน)"""
-    for o in orders_list:
-        if (o["status"] in ("pending", "running") and o.get("plan") == plan
-                and o["direction"] == direction
-                and abs(o["entry_price"] - entry_price) < threshold):
-            return True
-    return False
-
-
-def _cmd_order(ctx):
-    """
-    เช็คทั้ง 3 แผน คืนเฉพาะแผนที่ตอนนี้เข้าเงื่อนไขจริงๆ เท่านั้น ตามที่ระบุไว้ในดีไซน์
-
-    ทั้ง 3 แผนคำนวณ Entry/SL/TP ให้พร้อมตั้ง Limit Order ได้ทันที และ "บันทึกลง Order Dashboard
-    ให้อัตโนมัติทันที" ที่เจอจุดเข้า (ไม่ต้องพิมพ์คำสั่งยืนยันแยกต่างหากอีกแล้ว) มีระบบกันบันทึกซ้ำ
-    (_has_similar_running_order) ถ้าเช็คซ้ำหลายครั้งขณะจุดเข้ายังไม่เปลี่ยน จะไม่บันทึกซ้ำเข้าไปอีก:
-      - แผนที่ 1 (Pullback): สูตรเดียวกับที่ main.py ใช้ส่ง Alert อัตโนมัติจริง (ATR เฉลี่ยย้อนหลัง)
-        ถ้ายังไม่ยืนยัน 5M Trigger จะบันทึกแยกเป็น plan "plan1_pullback_early" (คนละกลุ่มกับที่ยืนยัน
-        แล้ว "plan1_pullback") เพื่อให้ /stats เทียบได้ว่าเข้าก่อนยืนยันกับรอยืนยันแล้วเข้า อันไหนแม่นกว่า
-      - แผนที่ 2 (Breakout) และแผนที่ 3 (สวนเทรนด์): ใช้ calc_breakout_order/calc_counter_trend_order
-        จาก scenario.py — จุดเดียวกับที่ main.py ใช้คำนวณตอน trigger จริงเพื่อบันทึกลง Order Dashboard
-        (กันตรรกะคำนวณ SL/TP ซ้ำซ้อนสองที่ ถ้าแก้สูตรต้องแก้ที่ scenario.py จุดเดียว ทั้งคู่จะได้ตัวเลข
-        ตรงกันเป๊ะเสมอ)
-    """
-    lines = ["📥 <b>เช็คโอกาสเข้าไม้ตอนนี้</b>", ""]
-    found_any = False
-
-    entry_signal = ctx["entry_signal"]
-    config = ctx["config"]
-    df_ind = ctx["df_ind"]
-    structure = ctx["structure"]
-    symbol = ctx["symbol"]
-    bucket = config["kvdb_bucket"]
-
-    if entry_signal.get("valid") and entry_signal.get("direction") == structure["trend"]:
-        direction_th = "LONG" if entry_signal["direction"] == "bullish" else "SHORT"
-        lines.append(f"✅ แผนที่ 1 (Pullback): {direction_th}")
-
-        try:
-            from risk import calc_stop_loss
-            from tp import calc_take_profits, calc_risk_reward
-
-            atr_period = config.get("sl_atr_avg_period", 20)
-            current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
-            stop_loss = calc_stop_loss(entry_signal, current_atr, config)
-            take_profits = calc_take_profits(
-                entry_signal["entry_price"], stop_loss, entry_signal["direction"], config
-            )
-            rr = {name: calc_risk_reward(entry_signal["entry_price"], stop_loss, price)
-                  for name, price in take_profits.items()}
-
-            lines.append(f"   Entry: {entry_signal['entry_price']:.4f}")
-            lines.append(f"   SL: {stop_loss:.4f}")
-            for name, price in take_profits.items():
-                lines.append(f"   {name}: {price:.4f} (RR {rr[name]})")
-
-            confirmed = bool(entry_signal.get("trigger", {}).get("confirmed"))
-            plan_key = "plan1_pullback" if confirmed else "plan1_pullback_early"
-            threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
-            if _has_similar_running_order(bucket, symbol, plan_key, entry_signal["direction"],
-                                           entry_signal["entry_price"], threshold):
-                lines.append("   📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
-            else:
-                saved = add_order(bucket, symbol, entry_signal["direction"], entry_signal["entry_price"],
-                                   stop_loss, take_profits, score=None, plan=plan_key)
-                if saved:
-                    tag = "ยืนยันแล้ว" if confirmed else "เข้าก่อนยืนยัน"
-                    lines.append(f"   📌 บันทึกลง Order Dashboard แล้ว ({tag})")
-                else:
-                    lines.append("   ⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
-        except Exception as e:
-            lines.append(f"   (คำนวณ/บันทึก SL/TP ไม่สำเร็จ: {e})")
-
-        if not entry_signal.get("trigger", {}).get("confirmed"):
-            lines.append(
-                "   ⚠️ ยังไม่ยืนยัน 5M Trigger — ราคาอาจยังไม่กลับตัวจริง เข้าก่อนเวลาอาจโดนสวนได้"
-            )
-        found_any = True
-
-    breakout = detect_breakout_trigger(df_ind, structure, config)
-    if breakout:
-        direction_th = "LONG" if breakout["direction"] == "bullish" else "SHORT"
-        lines.append(
-            f"✅ แผนที่ 2 (Breakout): {direction_th} ทะลุ {breakout['level']:.4f} "
-            f"ที่ราคา {breakout['price']:.4f}"
-        )
-        plan2_order = calc_breakout_order(breakout, structure, df_ind, config)
-        if plan2_order:
-            lines.append(f"   Entry: {plan2_order['entry_price']:.4f}")
-            lines.append(f"   SL: {plan2_order['stop_loss']:.4f}")
-            lines.append(f"   TP (Measured move): {plan2_order['take_profit']:.4f} (RR {plan2_order['rr']})")
-
-            atr_period = config.get("sl_atr_avg_period", 20)
-            current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
-            threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
-            if _has_similar_running_order(bucket, symbol, "plan2_breakout", plan2_order["direction"],
-                                           plan2_order["entry_price"], threshold):
-                lines.append("   📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
-            else:
-                saved = add_order(bucket, symbol, plan2_order["direction"], plan2_order["entry_price"],
-                                   plan2_order["stop_loss"], {"TP1": plan2_order["take_profit"]},
-                                   score=None, plan="plan2_breakout")
-                if saved:
-                    lines.append("   📌 บันทึกลง Order Dashboard แล้ว")
-                else:
-                    lines.append("   ⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
-        else:
-            lines.append("   (หาข้อมูล swing ไม่พอสำหรับคำนวณ SL/TP ของแผนนี้)")
-        found_any = True
-
-    counter = detect_counter_trend_trigger(df_ind, structure)
-    if counter:
-        direction_th = "LONG" if counter["direction"] == "bullish" else "SHORT"
-        lines.append(f"✅ แผนที่ 3 (สวนเทรนด์): {direction_th} — Checklist ครบ 3/3 ข้อ")
-        plan3_order = calc_counter_trend_order(counter, df_ind, config)
-        if plan3_order:
-            lines.append(f"   Entry: {plan3_order['entry_price']:.4f}")
-            lines.append(f"   SL: {plan3_order['stop_loss']:.4f}")
-            lines.append(f"   TP (Equilibrium): {plan3_order['take_profit']:.4f} (RR {plan3_order['rr']})")
-            lines.append("   ⚠️ แผนสวนเทรนด์เสี่ยงสูงกว่าแผนอื่น ควรลดขนาดไม้")
-
-            atr_period = config.get("sl_atr_avg_period", 20)
-            current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
-            threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
-            if _has_similar_running_order(bucket, symbol, "plan3_counter_trend", plan3_order["direction"],
-                                           plan3_order["entry_price"], threshold):
-                lines.append("   📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
-            else:
-                saved = add_order(bucket, symbol, plan3_order["direction"], plan3_order["entry_price"],
-                                   plan3_order["stop_loss"], {"TP1": plan3_order["take_profit"]},
-                                   score=None, plan="plan3_counter_trend")
-                if saved:
-                    lines.append("   📌 บันทึกลง Order Dashboard แล้ว")
-                else:
-                    lines.append("   ⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
-        else:
-            lines.append("   (คำนวณ SL/TP ของแผนนี้ไม่สำเร็จ)")
-        found_any = True
-
-    if ctx.get("news_blackout", (False, None))[0]:
-        lines.append("")
-        lines.append("⛔ หมายเหตุ: ตอนนี้อยู่ในช่วงห้ามเทรดรอบข่าวสำคัญ (±60 นาที) Alert อัตโนมัติจะถูกระงับไว้ก่อน")
-
-    if not found_any:
-        return "📥 ตอนนี้ยังไม่มีจุดเข้าไม้ที่เข้าเงื่อนไขเลยครับ (เช็คครบทั้งแผนที่ 1-3 แล้ว)"
-
-    return "\n".join(lines)
+def _reply(token, chat_id, text):
+    """ส่งข้อความตอบกลับ — แบ่งเป็นหลายก้อนอัตโนมัติถ้ายาวเกินลิมิตของ Telegram (ดู _split_message)
+    และ fallback เป็น plain text อัตโนมัติถ้า HTML parsing พัง (ดู _send_single) กันข้อความยาวๆ
+    อย่าง /order (รวม 8 แผน) ส่งไม่สำเร็จเงียบๆ"""
+    for chunk in _split_message(text):
+        _send_single(token, chat_id, chunk)
 
 
 def _fetch_plan4_context(symbol, config):
     """
     ดึงข้อมูลที่แผนที่ 4 ต้องใช้เพิ่มเติมจากที่ ctx ปกติมีอยู่แล้ว (Daily range + 5 นาทีล่าสุด)
-    แยกออกมาเป็นฟังก์ชันต่างหาก ไม่รวมเข้า _build_command_context หลัก เพราะ /order /order1-3
+    แยกออกมาเป็นฟังก์ชันต่างหาก ไม่รวมเข้า _build_command_context หลัก เพราะ /order
     ส่วนใหญ่ไม่ต้องใช้ข้อมูลนี้ กันไม่ให้ทุกคำสั่งช้าลง/ยิง API เพิ่มโดยไม่จำเป็น
     คืน (daily_range, df_5m) หรือ (None, None) ถ้าดึงไม่สำเร็จ
     """
@@ -357,41 +265,6 @@ def _fetch_plan4_context(symbol, config):
         return None, None
 
 
-# ===========================================================================
-# PLAN_REGISTRY — รวม logic เฉพาะของแผนที่ 1-4 ไว้ที่เดียว (เดิมกระจายอยู่ใน
-# _cmd_order1..4 / _cmd_confirm1..4 = 8 ฟังก์ชันหน้าตาเกือบเหมือนกันทุกตัว)
-#
-# _cmd_order_n(ctx, n) / _cmd_confirm_n(ctx, n) ด้านล่างคือ "shared runner" ที่ทำงานร่วมกับ
-# entry ในนี้แทน ไม่เปลี่ยนพฤติกรรม/ข้อความที่ผู้ใช้เห็นจากของเดิมเลย แค่ลดโค้ดซ้ำ
-#
-# แต่ละ entry ประกอบด้วย:
-#   check(ctx)      -> (state, payload)
-#       state == "error"    : payload คือข้อความ error ที่จะส่งกลับผู้ใช้ตรงๆ (เฉพาะแผน 4 ที่ fetch เพิ่มได้)
-#       state == "inactive" : payload คือ list บรรทัดอธิบายสถานะปัจจุบัน (ใช้กับ /orderN เท่านั้น)
-#       state == "active"   : payload คือข้อมูลดิบ (มี "direction" เสมอ) ส่งต่อให้ active_line_fn/
-#                             build_order() ใช้ต่อ
-#   pre_lines_fn(payload)   -> list บรรทัดที่โชว์ก่อน "✅ เข้าเงื่อนไข: ..." (ไม่บังคับ — แผน 4 ใช้โชว์
-#       daily range) ตั้งใจให้อ่านจาก payload ตรงๆ ไม่ต้องรอ build_order สำเร็จก่อน
-#   active_line_fn(payload) -> บรรทัด "✅ เข้าเงื่อนไข: ..." ฉบับเต็มของแผนนั้น อ่านจาก payload ตรงๆ
-#       เหตุผลที่แยกจาก build_order(): ต้องโชว์บรรทัดนี้แม้ build_order จะ raise/คืน None ทีหลัง
-#       (พฤติกรรมเดิมของ _cmd_order1: เห็น "✅ เข้าเงื่อนไข: LONG" แม้คำนวณ SL/TP พังทีหลัง)
-#   build_order(ctx, payload) -> order dict (ดู "order dict shape" ด้านล่าง) หรือ None ถ้าคำนวณไม่สำเร็จ
-#       (อาจ raise exception ได้เหมือน plan1 เดิม — ผู้เรียกจะดัก try/except ให้)
-#   order_fail  : ข้อความตอน build_order คืน None หรือ raise (ใช้กับ /orderN) — "{e}" จะถูกแทนด้วย exception จริง
-#   confirm_not_active_msg : ข้อความตอน state == "inactive" (ใช้กับ /confirmN เท่านั้น)
-#   confirm_fail : ข้อความตอน build_order คืน None หรือ raise (ใช้กับ /confirmN)
-#   confirm_message(order) : สร้างข้อความสำเร็จเต็มรูปแบบตอนบันทึกออเดอร์ผ่าน /confirmN
-#
-# order dict ที่ build_order() ต้องคืน:
-#   direction, entry_price, stop_loss, take_profits (dict), rr (dict คีย์ตรงกับ take_profits)
-#   threshold (ใช้เช็คออเดอร์ซ้ำ), plan_key (แท็ก plan ตอนบันทึกลง Order Dashboard)
-#   warn_lines (list, ไม่บังคับ) : คำเตือนที่โชว์หลัง TP ก่อนผลบันทึก (เช่น "แผนสวนเทรนด์เสี่ยงสูง...")
-#   extra_lines (list, ไม่บังคับ) : คำเตือนที่โชว์หลังบรรทัดผลบันทึก (เช่น "ยังไม่ยืนยัน 5M Trigger")
-#   tp_labels (dict, ไม่บังคับ) : label ที่ใช้โชว์แทนชื่อคีย์ take_profits ตรงๆ (เช่น "TP1" -> "TP (Measured move)")
-#   saved_tag (str หรือ None) : ต่อท้าย "บันทึกลง Order Dashboard แล้ว (...)" (ใช้เฉพาะแผน 1)
-# ===========================================================================
-
-
 def _current_atr(ctx):
     df_ind = ctx["df_ind"]
     config = ctx["config"]
@@ -399,336 +272,283 @@ def _current_atr(ctx):
     return df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
 
 
-def _check_plan1(ctx):
-    entry_signal = ctx["entry_signal"]
-    structure = ctx["structure"]
-    if entry_signal.get("valid") and entry_signal.get("direction") == structure["trend"]:
-        return "active", entry_signal
-
-    trend_th = TREND_LABEL.get(structure.get("trend"), "-")
-    lines = [f"ยังไม่เข้าเงื่อนไขตอนนี้ครับ (เทรนด์หลัก 15M ตอนนี้: {trend_th})"]
-    reasons = entry_signal.get("reasons", [])
-    if reasons:
-        lines.append("")
-        lines.append("สถานะปัจจุบัน:")
-        for r in reasons[:3]:
-            lines.append(f"- {r}")
-    return "inactive", lines
+# ===========================================================================
+# /order รวม — เช็คทั้ง 8 แผนพร้อมกันในรอบเดียว ไม่มี Confirm/ไม่บันทึกลง Order Dashboard
+# (ตัดออกทั้งหมดตามที่ผู้ใช้ร้องขอ — ดูรายละเอียดเหตุผลที่หัวไฟล์) แต่ละแผนคืนผลลัพธ์เป็น dict
+# รูปแบบเดียวกัน (ดู _plan_result() ด้านล่าง) เพื่อให้ประกอบเป็นข้อความเดียว + จัดอันดับคะแนนได้ง่าย
+#   num, label, active(bool), direction("bullish"/"bearish"/None), score(float หรือ None),
+#   breakdown(dict คะแนนย่อย), lines(list บรรทัดรายละเอียดตอน active), note(str บรรทัดเดียวตอนไม่ active)
+# ===========================================================================
 
 
-def _active_line_plan1(payload):
-    direction_th = "LONG" if payload["direction"] == "bullish" else "SHORT"
-    return f"✅ เข้าเงื่อนไข: {direction_th}"
+def _plan_result(num, label, active, direction=None, score=None, breakdown=None, lines=None, note=None):
+    return {
+        "num": num, "label": label, "active": bool(active), "direction": direction,
+        "score": score, "breakdown": breakdown or {}, "lines": lines or [], "note": note,
+    }
 
 
-def _build_order_plan1(ctx, entry_signal):
+def _fmt_score_line(score, breakdown):
+    if score is None:
+        return "คะแนน: -"
+    parts = " + ".join(f"{k} {v}" for k, v in breakdown.items())
+    return f"คะแนน: {score} ({parts})" if parts else f"คะแนน: {score}"
+
+
+def _check_plan1_all(ctx):
+    """แผนที่ 1 (Pullback) — ใช้ entry_signal ที่คำนวณไว้แล้วใน ctx คะแนนมาจาก score.py
+    (calc_confidence_score) ของเดิมเป๊ะๆ ไม่ได้แก้สูตร (ดู plan_score.py หัวไฟล์สำหรับหมายเหตุเรื่อง
+    สเกลคะแนนที่ต่างจากแผนอื่นเล็กน้อย)"""
     from risk import calc_stop_loss
     from tp import calc_take_profits, calc_risk_reward
+    from score import calc_confidence_score
 
+    entry_signal = ctx["entry_signal"]
+    structure = ctx["structure"]
     config = ctx["config"]
-    current_atr = _current_atr(ctx)
-    stop_loss = calc_stop_loss(entry_signal, current_atr, config)
-    take_profits = calc_take_profits(entry_signal["entry_price"], stop_loss, entry_signal["direction"], config)
-    rr = {name: calc_risk_reward(entry_signal["entry_price"], stop_loss, price)
-          for name, price in take_profits.items()}
+    label = "แผนที่ 1 (Pullback)"
+
+    if not (entry_signal.get("valid") and entry_signal.get("direction") == structure["trend"]):
+        return _plan_result(1, label, False, note="ยังไม่เข้าเงื่อนไข (รอ pullback ตามเทรนด์หลัก 15M)")
+
+    direction = entry_signal["direction"]
+    try:
+        current_atr = _current_atr(ctx)
+        stop_loss = calc_stop_loss(entry_signal, current_atr, config)
+        take_profits = calc_take_profits(entry_signal["entry_price"], stop_loss, direction, config)
+        rr = {name: calc_risk_reward(entry_signal["entry_price"], stop_loss, price)
+              for name, price in take_profits.items()}
+        rr_tp1 = next(iter(rr.values()), 0)
+        conf = calc_confidence_score(entry_signal, structure, ctx["df_ind"], config, rr_tp1,
+                                      bias_4h=ctx.get("bias_4h"), higher_tf_trend=ctx.get("higher_tf_trend"))
+    except Exception as e:
+        return _plan_result(1, label, True, direction=direction,
+                             note=f"เข้าเงื่อนไข: {'LONG' if direction == 'bullish' else 'SHORT'} "
+                                  f"แต่คำนวณ SL/TP/คะแนนไม่สำเร็จ: {e}")
 
     confirmed = bool(entry_signal.get("trigger", {}).get("confirmed"))
-    return {
-        "direction": entry_signal["direction"],
-        "entry_price": entry_signal["entry_price"],
-        "stop_loss": stop_loss,
-        "take_profits": take_profits,
-        "rr": rr,
-        "threshold": current_atr if current_atr else config.get("min_sl_distance", 10.0),
-        "plan_key": "plan1_pullback" if confirmed else "plan1_pullback_early",
-        "extra_lines": [] if confirmed else
-            ["⚠️ ยังไม่ยืนยัน 5M Trigger — ราคาอาจยังไม่กลับตัวจริง เข้าก่อนเวลาอาจโดนสวนได้"],
-        "saved_tag": "ยืนยันแล้ว" if confirmed else "เข้าก่อนยืนยัน",
-        "confirm_tag": "ยืนยันแล้ว (5M Trigger)" if confirmed else "เข้าก่อนยืนยัน (early)",
-    }
+    lines = [f"Entry: {entry_signal['entry_price']:.4f}", f"SL: {stop_loss:.4f}"]
+    for name, price in take_profits.items():
+        lines.append(f"{name}: {price:.4f} (RR {rr[name]})")
+    if not confirmed:
+        lines.append("⚠️ ยังไม่ยืนยัน 5M Trigger — ราคาอาจยังไม่กลับตัวจริง เข้าก่อนเวลาอาจโดนสวนได้")
+    return _plan_result(1, label, True, direction=direction, score=conf["score"],
+                         breakdown=conf["breakdown"], lines=lines)
 
 
-def _check_plan2(ctx):
-    breakout = detect_breakout_trigger(ctx["df_ind"], ctx["structure"], ctx["config"])
-    if breakout:
-        return "active", breakout
+def _check_plan2_all(ctx):
+    """แผนที่ 2 (Breakout)"""
+    label = "แผนที่ 2 (Breakout)"
+    df_ind, structure, config = ctx["df_ind"], ctx["structure"], ctx["config"]
+    breakout = detect_breakout_trigger(df_ind, structure, config)
+    if not breakout:
+        return _plan_result(2, label, False, note="ยังไม่ทะลุระดับ swing ที่มีนัยสำคัญตอนนี้")
 
-    status = get_breakout_status(ctx["df_ind"], ctx["structure"], ctx["config"])
-    if not status:
-        return "inactive", ["ข้อมูล swing ยังไม่พอสำหรับเช็คแผนนี้ตอนนี้"]
-    lines = ["ยังไม่ทะลุตอนนี้ครับ สถานะปัจจุบัน:"]
-    if "up_distance" in status:
-        lines.append(f"- ฝั่งขึ้น: ห่างจากจุดทะลุ ({status['up_target']:.4f}) อีก {status['up_distance']:.4f}")
-    if "down_distance" in status:
-        lines.append(f"- ฝั่งลง: ห่างจากจุดทะลุ ({status['down_target']:.4f}) อีก {status['down_distance']:.4f}")
-    return "inactive", lines
-
-
-def _active_line_plan2(payload):
-    direction_th = "LONG" if payload["direction"] == "bullish" else "SHORT"
-    return f"✅ เข้าเงื่อนไข: {direction_th} ทะลุ {payload['level']:.4f} ที่ราคา {payload['price']:.4f}"
-
-
-def _build_order_plan2(ctx, breakout):
-    order = calc_breakout_order(breakout, ctx["structure"], ctx["df_ind"], ctx["config"])
+    direction = breakout["direction"]
+    order = calc_breakout_order(breakout, structure, df_ind, config)
     if not order:
-        return None
-    current_atr = _current_atr(ctx)
-    return {
-        "direction": order["direction"],
-        "entry_price": order["entry_price"],
-        "stop_loss": order["stop_loss"],
-        "take_profits": {"TP1": order["take_profit"]},
-        "rr": {"TP1": order["rr"]},
-        "tp_labels": {"TP1": "TP (Measured move)"},
-        "threshold": current_atr if current_atr else ctx["config"].get("min_sl_distance", 10.0),
-        "plan_key": "plan2_breakout",
-        "extra_lines": [],
-        "saved_tag": None,
-    }
+        score, breakdown = generic_plan_score(direction, None, ctx.get("bias_4h"), structure, config)
+        return _plan_result(2, label, True, direction=direction, score=score, breakdown=breakdown,
+                             lines=[f"ทะลุ {breakout['level']:.4f} ที่ราคา {breakout['price']:.4f}",
+                                    "(หาข้อมูล swing ไม่พอสำหรับคำนวณ SL/TP ของแผนนี้)"])
+
+    score, breakdown = generic_plan_score(direction, order["rr"], ctx.get("bias_4h"), structure, config)
+    lines = [
+        f"ทะลุ {breakout['level']:.4f} ที่ราคา {breakout['price']:.4f}",
+        f"Entry: {order['entry_price']:.4f}", f"SL: {order['stop_loss']:.4f}",
+        f"TP (Measured move): {order['take_profit']:.4f} (RR {order['rr']})",
+    ]
+    return _plan_result(2, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines)
 
 
-def _check_plan3(ctx):
-    counter = detect_counter_trend_trigger(ctx["df_ind"], ctx["structure"])
-    if counter:
-        return "active", counter
+def _check_plan3_all(ctx):
+    """แผนที่ 3 (สวนเทรนด์)"""
+    label = "แผนที่ 3 (สวนเทรนด์)"
+    df_ind, structure, config = ctx["df_ind"], ctx["structure"], ctx["config"]
+    counter = detect_counter_trend_trigger(df_ind, structure)
+    if not counter:
+        return _plan_result(3, label, False, note="Checklist สวนเทรนด์ยังไม่ครบ 3/3 ข้อ")
 
-    status = get_counter_trend_status(ctx["df_ind"], ctx["structure"])
-    if status is None:
-        return "inactive", ["ตลาด sideway ไม่มีเทรนด์หลักให้สวนตอนนี้"]
-    passed = sum(status["checklist"].values())
-    total = len(status["checklist"])
-    lines = [f"ยังไม่ครบเงื่อนไขตอนนี้ครับ ({passed}/{total} ข้อ)"]
-    for name, ok in status["checklist"].items():
-        mark = "✅" if ok else "❌"
-        lines.append(f"- {name}: {mark}")
-    return "inactive", lines
-
-
-def _active_line_plan3(payload):
-    direction_th = "LONG" if payload["direction"] == "bullish" else "SHORT"
-    return f"✅ เข้าเงื่อนไข: {direction_th} — Checklist ครบ 3/3 ข้อ"
-
-
-def _build_order_plan3(ctx, counter):
-    order = calc_counter_trend_order(counter, ctx["df_ind"], ctx["config"])
+    direction = counter["direction"]
+    order = calc_counter_trend_order(counter, df_ind, config)
     if not order:
-        return None
-    current_atr = _current_atr(ctx)
-    return {
-        "direction": order["direction"],
-        "entry_price": order["entry_price"],
-        "stop_loss": order["stop_loss"],
-        "take_profits": {"TP1": order["take_profit"]},
-        "rr": {"TP1": order["rr"]},
-        "tp_labels": {"TP1": "TP (Equilibrium)"},
-        "threshold": current_atr if current_atr else ctx["config"].get("min_sl_distance", 10.0),
-        "plan_key": "plan3_counter_trend",
-        "warn_lines": ["⚠️ แผนสวนเทรนด์เสี่ยงสูงกว่าแผนอื่น ควรลดขนาดไม้"],
-        "saved_tag": None,
-    }
+        score, breakdown = generic_plan_score(direction, None, ctx.get("bias_4h"), structure, config)
+        return _plan_result(3, label, True, direction=direction, score=score, breakdown=breakdown,
+                             lines=["Checklist ครบ 3/3 ข้อ", "(คำนวณ SL/TP ของแผนนี้ไม่สำเร็จ)"])
+
+    score, breakdown = generic_plan_score(direction, order["rr"], ctx.get("bias_4h"), structure, config)
+    lines = [
+        "Checklist ครบ 3/3 ข้อ",
+        f"Entry: {order['entry_price']:.4f}", f"SL: {order['stop_loss']:.4f}",
+        f"TP (Equilibrium): {order['take_profit']:.4f} (RR {order['rr']})",
+        "⚠️ แผนสวนเทรนด์เสี่ยงสูงกว่าแผนอื่น ควรลดขนาดไม้",
+    ]
+    return _plan_result(3, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines)
 
 
-def _check_plan4(ctx):
+def _check_plan4_all(ctx):
+    """แผนที่ 4 (Daily Continuation) — ต้องดึง Daily range + 5M เพิ่ม (ดู _fetch_plan4_context)"""
+    label = "แผนที่ 4 (Daily Continuation)"
     daily_range, df_5m = _fetch_plan4_context(ctx["symbol"], ctx["config"])
     if not daily_range or df_5m is None:
-        return "error", "📥 ดึงข้อมูลสำหรับแผนที่ 4 ไม่สำเร็จตอนนี้ครับ ลองใหม่อีกครั้ง"
+        return _plan_result(4, label, False, note="ดึงข้อมูล Daily/5M สำหรับแผนนี้ไม่สำเร็จตอนนี้")
 
-    bias_th = "LONG (discount)" if daily_range["bias"] == "bullish" else "SHORT (premium)"
-    header = [
-        f"Bias ตอนนี้ (จาก Daily range เมื่อวาน): {bias_th}",
-        f"  Daily High เมื่อวาน: {daily_range['prev_high']:.4f}",
-        f"  Daily Low เมื่อวาน: {daily_range['prev_low']:.4f}",
-        "",
-    ]
     signal = detect_plan4_signal(df_5m)
-    if signal and signal["direction"] == daily_range["bias"]:
-        return "active", {"signal": signal, "daily_range": daily_range, "header": header}
-    return "inactive", header + ["ยังไม่เข้าเงื่อนไขตอนนี้ครับ (รอ pattern เขียว/แดงต่อเนื่องตามทิศทาง bias ก่อน)"]
+    if not (signal and signal["direction"] == daily_range["bias"]):
+        bias_th = "LONG (discount)" if daily_range["bias"] == "bullish" else "SHORT (premium)"
+        return _plan_result(4, label, False,
+                             note=f"ยังไม่เข้าเงื่อนไข (Bias ตอนนี้: {bias_th}, "
+                                  f"รอ pattern ต่อเนื่องตามทิศทาง bias ก่อน)")
 
-
-def _pre_lines_plan4(payload):
-    return payload["header"]
-
-
-def _active_line_plan4(payload):
-    direction_th = "LONG" if payload["signal"]["direction"] == "bullish" else "SHORT"
-    return f"✅ เข้าเงื่อนไข: {direction_th}"
-
-
-def _build_order_plan4(ctx, payload):
-    order = calc_plan4_order(payload["signal"], payload["daily_range"])
+    order = calc_plan4_order(signal, daily_range)
+    direction = signal["direction"]
     if not order:
-        return None
-    return {
-        "direction": order["direction"],
-        "entry_price": order["entry_price"],
-        "stop_loss": order["stop_loss"],
-        "take_profits": {"TP1": order["take_profit"]},
-        "rr": {"TP1": order["rr"]},
-        "tp_labels": {"TP1": "TP (ขอบ Daily range ฝั่งตรงข้าม)"},
-        "threshold": ctx["config"].get("min_sl_distance", 10.0),
-        "plan_key": "plan4_daily_continuation",
-        "warn_lines": ["⚠️ แผนนี้ถือยาวเป็นชั่วโมง-วัน ไม่ใช่ day-trade แบบแผน 1-3"],
-        "saved_tag": None,
-    }
+        score, breakdown = generic_plan_score(direction, None, ctx.get("bias_4h"), ctx["structure"], ctx["config"])
+        return _plan_result(4, label, True, direction=direction, score=score, breakdown=breakdown,
+                             lines=["(คำนวณ SL/TP ของแผนนี้ไม่สำเร็จ)"])
+
+    score, breakdown = generic_plan_score(direction, order["rr"], ctx.get("bias_4h"), ctx["structure"], ctx["config"])
+    lines = [
+        f"Entry: {order['entry_price']:.4f}", f"SL: {order['stop_loss']:.4f}",
+        f"TP (ขอบ Daily range ฝั่งตรงข้าม): {order['take_profit']:.4f} (RR {order['rr']})",
+        "⚠️ แผนนี้ถือยาวเป็นชั่วโมง-วัน ไม่ใช่ day-trade แบบแผน 1-3",
+    ]
+    return _plan_result(4, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines)
 
 
-PLAN_REGISTRY = {
-    1: {
-        "label": "แผนที่ 1 (Pullback)",
-        "check": _check_plan1,
-        "active_line_fn": _active_line_plan1,
-        "build_order": _build_order_plan1,
-        "order_fail": "(คำนวณ/บันทึก SL/TP ไม่สำเร็จ: {e})",
-        "confirm_not_active_msg": "📥 ตอนนี้ยังไม่มีจุดเข้าตามแผนที่ 1 ให้ยืนยันครับ ลองเช็ค /order1 ก่อน",
-        "confirm_fail": "คำนวณ SL/TP ไม่สำเร็จ: {e}",
-        "confirm_message": lambda order: (
-            f"✅ บันทึกออเดอร์แผนที่ 1 ลง Order Dashboard แล้วครับ ({order['confirm_tag']})\n"
-            f"Entry: {order['entry_price']:.4f} | SL: {order['stop_loss']:.4f}\n"
-            "เช็คผลได้ที่ /summary และดูสถิติรวมที่ /stats"
-        ),
-    },
-    2: {
-        "label": "แผนที่ 2 (Breakout)",
-        "check": _check_plan2,
-        "active_line_fn": _active_line_plan2,
-        "build_order": _build_order_plan2,
-        "order_fail": "(หาข้อมูล swing ไม่พอสำหรับคำนวณ SL/TP ของแผนนี้)",
-        "confirm_not_active_msg": "📥 ตอนนี้ยังไม่ทะลุตามแผนที่ 2 ให้ยืนยันครับ ลองเช็ค /order2 ก่อน",
-        "confirm_fail": "คำนวณ SL/TP ไม่สำเร็จ (หาข้อมูล swing ไม่พอ)",
-        "confirm_message": lambda order: (
-            f"✅ บันทึกออเดอร์แผนที่ 2 ลง Order Dashboard แล้วครับ\n"
-            f"Entry: {order['entry_price']:.4f} | SL: {order['stop_loss']:.4f} | "
-            f"TP: {order['take_profits']['TP1']:.4f} (RR {order['rr']['TP1']})"
-        ),
-    },
-    3: {
-        "label": "แผนที่ 3 (สวนเทรนด์)",
-        "check": _check_plan3,
-        "active_line_fn": _active_line_plan3,
-        "build_order": _build_order_plan3,
-        "order_fail": "(คำนวณ SL/TP ของแผนนี้ไม่สำเร็จ)",
-        "confirm_not_active_msg": "📥 ตอนนี้ยังไม่ครบเงื่อนไขตามแผนที่ 3 ให้ยืนยันครับ ลองเช็ค /order3 ก่อน",
-        "confirm_fail": "คำนวณ SL/TP ไม่สำเร็จ",
-        "confirm_message": lambda order: (
-            f"✅ บันทึกออเดอร์แผนที่ 3 ลง Order Dashboard แล้วครับ\n"
-            f"Entry: {order['entry_price']:.4f} | SL: {order['stop_loss']:.4f} | "
-            f"TP: {order['take_profits']['TP1']:.4f} (RR {order['rr']['TP1']})"
-        ),
-    },
-    4: {
-        "label": "แผนที่ 4 (Daily Continuation)",
-        "check": _check_plan4,
-        "pre_lines_fn": _pre_lines_plan4,
-        "active_line_fn": _active_line_plan4,
-        "build_order": _build_order_plan4,
-        "order_fail": "(คำนวณ SL/TP ของแผนนี้ไม่สำเร็จ — TP อาจอยู่ผิดฝั่งของ Entry)",
-        "confirm_not_active_msg": "📥 ตอนนี้ยังไม่เข้าเงื่อนไขตามแผนที่ 4 ให้ยืนยันครับ ลองเช็ค /order4 ก่อน",
-        "confirm_fail": "คำนวณ SL/TP ไม่สำเร็จ (TP อาจอยู่ผิดฝั่งของ Entry)",
-        "confirm_message": lambda order: (
-            f"✅ บันทึกออเดอร์แผนที่ 4 ลง Order Dashboard แล้วครับ\n"
-            f"Entry: {order['entry_price']:.4f} | SL: {order['stop_loss']:.4f} | "
-            f"TP: {order['take_profits']['TP1']:.4f} (RR {order['rr']['TP1']})"
-        ),
-    },
-}
+def _check_zone_style_plan(num, label, find_fn, calc_fn, ctx, entry_tag="Limit", needs_bias=True):
+    """runner กลาง ใช้ร่วมกันสำหรับแผนกลุ่ม Set & Forget ที่หน้าตาเหมือนกันหมด (5/6/7/8) — ต่างกันแค่
+    find_fn/calc_fn ที่ใช้ และว่าต้องส่ง bias_4h เข้าไปด้วยหรือไม่ (แผน 7/8 ไม่ใช้ 4H bias)
+    find_fn ที่ส่งเข้ามาต้องรับ arg ตามลำดับ (bias_4h, df, config) เมื่อ needs_bias=True หรือ
+    (df, config) เมื่อ needs_bias=False เสมอ (ดู _find_zone_adapter/_find_sweep_adapter ด้านล่าง —
+    find_zone_entry/find_sweep_entry ของจริงรับลำดับ arg ไม่ตรงกัน ต้องมี adapter ห่อให้ตรงกันก่อน)"""
+    df_ind, config = ctx["df_ind"], ctx["config"]
+    args = (ctx.get("bias_4h"), df_ind, config) if needs_bias else (df_ind, config)
+    result = find_fn(*args)
+    if not result["valid"]:
+        short_reason = result["reasons"][-1] if result["reasons"] else "ยังไม่เข้าเงื่อนไข"
+        return _plan_result(num, label, False, note=short_reason)
 
-
-def _format_order_lines(order):
-    lines = [f"Entry: {order['entry_price']:.4f}", f"SL: {order['stop_loss']:.4f}"]
-    labels = order.get("tp_labels", {})
-    for name, price in order["take_profits"].items():
-        label = labels.get(name, name)
-        lines.append(f"{label}: {price:.4f} (RR {order['rr'][name]})")
-    return lines
-
-
-def _save_plan_order(ctx, order):
-    """เช็คซ้ำ (_has_similar_running_order) + บันทึกออเดอร์ลง Order Dashboard
-    คืนค่า (saved, is_duplicate): ถ้า is_duplicate=True ไม่มีการบันทึกใดๆ เกิดขึ้น"""
-    bucket = ctx["config"]["kvdb_bucket"]
-    symbol = ctx["symbol"]
-    if _has_similar_running_order(bucket, symbol, order["plan_key"], order["direction"],
-                                   order["entry_price"], order["threshold"]):
-        return None, True
-    saved = add_order(bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-                       order["take_profits"], score=None, plan=order["plan_key"])
-    return saved, False
-
-
-def _cmd_order_n(ctx, plan_num):
-    """เช็คสถานะแผนที่ plan_num (1-4) — ถ้าเข้าเงื่อนไข จะบันทึกลง Order Dashboard ให้อัตโนมัติทันที
-    (มีระบบกันบันทึกซ้ำ) ถ้ายังไม่เข้าเงื่อนไข จะบอกเหตุผล/สถานะปัจจุบันแทน
-    (รวมจาก _cmd_order1../_cmd_order4 เดิมที่หน้าตาเกือบเหมือนกันทุกตัว — ดู PLAN_REGISTRY ด้านบน)"""
-    plan = PLAN_REGISTRY[plan_num]
-    lines = [f"📥 <b>{plan['label']}</b>", ""]
-
-    state, payload = plan["check"](ctx)
-    if state == "error":
-        return payload
-    if state == "inactive":
-        lines.extend(payload)
-        return "\n".join(lines)
-
-    # pre_lines/active_line มาจาก payload ดิบโดยตรง (ไม่ต้องรอ build_order) เพราะแค่ทิศทาง/บริบท
-    # ที่ detect() รู้อยู่แล้ว ไม่ต้องคำนวณ SL/TP ก่อน — สำคัญเพราะแผน 1 อาจ raise exception ตอนคำนวณ
-    # SL/TP แต่ยังต้องเห็นบรรทัด "✅ เข้าเงื่อนไข: ..." เหมือนพฤติกรรมเดิม
-    lines.extend(plan.get("pre_lines_fn", lambda p: [])(payload))
-    lines.append(plan["active_line_fn"](payload))
-
-    try:
-        order = plan["build_order"](ctx, payload)
-    except Exception as e:
-        lines.append(plan["order_fail"].format(e=e))
-        return "\n".join(lines)
-
+    direction = result["direction"]
+    order = calc_fn(result, df_ind, config) if needs_bias else calc_fn(result, config)
     if not order:
-        lines.append(plan["order_fail"])
-        return "\n".join(lines)
+        score, breakdown = generic_plan_score(direction, None, ctx.get("bias_4h"), ctx["structure"], config)
+        lines = list(result["reasons"]) + ["(เจอโอกาสแล้ว แต่ RR ที่คำนวณได้ต่ำกว่าเกณฑ์ขั้นต่ำ — ยังไม่คุ้มเสี่ยง)"]
+        return _plan_result(num, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines)
 
-    lines.extend(_format_order_lines(order))
-    lines.extend(order.get("warn_lines", []))
+    score, breakdown = generic_plan_score(direction, order["rr"], ctx.get("bias_4h"), ctx["structure"], config)
+    lines = list(result["reasons"]) + [
+        f"Entry ({entry_tag}): {order['entry_price']:.4f}",
+        f"SL: {order['stop_loss']:.4f}",
+        f"TP: {order['take_profit']:.4f} (RR {order['rr']})",
+    ]
+    return _plan_result(num, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines)
 
-    saved, is_dup = _save_plan_order(ctx, order)
-    if is_dup:
-        lines.append("📌 (มีออเดอร์ลักษณะเดียวกันบันทึกไว้แล้ว ไม่บันทึกซ้ำ)")
-    elif saved:
-        tag = f" ({order['saved_tag']})" if order.get("saved_tag") else ""
-        lines.append(f"📌 บันทึกลง Order Dashboard แล้ว{tag}")
+
+def _find_zone_adapter(bias_4h, df, config):
+    """find_zone_entry ของจริงรับ arg ตรงลำดับ (bias_4h, df, config) อยู่แล้ว — adapter นี้แค่ทำให้
+    ลายเซ็นตรงกับ find_sweep_entry ด้านล่างเป๊ะๆ (ทั้งคู่ต้องรับ (bias_4h, df, config) เพื่อให้
+    _check_zone_style_plan เรียกได้แบบเดียวกันทั้งคู่)"""
+    return find_zone_entry(bias_4h, df, config)
+
+
+def _find_sweep_adapter(bias_4h, df, config):
+    """find_sweep_entry ของจริงรับ arg คนละลำดับ (df, bias_4h, config) — สลับให้ตรงกับ adapter
+    ของแผนที่ 5 ด้านบน (bias_4h, df, config) กันเผลอส่ง dict bias_4h เข้าไปแทน DataFrame ผิดตำแหน่ง
+    (บั๊กที่เจอตอน smoke test: ทำให้ find_swings อ่านคอลัมน์ 'high' จาก dict ไม่เจอ)"""
+    return find_sweep_entry(df, bias_4h, config)
+
+
+def _check_all_plans(ctx):
+    """เช็คทั้ง 8 แผนพร้อมกัน คืน list ของผลลัพธ์ (ดู _plan_result) เรียงตามเลขแผน 1-8 เสมอ
+    (การจัดอันดับคะแนน/ไฮไลต์เทรนด์หลักทำที่ชั้น format ไม่ใช่ชั้นนี้)"""
+    results = [
+        _check_plan1_all(ctx),
+        _check_plan2_all(ctx),
+        _check_plan3_all(ctx),
+        _check_plan4_all(ctx),
+        _check_zone_style_plan(5, "แผนที่ 5 (SMC Zone Entry, Set & Forget)",
+                                _find_zone_adapter, calc_zone_entry_order, ctx, needs_bias=True),
+        _check_zone_style_plan(6, "แผนที่ 6 (Liquidity Sweep + Displacement, Set & Forget)",
+                                _find_sweep_adapter, calc_sweep_entry_order, ctx, needs_bias=True),
+        _check_zone_style_plan(7, "แผนที่ 7 (Quasimodo Pattern, Set & Forget)",
+                                find_qm_pattern, calc_qm_entry_order, ctx, needs_bias=False),
+        _check_zone_style_plan(8, "แผนที่ 8 (Flag Pattern, Set & Forget)",
+                                find_flag_pattern, calc_flag_entry_order, ctx, needs_bias=False, entry_tag="Stop"),
+    ]
+    return results
+
+
+def _cmd_order_all(ctx):
+    """คำสั่ง /order — รวมทั้ง 8 แผนไว้คำสั่งเดียว: เช็คเงื่อนไขทุกแผนพร้อมกันรอบเดียว ไม่มี Confirm
+    และไม่บันทึกลง Order Dashboard (ตัดออกทั้งหมดตามที่ผู้ใช้ร้องขอ) แสดงผลตามสภาพจริงล้วนๆ
+
+    ทุกแผนที่ active จะคำนวณคะแนนของตัวเอง (แม้จะไม่ถึง 100) แล้วจัดอันดับจากมากไปน้อยไว้ในหัวข้อ
+    "อันดับคะแนน" ก่อน ตามด้วยรายละเอียดเต็มของแต่ละแผนตามลำดับคะแนนเดียวกัน และท้ายสุดคือแผนที่ยัง
+    ไม่เข้าเงื่อนไข (บรรทัดเดียวสั้นๆ ต่อแผน) — ไฮไลต์แผนที่ทิศทางตรงกับ "เทรนด์หลัก" (4H Bias ถ้ามี
+    ไม่งั้น fallback ไปเทรนด์ 15M) ด้วย ⭐ และแผนที่สวนเทรนด์หลักด้วย ⚠️ ให้เห็นชัดเวลาสัญญาณตีกัน
+    """
+    results = _check_all_plans(ctx)
+    master_trend, master_source = determine_master_trend(ctx.get("bias_4h"), ctx["structure"])
+
+    active = [r for r in results if r["active"]]
+    inactive = [r for r in results if not r["active"]]
+    active_sorted = sorted(active, key=lambda r: (r["score"] if r["score"] is not None else -1), reverse=True)
+
+    lines = ["📥 <b>เช็คโอกาสเข้าไม้ทั้ง 8 แผน</b>", ""]
+
+    if master_trend:
+        trend_th = "ขาขึ้น (LONG)" if master_trend == "bullish" else "ขาลง (SHORT)"
+        lines.append(f"🧭 เทรนด์หลักตอนนี้ ({master_source}): {trend_th}")
     else:
-        lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
+        lines.append("🧭 เทรนด์หลักตอนนี้: Sideway (ยังไม่มีทิศทางหลักชัดเจนทั้ง 4H และ 15M)")
+    lines.append("")
 
-    lines.extend(order.get("extra_lines", []))
+    if not active_sorted:
+        lines.append("📭 ยังไม่มีแผนไหนเข้าเงื่อนไขเลยตอนนี้ครับ (เช็คครบทั้ง 8 แผนแล้ว)")
+    else:
+        lines.append("🏆 <b>อันดับคะแนน (มาก → น้อย)</b>")
+        for r in active_sorted:
+            direction_th = "LONG" if r["direction"] == "bullish" else "SHORT"
+            if master_trend and r["direction"] == master_trend:
+                tag = "⭐ ตามเทรนด์หลัก"
+            elif master_trend and r["direction"] != master_trend:
+                tag = "⚠️ สวนเทรนด์หลัก"
+            else:
+                tag = ""
+            score_text = r["score"] if r["score"] is not None else "-"
+            lines.append(f"{r['num']}. {r['label']} — {direction_th} | คะแนน {score_text} {tag}".rstrip())
+        lines.append("")
+        lines.append("💡 หมายเหตุ: คะแนนแผนที่ 1 คำนวณจากสูตร Confidence Score ละเอียดเฉพาะของแผนนั้น "
+                      "(เต็ม ~120) ส่วนแผนที่ 2-8 คำนวณแบบทั่วไป (เต็ม 100) จากสัญญาณ+RR+ความสอดคล้อง "
+                      "เทรนด์ — ใช้เทียบ \"ลำดับความน่าสนใจสัมพัทธ์\" ระหว่างแผน ไม่ใช่ % ความแม่นยำที่เทียบ"
+                      "ตรงตัวกันเป๊ะๆ ข้ามแผน โดยเฉพาะเวลาสัญญาณ Buy/Sell สวนกัน ให้ใช้ ⭐/⚠️ ประกอบการตัดสินใจด้วย")
+        lines.append("")
+        lines.append("📋 <b>รายละเอียดแต่ละแผนที่เข้าเงื่อนไข</b>")
+        for r in active_sorted:
+            direction_th = "LONG" if r["direction"] == "bullish" else "SHORT"
+            lines.append("")
+            lines.append(f"✅ <b>{r['label']}</b> — {direction_th}")
+            lines.append(_fmt_score_line(r["score"], r["breakdown"]))
+            for detail in r["lines"]:
+                lines.append(f"   {detail}")
+
+    if inactive:
+        lines.append("")
+        lines.append("💤 <b>แผนที่ยังไม่เข้าเงื่อนไข</b>")
+        for r in inactive:
+            lines.append(f"{r['num']}. {r['label']}: {r['note']}")
+
+    if ctx.get("news_blackout", (False, None))[0]:
+        lines.append("")
+        lines.append("⛔ หมายเหตุ: ตอนนี้อยู่ในช่วงห้ามเทรดรอบข่าวสำคัญ (±60 นาที) ควรพิจารณาความเสี่ยงเพิ่มเติม")
+
+    lines.append("")
+    lines.append("(แสดงผลตามสภาพจริง ไม่มีการบันทึกลง Order Dashboard อัตโนมัติแล้ว — ตัดสินใจ/บันทึกเอง)")
+
     return "\n".join(lines)
 
 
-def _cmd_confirm_n(ctx, plan_num):
-    """บันทึกออเดอร์แผนที่ plan_num (1-4) ที่กำลังเข้าเงื่อนไขอยู่ตอนนี้ลง Order Dashboard ทันที (manual confirm)
-    (รวมจาก _cmd_confirm1../_cmd_confirm4 เดิม — ดู PLAN_REGISTRY ด้านบน)"""
-    plan = PLAN_REGISTRY[plan_num]
-    state, payload = plan["check"](ctx)
-
-    if state == "error":
-        return payload
-    if state == "inactive":
-        return plan["confirm_not_active_msg"]
-
-    try:
-        order = plan["build_order"](ctx, payload)
-    except Exception as e:
-        return plan["confirm_fail"].format(e=e)
-
-    if not order:
-        return plan["confirm_fail"]
-
-    saved, is_dup = _save_plan_order(ctx, order)
-    if is_dup:
-        return "📥 มีออเดอร์ลักษณะเดียวกันที่บันทึกไว้แล้ว (ยัง running อยู่) ไม่บันทึกซ้ำครับ"
-    if not saved:
-        return f"⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองพิมพ์ /confirm{plan_num} ใหม่อีกครั้งครับ"
-
-    return plan["confirm_message"](order)
 def _cmd_trend(ctx):
     structure = ctx["structure"]
     bias_4h = ctx["bias_4h"] or {}
@@ -811,8 +631,8 @@ def _cmd_summary(ctx):
     symbol = ctx["symbol"]
     current_price = ctx["df_ind"]["close"].iloc[-1]
     bucket = config["kvdb_bucket"]
-    # เช็ค pending -> running/expired ก่อนเสมอ (แผน Set & Forget อย่าง /order5) ให้ dashboard ตรง
-    # กับสถานะจริงล่าสุด ไม่ใช่รอให้มีคนพิมพ์ /order5 ซ้ำถึงจะขยับสถานะ
+    # เช็ค pending -> running/expired ก่อนเสมอ (แผน Set & Forget อย่างแผนที่ 5-8) ให้ dashboard ตรง
+    # กับสถานะจริงล่าสุด ไม่ใช่รอให้มีคนพิมพ์ /order ซ้ำถึงจะขยับสถานะ
     update_pending_orders(bucket, symbol, current_price, config.get("spread_buffer", 0.0))
     orders = update_orders_status(bucket, symbol, current_price)
     return build_orders_dashboard(symbol, orders, current_price)
@@ -830,273 +650,15 @@ def _cmd_stats(ctx):
     return build_stats_message(symbol, stats)
 
 
-def _cmd_order5(ctx):
-    """
-    กลุ่ม A — SMC Zone Entry แบบ Set & Forget (4H Bias -> Premium/Discount -> Confluence -> Limit Order)
-    ต่างจากแผน 1-4 ตรงที่ไม่รอราคาแตะ + ยืนยันด้วยแท่งเทียนก่อนแจ้งเตือน — เจอ zone/confluence ก็แจ้งทันที
-    บันทึกเป็นสถานะ 'pending' (ไม่ใช่ 'running' ทันทีแบบเดิม) รอราคาเดินทางมาถึง entry จริงก่อนถึงจะ
-    เริ่มนับสถิติ win/loss (ดู orders.add_pending_order()/update_pending_orders() สำหรับรายละเอียด
-    วงจรสถานะ และ zone_entry.py สำหรับ logic การหา zone)
-    """
-    config = ctx["config"]
-    bias_4h = ctx["bias_4h"]
-    df_ind = ctx["df_ind"]
-
-    lines = ["📥 <b>แผนที่ 5 (SMC Zone Entry — Set & Forget)</b>", ""]
-
-    result = find_zone_entry(bias_4h, df_ind, config)
-    if not result["valid"]:
-        lines.extend(result["reasons"])
-        return "\n".join(lines)
-
-    order = calc_zone_entry_order(result, df_ind, config)
-    if not order:
-        lines.extend(result["reasons"])
-        lines.append("(เจอ zone แล้ว แต่ RR ที่คำนวณได้ต่ำกว่าเกณฑ์ขั้นต่ำ — ยังไม่คุ้มเสี่ยง รอ zone ใหม่ที่ดีกว่านี้)")
-        return "\n".join(lines)
-
-    direction_th = "LONG" if order["direction"] == "bullish" else "SHORT"
-    lines.append(f"✅ เจอ Zone: {direction_th} (Set & Forget — วาง Limit ล่วงหน้าได้เลย)")
-    lines.extend(result["reasons"])
-    lines.append("")
-    lines.append(f"Entry (Limit): {order['entry_price']:.4f}")
-    lines.append(f"SL: {order['stop_loss']:.4f}")
-    lines.append(f"TP: {order['take_profit']:.4f} (RR {order['rr']})")
-
-    bucket = config["kvdb_bucket"]
-    symbol = ctx["symbol"]
-    atr_period = config.get("sl_atr_avg_period", 20)
-    current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
-    threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
-
-    existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง dedup check และ save ด้านล่าง
-    if _has_similar_pending_or_running_order(existing_orders, "plan5_zone_single", order["direction"],
-                                              order["entry_price"], threshold):
-        lines.append("")
-        lines.append("📌 (มี zone ลักษณะเดียวกันแจ้งเตือนไว้แล้ว ไม่แจ้งซ้ำ)")
-        return "\n".join(lines)
-
-    saved = add_pending_order(
-        bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-        {"TP1": order["take_profit"]}, score=None, plan="plan5_zone_single",
-        current_price=df_ind["close"].iloc[-1],
-        expires_in_hours=config.get("zone_entry_expires_hours", 8), existing_orders=existing_orders,
-    )
-    if saved:
-        lines.append("")
-        lines.append("⏳ บันทึกเป็น Pending แล้ว (รอราคาวิ่งมาถึง Entry ก่อนถึงจะเริ่มนับผล — เช็คสถานะที่ /summary)")
-    else:
-        lines.append("")
-        lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
-
-    return "\n".join(lines)
-
-
-def _cmd_order6(ctx):
-    """
-    กลุ่ม C — Liquidity Sweep + Displacement แบบ Set & Forget (กวาด Liquidity แล้วกลับตัว + ยืนยัน
-    ด้วย FVG ที่เกิดหลังการกวาด) ไม่ผูกกับทิศทาง 4H bias เป็นพิเศษเหมือนกลุ่ม A เพราะโดยธรรมชาติของ
-    กลยุทธ์นี้คือหาจุดกลับตัวจากการกวาดสภาพคล่อง ซึ่งเป็นได้ทั้ง pullback ตามเทรนด์ใหญ่หรือกลับตัวสวน
-    เทรนด์ใหญ่ก็ได้ (ดู liquidity_sweep_entry.py สำหรับรายละเอียด logic)
-
-    บันทึกเป็นสถานะ 'pending' เหมือนกลุ่ม A (Set & Forget — แจ้งก่อนราคาจะมาถึง Entry จริง)
-    """
-    config = ctx["config"]
-    bias_4h = ctx["bias_4h"]
-    df_ind = ctx["df_ind"]
-
-    lines = ["📥 <b>แผนที่ 6 (Liquidity Sweep + Displacement — Set & Forget)</b>", ""]
-
-    result = find_sweep_entry(df_ind, bias_4h, config)
-    if not result["valid"]:
-        lines.extend(result["reasons"])
-        return "\n".join(lines)
-
-    order = calc_sweep_entry_order(result, df_ind, config)
-    if not order:
-        lines.extend(result["reasons"])
-        lines.append("(เจอการกวาด + Displacement แล้ว แต่ RR ที่คำนวณได้ต่ำกว่าเกณฑ์ขั้นต่ำ — ยังไม่คุ้มเสี่ยง)")
-        return "\n".join(lines)
-
-    direction_th = "LONG" if order["direction"] == "bullish" else "SHORT"
-    lines.append(f"✅ เจอโอกาส: {direction_th} (Set & Forget — วาง Limit ล่วงหน้าได้เลย)")
-    lines.extend(result["reasons"])
-    lines.append("")
-    lines.append(f"Entry (Limit): {order['entry_price']:.4f}")
-    lines.append(f"SL: {order['stop_loss']:.4f}")
-    lines.append(f"TP: {order['take_profit']:.4f} (RR {order['rr']})")
-
-    bucket = config["kvdb_bucket"]
-    symbol = ctx["symbol"]
-    atr_period = config.get("sl_atr_avg_period", 20)
-    current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
-    threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
-
-    existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง dedup check และ save ด้านล่าง
-    if _has_similar_pending_or_running_order(existing_orders, "plan6_sweep_general", order["direction"],
-                                              order["entry_price"], threshold):
-        lines.append("")
-        lines.append("📌 (มีโอกาสลักษณะเดียวกันแจ้งเตือนไว้แล้ว ไม่แจ้งซ้ำ)")
-        return "\n".join(lines)
-
-    saved = add_pending_order(
-        bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-        {"TP1": order["take_profit"]}, score=None, plan="plan6_sweep_general",
-        current_price=df_ind["close"].iloc[-1],
-        expires_in_hours=config.get("sweep_entry_expires_hours", 6), existing_orders=existing_orders,
-    )
-    if saved:
-        lines.append("")
-        lines.append("⏳ บันทึกเป็น Pending แล้ว (รอราคาวิ่งมาถึง Entry ก่อนถึงจะเริ่มนับผล — เช็คสถานะที่ /summary)")
-    else:
-        lines.append("")
-        lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
-
-    return "\n".join(lines)
-
-
-def _cmd_order7(ctx):
-    """
-    กลุ่ม D — Quasimodo (QM) Pattern แบบ Set & Forget: หาโครงสร้างสวิง 4 จุด H-L-HH-LL (หรือกระจก
-    L-H-LL-HH) แล้วรอราคาย่อกลับมาทดสอบระดับ QML (Left Shoulder) — ดู qm_pattern_entry.py สำหรับ
-    รายละเอียด logic การหาโครงสร้าง
-
-    บันทึกเป็นสถานะ 'pending' เหมือนกลุ่ม A/C (Set & Forget)
-    """
-    config = ctx["config"]
-    df_ind = ctx["df_ind"]
-
-    lines = ["📥 <b>แผนที่ 7 (Quasimodo Pattern — Set & Forget)</b>", ""]
-
-    result = find_qm_pattern(df_ind, config)
-    if not result["valid"]:
-        lines.extend(result["reasons"])
-        return "\n".join(lines)
-
-    order = calc_qm_entry_order(result, config)
-    if not order:
-        lines.extend(result["reasons"])
-        lines.append("(เจอโครงสร้าง QM แล้ว แต่ RR ที่คำนวณได้ต่ำกว่าเกณฑ์ขั้นต่ำ — ยังไม่คุ้มเสี่ยง)")
-        return "\n".join(lines)
-
-    direction_th = "LONG" if order["direction"] == "bullish" else "SHORT"
-    lines.append(f"✅ เจอโอกาส: {direction_th} (Set & Forget — วาง Limit ล่วงหน้าได้เลย)")
-    lines.extend(result["reasons"])
-    lines.append("")
-    lines.append(f"Entry (Limit): {order['entry_price']:.4f}")
-    lines.append(f"SL: {order['stop_loss']:.4f}")
-    lines.append(f"TP: {order['take_profit']:.4f} (RR {order['rr']})")
-
-    bucket = config["kvdb_bucket"]
-    symbol = ctx["symbol"]
-    atr_period = config.get("sl_atr_avg_period", 20)
-    current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
-    threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
-
-    existing_orders = load_orders(bucket, symbol)
-    if _has_similar_pending_or_running_order(existing_orders, "plan7_qm_pattern", order["direction"],
-                                              order["entry_price"], threshold):
-        lines.append("")
-        lines.append("📌 (มีโอกาสลักษณะเดียวกันแจ้งเตือนไว้แล้ว ไม่แจ้งซ้ำ)")
-        return "\n".join(lines)
-
-    saved = add_pending_order(
-        bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-        {"TP1": order["take_profit"]}, score=None, plan="plan7_qm_pattern",
-        current_price=df_ind["close"].iloc[-1],
-        expires_in_hours=config.get("qm_entry_expires_hours", 8), existing_orders=existing_orders,
-    )
-    if saved:
-        lines.append("")
-        lines.append("⏳ บันทึกเป็น Pending แล้ว (รอราคาวิ่งมาถึง Entry ก่อนถึงจะเริ่มนับผล — เช็คสถานะที่ /summary)")
-    else:
-        lines.append("")
-        lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
-
-    return "\n".join(lines)
-
-
-def _cmd_order8(ctx):
-    """
-    กลุ่ม B — Flag Pattern แบบ Set & Forget (เริ่มจาก Flag ก่อนในบรรดา 20 chart pattern เพราะนิยาม
-    ชัดเจนที่สุด — ดู flag_pattern_entry.py สำหรับรายละเอียดและเหตุผลที่เลือกเริ่มจาก pattern นี้)
-
-    ต่างจากกลุ่ม A/C/D ตรงที่เป็น Stop order (entry อยู่เหนือ/ใต้ราคาปัจจุบัน รอ breakout) ไม่ใช่
-    Limit order (รอราคาย่อกลับมา) — ระบบ entry_side ใน orders.py รองรับความต่างนี้แล้ว
-    """
-    config = ctx["config"]
-    df_ind = ctx["df_ind"]
-
-    lines = ["📥 <b>แผนที่ 8 (Flag Pattern — Set & Forget)</b>", ""]
-
-    result = find_flag_pattern(df_ind, config)
-    if not result["valid"]:
-        lines.extend(result["reasons"])
-        return "\n".join(lines)
-
-    order = calc_flag_entry_order(result, config)
-    if not order:
-        lines.extend(result["reasons"])
-        lines.append("(เจอ Flag pattern แล้ว แต่ RR ที่คำนวณได้ต่ำกว่าเกณฑ์ขั้นต่ำ — ยังไม่คุ้มเสี่ยง)")
-        return "\n".join(lines)
-
-    direction_th = "LONG" if order["direction"] == "bullish" else "SHORT"
-    lines.append(f"✅ เจอโอกาส: {direction_th} (Set & Forget — วาง Stop Order รอ breakout ได้เลย)")
-    lines.extend(result["reasons"])
-    lines.append("")
-    lines.append(f"Entry (Stop): {order['entry_price']:.4f}")
-    lines.append(f"SL: {order['stop_loss']:.4f}")
-    lines.append(f"TP: {order['take_profit']:.4f} (RR {order['rr']})")
-
-    bucket = config["kvdb_bucket"]
-    symbol = ctx["symbol"]
-    atr_period = config.get("sl_atr_avg_period", 20)
-    current_atr = df_ind["atr"].tail(atr_period).mean() if "atr" in df_ind.columns and len(df_ind) else 0
-    threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
-
-    existing_orders = load_orders(bucket, symbol)
-    if _has_similar_pending_or_running_order(existing_orders, "plan8_flag_pattern", order["direction"],
-                                              order["entry_price"], threshold):
-        lines.append("")
-        lines.append("📌 (มีโอกาสลักษณะเดียวกันแจ้งเตือนไว้แล้ว ไม่แจ้งซ้ำ)")
-        return "\n".join(lines)
-
-    saved = add_pending_order(
-        bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-        {"TP1": order["take_profit"]}, score=None, plan="plan8_flag_pattern",
-        current_price=df_ind["close"].iloc[-1],
-        expires_in_hours=config.get("flag_entry_expires_hours", 6), existing_orders=existing_orders,
-    )
-    if saved:
-        lines.append("")
-        lines.append("⏳ บันทึกเป็น Pending แล้ว (รอราคาทะลุกรอบไปถึง Entry ก่อนถึงจะเริ่มนับผล — เช็คสถานะที่ /summary)")
-    else:
-        lines.append("")
-        lines.append("⚠️ บันทึกลง Order Dashboard ไม่สำเร็จ (เขียนข้อมูลพลาด) ลองใหม่อีกครั้ง")
-
-    return "\n".join(lines)
-
-
-
+# หมายเหตุ: /order1-8 และ /confirm1-4 ถูกรวมเป็น /order เดียวแล้ว (เช็คทั้ง 8 แผนพร้อมกันในรอบเดียว
+# ไม่มี Confirm อีกต่อไป) คำสั่งเก่าที่ไม่รู้จักจะถูกเมินเงียบๆ ตามพฤติกรรมปกติของ handle_telegram_commands()
 COMMAND_HANDLERS = {
-    "order": _cmd_order,
-    "order1": functools.partial(_cmd_order_n, plan_num=1),
-    "order2": functools.partial(_cmd_order_n, plan_num=2),
-    "order3": functools.partial(_cmd_order_n, plan_num=3),
-    "order4": functools.partial(_cmd_order_n, plan_num=4),
-    "order5": _cmd_order5,
-    "order6": _cmd_order6,
-    "order7": _cmd_order7,
-    "order8": _cmd_order8,
+    "order": _cmd_order_all,
     "trend": _cmd_trend,
     "news": _cmd_news,
     "status": _cmd_status,
     "summary": _cmd_summary,
     "stats": _cmd_stats,
-    "confirm1": functools.partial(_cmd_confirm_n, plan_num=1),
-    "confirm2": functools.partial(_cmd_confirm_n, plan_num=2),
-    "confirm3": functools.partial(_cmd_confirm_n, plan_num=3),
-    "confirm4": functools.partial(_cmd_confirm_n, plan_num=4),
 }
 
 
