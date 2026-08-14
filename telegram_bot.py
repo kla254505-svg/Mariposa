@@ -65,6 +65,42 @@ LOCK_TTL_SECONDS = 45  # ต้องมากกว่า long-poll timeout (30
 # ถ้าเก่าเกิน STALE_MESSAGE_SECONDS ให้ข้ามไปเงียบๆ (ยังคง advance offset ปกติ กันไม่ให้ค้างวนซ้ำ)
 STALE_MESSAGE_SECONDS = 90  # นานกว่านี้ถือว่า "ตกยุค" ต้องพิมพ์คำสั่งใหม่เอง ไม่ไล่ตอบย้อนหลัง
 
+# --- คู่เงินที่ /order รองรับ (พิมพ์ /order เฉยๆ = คู่เงินหลักของ instance นี้ ตามที่ตั้งไว้ตอนรัน
+# run_polling_loop(config, symbol=...) พิมพ์ /order gold หรือ /order eth เพื่อเจาะจงคู่เงินได้ตรงๆ)
+# SYMBOL_ALIASES: คำที่ผู้ใช้พิมพ์ (lowercase) -> display symbol ที่ระบบใช้ภายใน (ตรงกับ key ใน
+# TD_SYMBOL_MAP ด้านล่าง ซึ่งแปลงต่อเป็น symbol จริงที่ยิงหา TwelveData)
+SYMBOL_ALIASES = {
+    "gold": "XAUUSD", "xau": "XAUUSD", "xauusd": "XAUUSD", "xau/usd": "XAUUSD",
+    "eth": "ETHUSDT", "ethusdt": "ETHUSDT", "ethusd": "ETHUSDT", "eth/usdt": "ETHUSDT",
+}
+
+# --- display symbol (ที่ระบบใช้ภายใน/ตั้งชื่อไฟล์ kvdb) -> symbol จริงที่ยิงหา TwelveData API ---
+# ใช้ตัวเดียวกันทั้ง _build_command_context() และ _fetch_plan4_context() กันสองจุดนี้ไหลออกจากกัน
+# (เคยเป็น dict แยกกันคนละที่ 2 จุด ถ้าเพิ่มคู่เงินใหม่แล้วแก้ไม่ครบทั้งคู่ /order ปกติจะทำงาน แต่
+# แผนที่ 4 อย่างเดียวจะพังเงียบๆ เพราะยังส่ง "ETHUSDT" ตรงๆ ไป TwelveData แทนที่จะเป็น "ETH/USD")
+TD_SYMBOL_MAP = {"XAUUSD": "XAU/USD", "ETHUSDT": "ETH/USD"}
+
+
+def _resolve_symbol_arg(args, default_symbol):
+    """แปลง argument ของคำสั่ง (เช่น "/order eth" -> args=["eth"]) เป็น display symbol ที่ระบบรู้จัก
+    ผ่าน SYMBOL_ALIASES ไม่ใส่ argument เลย (เช่น "/order" เฉยๆ) -> ใช้ default_symbol ของ instance นี้
+    เหมือนพฤติกรรมเดิมทุกประการ (ไม่ breaking change สำหรับคนที่ยังพิมพ์ /order เฉยๆ อยู่)
+
+    คืนค่า (symbol, None) ถ้าแปลงได้ หรือ (None, ข้อความอธิบาย) ถ้าพิมพ์คู่เงินที่ไม่รู้จัก — เอาไป
+    _reply() ตรงๆ ได้เลยแทนที่จะโยน error"""
+    if not args:
+        return default_symbol, None
+    key = args[0].lower()
+    resolved = SYMBOL_ALIASES.get(key)
+    if resolved:
+        return resolved, None
+    return None, (
+        f"ไม่รู้จักคู่เงิน \"{args[0]}\" ครับ ตอนนี้รองรับ:\n"
+        f"  /order gold — XAUUSD\n"
+        f"  /order eth — ETHUSDT\n"
+        f"  /order (ไม่ใส่คำต่อท้าย) — คู่เงินหลักของบอทตอนนี้"
+    )
+
 
 def _get_cached_bias_4h(config, symbol):
     """
@@ -115,8 +151,7 @@ def _build_command_context(symbol, config):
     from bias_4h import analyze_4h_bias
     from session import get_session_info
 
-    symbol_map = {"XAUUSD": "XAU/USD"}
-    td_symbol = symbol_map.get(symbol, symbol)
+    td_symbol = TD_SYMBOL_MAP.get(symbol, symbol)
 
     df = fetch_twelvedata(symbol=td_symbol, interval="15min", outputsize=300, api_key=config["twelvedata_api_key"])
     df_ind = add_indicators(df, config)
@@ -247,8 +282,7 @@ def _fetch_plan4_context(symbol, config):
         from fetch_data import fetch_twelvedata
         from indicator import add_indicators
 
-        symbol_map = {"XAUUSD": "XAU/USD"}
-        td_symbol = symbol_map.get(symbol, symbol)
+        td_symbol = TD_SYMBOL_MAP.get(symbol, symbol)
 
         daily_df = fetch_twelvedata(symbol=td_symbol, interval="1day", outputsize=3,
                                      api_key=config["twelvedata_api_key"])
@@ -715,13 +749,24 @@ def handle_telegram_commands(config, ctx):
             continue
 
         # Telegram ส่งคำสั่งกลุ่มมาเป็น "/order@BotName" ต้องตัด @BotName ออกก่อนเทียบ
-        command = text[1:].split("@")[0].split()[0].lower()
+        text_parts = text[1:].split("@")[0].split()
+        command = text_parts[0].lower()
+        command_args = text_parts[1:]
         handler = COMMAND_HANDLERS.get(command)
         chat_id = message["chat"]["id"]
 
         if handler:
             try:
-                reply_text = handler(ctx)
+                # เฉพาะ /order รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/order eth") — ดู
+                # เหตุผลเดียวกับใน run_polling_loop() ด้านล่าง
+                if command == "order":
+                    target_symbol, resolve_err = _resolve_symbol_arg(command_args, ctx["symbol"])
+                    if resolve_err:
+                        reply_text = resolve_err
+                    else:
+                        reply_text = handler(_build_command_context(target_symbol, config))
+                else:
+                    reply_text = handler(ctx)
             except Exception as e:
                 reply_text = f"เกิดข้อผิดพลาดตอนประมวลผลคำสั่ง /{command}: {e}"
             _reply(token, chat_id, reply_text)
@@ -841,15 +886,28 @@ def run_polling_loop(config, symbol="XAUUSD"):
                 if not text.startswith("/"):
                     continue
 
-                command = text[1:].split("@")[0].split()[0].lower()
+                text_parts = text[1:].split("@")[0].split()
+                command = text_parts[0].lower()
+                command_args = text_parts[1:]
                 handler = COMMAND_HANDLERS.get(command)
                 chat_id = message["chat"]["id"]
                 if not handler:
                     continue  # คำสั่งไม่รู้จัก เมินเงียบๆ
 
                 try:
-                    ctx = _build_command_context(symbol, config)
-                    reply_text = handler(ctx)
+                    # เฉพาะ /order รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/order eth")
+                    # คำสั่งอื่น (/trend /news /status /summary /stats) ยังผูกกับคู่เงินหลักของ
+                    # instance นี้เหมือนเดิม ไม่รับ argument
+                    if command == "order":
+                        target_symbol, resolve_err = _resolve_symbol_arg(command_args, symbol)
+                        if resolve_err:
+                            reply_text = resolve_err
+                        else:
+                            ctx = _build_command_context(target_symbol, config)
+                            reply_text = handler(ctx)
+                    else:
+                        ctx = _build_command_context(symbol, config)
+                        reply_text = handler(ctx)
                 except Exception as e:
                     reply_text = f"เกิดข้อผิดพลาดตอนประมวลผลคำสั่ง /{command}: {e}"
                 _reply(token, chat_id, reply_text)
