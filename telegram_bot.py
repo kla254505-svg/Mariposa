@@ -102,6 +102,19 @@ def _resolve_symbol_arg(args, default_symbol):
     )
 
 
+def _normalize_order_shorthand(command, args):
+    """รองรับพิมพ์ติดกันแบบ "/ordereth" "/ordergold" เป็นทางลัดของ "/order eth" "/order gold"
+    (เผื่อพิมพ์เร็วๆ ไม่ทันเว้นวรรค) — เทียบส่วนที่ต่อท้ายคำว่า "order" กับ SYMBOL_ALIASES ถ้าตรงกับ
+    คู่เงินที่รู้จัก จะแปลงเป็นคำสั่ง /order พร้อม argument นั้นให้อัตโนมัติ ไม่กระทบคำสั่งอื่นที่ไม่ได้
+    ขึ้นต้นด้วย "order" เลย (เช่น /trend /news /status ไม่เข้าเงื่อนไขนี้)"""
+    if command == "order" or not command.startswith("order"):
+        return command, args
+    suffix = command[len("order"):]
+    if suffix in SYMBOL_ALIASES:
+        return "order", [suffix] + args
+    return command, args
+
+
 def _get_cached_bias_4h(config, symbol):
     """
     พยายามยืม Bias 4H ที่ main.py (GitHub Actions cron) cache ไว้ใน kvdb อยู่แล้วก่อน (คนละ process
@@ -752,6 +765,7 @@ def handle_telegram_commands(config, ctx):
         text_parts = text[1:].split("@")[0].split()
         command = text_parts[0].lower()
         command_args = text_parts[1:]
+        command, command_args = _normalize_order_shorthand(command, command_args)
         handler = COMMAND_HANDLERS.get(command)
         chat_id = message["chat"]["id"]
 
@@ -889,6 +903,7 @@ def run_polling_loop(config, symbol="XAUUSD"):
                 text_parts = text[1:].split("@")[0].split()
                 command = text_parts[0].lower()
                 command_args = text_parts[1:]
+                command, command_args = _normalize_order_shorthand(command, command_args)
                 handler = COMMAND_HANDLERS.get(command)
                 chat_id = message["chat"]["id"]
                 if not handler:
