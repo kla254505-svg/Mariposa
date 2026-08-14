@@ -16,8 +16,12 @@ import requests
 # brace, ตัวอักษรไทย) เยอะมาก — เอาไปเป็นส่วนหนึ่งของ URL path จะเสี่ยง encode ผิดพลาด/ยาวเกินลิมิต
 # ส่ง body-style ปลอดภัยกว่ามาก
 
-UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
-UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip().rstrip("/")
+# .strip() กัน whitespace/newline แอบติดท้ายค่าตอน copy-paste เข้า Environment Variable (เจอเคสจริง:
+# วาง Token ผ่าน Render Dashboard แล้วมี "\n" ติดท้ายมาด้วย ทำให้ header "Bearer <token>\n" เป็นค่า
+# HTTP header ที่ผิดกฎ (invalid leading whitespace/return character) จน requests โยน InvalidHeader
+# ทุกครั้งที่เรียก Upstash — อาการคือ kvstore ใช้งานไม่ได้เลยทั้งที่ตั้งค่าไว้ครบถูกต้องแล้วดูเผินๆ)
+UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "").strip()
 
 # ลอง 3 ครั้งรวมครั้งแรก เว้นช่วงเพิ่มขึ้นก่อนรีทราย (1 วิ, แล้ว 2 วิ) — เผื่อเจอ error ชั่วคราว
 # (429/5xx/network) เป็นพักๆ (มรดกจาก mitigation สมัย kvdb.io ยังใช้อยู่ ยังมีประโยชน์เหมือนเดิม)
