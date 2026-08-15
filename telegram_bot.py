@@ -74,6 +74,19 @@ SYMBOL_ALIASES = {
     "eth": "ETHUSDT", "ethusdt": "ETHUSDT", "ethusd": "ETHUSDT", "eth/usdt": "ETHUSDT",
 }
 
+# --- คำสั่งที่รับ argument เลือกคู่เงินได้ (เช่น "/order eth", "/trend gold", หรือพิมพ์ติดกัน
+# "/ordereth" "/trendgold") ส่วนคำสั่งอื่น (/news /status /summary /stats) ยังผูกกับคู่เงินหลักของ
+# instance เหมือนเดิม ไม่รับ argument — เพิ่มคำสั่งใหม่เข้าชุดนี้ได้เลยถ้าอยากให้เลือกคู่เงินได้ด้วย
+SYMBOL_AWARE_COMMANDS = {"order", "trend"}
+
+# --- display symbol -> label สั้นๆ ที่ใช้ขึ้นหัวข้อความตอบกลับ ให้เห็นชัดว่าผลลัพธ์นี้ของคู่เงินไหน
+# (กันสับสนตอนสลับดู /order gold กับ /order eth ถี่ๆ ในแชทเดียวกัน) ---
+SYMBOL_DISPLAY_LABEL = {"XAUUSD": "GOLD (XAUUSD)", "ETHUSDT": "ETH (ETHUSDT)"}
+
+
+def _symbol_label(symbol):
+    return SYMBOL_DISPLAY_LABEL.get(symbol, symbol)
+
 # --- display symbol (ที่ระบบใช้ภายใน/ตั้งชื่อไฟล์ kvdb) -> symbol จริงที่ยิงหา TwelveData API ---
 # ใช้ตัวเดียวกันทั้ง _build_command_context() และ _fetch_plan4_context() กันสองจุดนี้ไหลออกจากกัน
 # (เคยเป็น dict แยกกันคนละที่ 2 จุด ถ้าเพิ่มคู่เงินใหม่แล้วแก้ไม่ครบทั้งคู่ /order ปกติจะทำงาน แต่
@@ -103,15 +116,17 @@ def _resolve_symbol_arg(args, default_symbol):
 
 
 def _normalize_order_shorthand(command, args):
-    """รองรับพิมพ์ติดกันแบบ "/ordereth" "/ordergold" เป็นทางลัดของ "/order eth" "/order gold"
-    (เผื่อพิมพ์เร็วๆ ไม่ทันเว้นวรรค) — เทียบส่วนที่ต่อท้ายคำว่า "order" กับ SYMBOL_ALIASES ถ้าตรงกับ
-    คู่เงินที่รู้จัก จะแปลงเป็นคำสั่ง /order พร้อม argument นั้นให้อัตโนมัติ ไม่กระทบคำสั่งอื่นที่ไม่ได้
-    ขึ้นต้นด้วย "order" เลย (เช่น /trend /news /status ไม่เข้าเงื่อนไขนี้)"""
-    if command == "order" or not command.startswith("order"):
+    """รองรับพิมพ์ติดกันแบบ "/ordereth" "/trendgold" เป็นทางลัดของ "/order eth" "/trend gold"
+    (เผื่อพิมพ์เร็วๆ ไม่ทันเว้นวรรค) — เทียบส่วนที่ต่อท้ายชื่อคำสั่งใน SYMBOL_AWARE_COMMANDS กับ
+    SYMBOL_ALIASES ถ้าตรงกับคู่เงินที่รู้จัก จะแปลงเป็นคำสั่งนั้นพร้อม argument ให้อัตโนมัติ ไม่กระทบ
+    คำสั่งอื่นที่ไม่ได้อยู่ใน SYMBOL_AWARE_COMMANDS เลย (เช่น /news /status /summary /stats)"""
+    if command in SYMBOL_AWARE_COMMANDS:
         return command, args
-    suffix = command[len("order"):]
-    if suffix in SYMBOL_ALIASES:
-        return "order", [suffix] + args
+    for base in SYMBOL_AWARE_COMMANDS:
+        if command.startswith(base):
+            suffix = command[len(base):]
+            if suffix in SYMBOL_ALIASES:
+                return base, [suffix] + args
     return command, args
 
 
@@ -542,7 +557,7 @@ def _cmd_order_all(ctx):
     inactive = [r for r in results if not r["active"]]
     active_sorted = sorted(active, key=lambda r: (r["score"] if r["score"] is not None else -1), reverse=True)
 
-    lines = ["📥 <b>เช็คโอกาสเข้าไม้ทั้ง 8 แผน</b>", ""]
+    lines = [f"📥 <b>เช็คโอกาสเข้าไม้ทั้ง 8 แผน — {_symbol_label(ctx['symbol'])}</b>", ""]
 
     if master_trend:
         trend_th = "ขาขึ้น (LONG)" if master_trend == "bullish" else "ขาลง (SHORT)"
@@ -602,7 +617,7 @@ def _cmd_trend(ctx):
     pd_zone = calc_premium_discount_zone(ctx["df_ind"], ctx["config"].get("structure_lookback", 50))
 
     lines = [
-        "📈 <b>สรุปแนวโน้ม</b>",
+        f"📈 <b>สรุปแนวโน้ม — {_symbol_label(ctx['symbol'])}</b>",
         "",
         f"15M Structure: {TREND_LABEL.get(structure['trend'], structure['trend'])} "
         f"{STRENGTH_LABEL.get(structure.get('trend_strength'), '')} | Event: {structure.get('event') or '-'}",
@@ -771,9 +786,9 @@ def handle_telegram_commands(config, ctx):
 
         if handler:
             try:
-                # เฉพาะ /order รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/order eth") — ดู
-                # เหตุผลเดียวกับใน run_polling_loop() ด้านล่าง
-                if command == "order":
+                # /order และ /trend รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/trend eth")
+                # ดู SYMBOL_AWARE_COMMANDS — เหตุผลเดียวกับใน run_polling_loop() ด้านล่าง
+                if command in SYMBOL_AWARE_COMMANDS:
                     target_symbol, resolve_err = _resolve_symbol_arg(command_args, ctx["symbol"])
                     if resolve_err:
                         reply_text = resolve_err
@@ -910,10 +925,10 @@ def run_polling_loop(config, symbol="XAUUSD"):
                     continue  # คำสั่งไม่รู้จัก เมินเงียบๆ
 
                 try:
-                    # เฉพาะ /order รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/order eth")
-                    # คำสั่งอื่น (/trend /news /status /summary /stats) ยังผูกกับคู่เงินหลักของ
-                    # instance นี้เหมือนเดิม ไม่รับ argument
-                    if command == "order":
+                    # /order และ /trend รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/trend eth")
+                    # ดู SYMBOL_AWARE_COMMANDS — คำสั่งอื่น (/news /status /summary /stats) ยังผูกกับ
+                    # คู่เงินหลักของ instance นี้เหมือนเดิม ไม่รับ argument
+                    if command in SYMBOL_AWARE_COMMANDS:
                         target_symbol, resolve_err = _resolve_symbol_arg(command_args, symbol)
                         if resolve_err:
                             reply_text = resolve_err
