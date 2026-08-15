@@ -73,3 +73,37 @@ CONFIG = {
 
 
 }
+
+# ══════════════════════════════════════════════════════
+# SYMBOL_CONFIG_OVERRIDES — ค่าที่ต้องแยกต่อคู่เงิน เพราะผูกกับสเกลราคา/พฤติกรรมตลาดเฉพาะตัว
+# (ต่างจากตัวคูณสัมพัทธ์อย่าง ATR ที่ปรับตามสเกลราคาของแต่ละคู่เงินเองอยู่แล้วโดยธรรมชาติ ไม่ต้อง
+# แยก) key เป็น display symbol เดียวกับที่ telegram_bot.py ใช้ภายใน (SYMBOL_ALIASES resolve มาแล้ว
+# เช่น "ETHUSDT" ไม่ใช่ "eth")
+#
+# ตอนนี้แยกให้ ETHUSDT เพราะต่างจาก XAUUSD (ทอง) ตรงที่:
+#   - เทรด 24/7 ไม่มีวันหยุด ไม่มี "session" ที่สภาพคล่องกระจุกตัวชัดเจนแบบ forex London/NY —
+#     session_filter_enabled จึงปิดไว้ (ดู session.py: ปิดแล้วถือว่า "อยู่ใน session" เสมอ)
+#   - สเปรด/ระยะ SL ขั้นต่ำที่เหมาะสมคนละสเกลกับทองสิ้นเชิง (ราคา ผันผวน และเอ็กซ์เชนจ์ที่เทรดจริง
+#     ต่างกัน) ตัวเลข spread_buffer/min_sl_distance ด้านล่างเป็นค่าเริ่มต้นคร่าวๆ เท่านั้น ควรเก็บ
+#     ข้อมูลจริงจาก /order eth สักพัก (สเปรดจริงของเอ็กซ์เชนจ์ที่ใช้เทรด, ATR จริงที่สังเกตเห็น) แล้ว
+#     ปรับตัวเลขนี้ให้ตรงกับที่สังเกตเห็นจริงอีกที ไม่ใช่ตัวเลขสูตรสำเร็จที่ยืนยันแล้วว่าถูกต้อง
+# ══════════════════════════════════════════════════════
+SYMBOL_CONFIG_OVERRIDES = {
+    "ETHUSDT": {
+        "session_filter_enabled": False,
+        "spread_buffer": 1.0,
+        "min_sl_distance": 15.0,
+    },
+}
+
+
+def get_symbol_config(base_config, symbol):
+    """คืน config ที่ merge SYMBOL_CONFIG_OVERRIDES ของ symbol นั้นเข้ากับ base_config แล้ว — ไม่แก้ไข
+    base_config เดิม (คืน dict ใหม่เสมอ) คู่เงินที่ไม่มี override (เช่น XAUUSD) จะได้ base_config
+    กลับไปตรงๆ ไม่มีอะไรเปลี่ยน (ไม่ breaking change)"""
+    overrides = SYMBOL_CONFIG_OVERRIDES.get(symbol)
+    if not overrides:
+        return base_config
+    merged = dict(base_config)
+    merged.update(overrides)
+    return merged

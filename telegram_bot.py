@@ -43,6 +43,7 @@ from liquidity_sweep_entry import find_sweep_entry, calc_sweep_entry_order
 from qm_pattern_entry import find_qm_pattern, calc_qm_entry_order
 from flag_pattern_entry import find_flag_pattern, calc_flag_entry_order
 from plan_score import generic_plan_score, determine_master_trend
+from config import get_symbol_config
 
 TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
 STRENGTH_LABEL = {"strong": "(Strong)", "weak": "(Weak — กำลังก่อตัว)", "none": ""}
@@ -171,6 +172,11 @@ def _build_command_context(symbol, config):
     cached = _CONTEXT_CACHE.get(symbol)
     if cached and (now - cached[0]) < _CONTEXT_CACHE_TTL_SECONDS:
         return cached[1]
+
+    # ใช้ config เฉพาะคู่เงินนี้ (ถ้ามี override — ดู SYMBOL_CONFIG_OVERRIDES ใน config.py เช่น
+    # session_filter_enabled/spread_buffer/min_sl_distance ของ ETHUSDT ต่างจากทอง) ไม่กระทบคู่เงินที่
+    # ไม่มี override (ยังได้ config ตัวเดิมเป๊ะ)
+    config = get_symbol_config(config, symbol)
 
     from fetch_data import fetch_twelvedata
     from indicator import add_indicators
