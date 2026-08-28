@@ -117,7 +117,15 @@ def detect_breakout_trigger(df, structure, config):
     เช็คว่าราคา 'ทะลุแรงๆ' ตาม Plan 2 (Breakout) จริงหรือยัง
     'แรงๆ' = ปิดเลยระดับ swing high/low ล่าสุดไปเกิน buffer (คูณ ATR) ไม่ใช่แค่ wick แตะผ่านนิดเดียว
     คืนค่า None ถ้ายังไม่ทะลุ, หรือ dict {"direction","level","price"} ถ้าทะลุแล้ว
+
+    ต้องทะลุ "ไปตามทิศทางเทรนด์หลัก" เท่านั้น (structure["trend"]) เหมือน Plan 1 (Pullback) — ก่อนหน้านี้
+    ฟังก์ชันนี้เช็คแค่ว่าราคาทะลุ swing high (ให้ bullish) หรือทะลุ swing low (ให้ bearish) โดยไม่ดูเทรนด์
+    หลักเลย ทำให้ยิงสัญญาณ "ทะลุสวนเทรนด์หลัก" ได้ (เช่น เทรนด์หลักขาขึ้น แต่ราคาย่อลงมาทะลุ swing low
+    ย่อยๆ ก็ยิง Sell ทันที) ซึ่งเป็นสาเหตุที่พบจริงจากข้อมูลเทรดจริง (มีโน้ต "สวนเทรนด์"/"สวนเทรนด์หลัก"
+    ติดมากับไม้ Plan 2 ที่แพ้หลายไม้) เพิ่มเงื่อนไขนี้เพื่อให้ Breakout เทรดตามเทรนด์เท่านั้น ตามหลักการ
+    มาตรฐานของ breakout trading (ทะลุตามเทรนด์ = โอกาสไปต่อสูงกว่าทะลุสวนเทรนด์มาก)
     """
+    trend = structure.get("trend")
     swings = structure.get("last_swings", [])
     if len(swings) < 2 or not len(df):
         return None
@@ -129,12 +137,12 @@ def detect_breakout_trigger(df, structure, config):
     atr_val = df["atr"].iloc[-1] if "atr" in df.columns else 0
     buffer = config.get("breakout_confirm_atr_mult", 0.3) * atr_val
 
-    if highs:
+    if highs and trend == "bullish":
         last_high = highs[-1]["price"]
         if current_price > last_high + buffer:
             return {"direction": "bullish", "level": last_high, "price": current_price}
 
-    if lows:
+    if lows and trend == "bearish":
         last_low = lows[-1]["price"]
         if current_price < last_low - buffer:
             return {"direction": "bearish", "level": last_low, "price": current_price}
