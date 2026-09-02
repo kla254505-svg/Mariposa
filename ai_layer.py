@@ -194,7 +194,7 @@ def _call_claude_api(context_text, config):
     }
 
     try:
-        resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=20)
+        resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=45)
     except requests.exceptions.Timeout:
         return None, "TIMEOUT", "เรียก Claude API timeout"
     except requests.exceptions.RequestException as e:
@@ -606,9 +606,9 @@ def test_ai_connection(config):
 
     start = time.time()
     try:
-        resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=15)
+        resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=45)
     except requests.exceptions.Timeout:
-        return False, "เรียก Claude API timeout (เกิน 15 วิ) — เช็คเน็ต/ลองใหม่อีกครั้ง"
+        return False, "เรียก Claude API timeout (เกิน 45 วิ) — เช็คเน็ต/ลองใหม่อีกครั้ง"
     except requests.exceptions.RequestException as e:
         return False, f"เรียก Claude API ไม่สำเร็จ (network error): {e}"
     elapsed_ms = int((time.time() - start) * 1000)
