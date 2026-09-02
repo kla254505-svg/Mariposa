@@ -201,7 +201,22 @@ def _call_claude_api(context_text, config):
 
     try:
         body = resp.json()
-        text = body["content"][0]["text"]
+        # content เป็น list ของ block หลายชนิด (text, thinking, tool_use ฯลฯ) — block แรกไม่จำเป็น
+        # ต้องเป็น type "text" เสมอ (เจอปัญหาจริงตอนใช้งาน: KeyError 'text' เพราะไปหยิบ content[0]
+        # ตรงๆ แล้วบังเอิญเป็น block ชนิดอื่น) ต้องไล่หา block ที่เป็น text จริงๆ แล้วต่อกันทั้งหมด
+        text_parts = [
+            b.get("text", "") for b in body.get("content", [])
+            if isinstance(b, dict) and b.get("type") == "text"
+        ]
+        # ต่อกันตรงๆ ไม่ใส่ "\n" คั่น — ถ้า Claude แบ่ง JSON ก้อนเดียวออกเป็นหลาย text block
+        # (เกิดขึ้นได้กับ response ยาว/streaming) การใส่ newline คั่นกลางจะทำให้ JSON พังทันที
+        text = "".join(text_parts).strip()
+        if not text:
+            stop_reason = body.get("stop_reason")
+            return None, "ERROR", (
+                f"Claude API ตอบกลับมาแต่ไม่มีข้อความ (stop_reason={stop_reason}) — "
+                f"อาจโดนตัดกลางคันเพราะ max_tokens ต่ำไป"
+            )
     except Exception as e:
         return None, "ERROR", f"อ่านโครงสร้างผลลัพธ์จาก Claude API ไม่ได้: {e}"
 
@@ -597,7 +612,14 @@ def test_ai_connection(config):
         return False, f"Claude API ตอบ HTTP {resp.status_code}: {resp.text[:150]}"
 
     try:
-        text = resp.json()["content"][0]["text"].strip()
+        # ไล่หา block ที่เป็น type "text" จริงๆ (เหตุผลเดียวกับใน _call_claude_api — block แรกไม่
+        # จำเป็นต้องเป็น text เสมอ) ที่นี่ถ้าอ่านไม่ได้ก็ไม่ถือว่าล้มเหลว เพราะ HTTP 200 = เชื่อมต่อสำเร็จ
+        # แล้วซึ่งเป็นสิ่งที่ฟังก์ชันนี้ต้องการทดสอบจริงๆ
+        blocks = resp.json().get("content", [])
+        text = "\n".join(
+            b.get("text", "") for b in blocks
+            if isinstance(b, dict) and b.get("type") == "text"
+        ).strip() or "(ตอบกลับไม่มีข้อความ แต่ HTTP 200 คือเชื่อมต่อสำเร็จ)"
     except Exception:
         text = "(อ่านข้อความตอบกลับไม่ได้ แต่ HTTP 200 คือเชื่อมต่อสำเร็จ)"
 
