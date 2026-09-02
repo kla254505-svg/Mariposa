@@ -6,7 +6,7 @@ from tp import calc_risk_reward
 
 ORDERS_KEY_PREFIX = "open_orders"
 # pending: Set & Forget วาง limit ไว้ล่วงหน้า ยังไม่ fill จริง (แผน 5-8) — ไม่นับ win/loss จนกว่าจะ
-# เปลี่ยนเป็น running ก่อน (ราคามาถึง entry จริง) กัน /stats เพี้ยนจากออเดอร์ที่ไม่เคยเข้าไม้จริง
+# เปลี่ยนเป็น running ก่อน (ราคามาถึง entry จริง) กันสถิติเพี้ยนจากออเดอร์ที่ไม่เคยเข้าไม้จริง
 # expired: pending ที่ราคาไม่มาถึง entry ภายในเวลาที่กำหนด (พลาดโอกาส) ก็ไม่นับ win/loss เหมือนกัน
 STATUS_EMOJI = {"pending": "⏳", "running": "💸", "win": "✅", "loss": "❌", "expired": "⌛"}
 PLAN_LABEL = {
@@ -101,7 +101,7 @@ def add_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, s
     success = save_orders(bucket, symbol, orders)
     if not success:
         print(f"[Order Tracking Error] บันทึกออเดอร์ (symbol={symbol}, plan={plan}) ลง kvdb ไม่สำเร็จ "
-              f"แม้ retry แล้ว — ออเดอร์นี้จะไม่ปรากฏใน /summary หรือ /stats")
+              f"แม้ retry แล้ว — ออเดอร์นี้จะไม่ถูกนับในสถิติที่บันทึกไว้")
         return None
     return order
 
@@ -162,7 +162,7 @@ def add_pending_order(bucket, symbol, direction, entry_price, stop_loss, take_pr
     success = save_orders(bucket, symbol, orders)
     if not success:
         print(f"[Order Tracking Error] บันทึก pending order (symbol={symbol}, plan={plan}) ลง kvdb "
-              f"ไม่สำเร็จ แม้ retry แล้ว — ออเดอร์นี้จะไม่ปรากฏใน /summary หรือ /stats")
+              f"ไม่สำเร็จ แม้ retry แล้ว — ออเดอร์นี้จะไม่ถูกนับในสถิติที่บันทึกไว้")
         return None
     return order
 
@@ -335,7 +335,8 @@ def calc_stats(orders):
 
 
 def build_stats_message(symbol, stats):
-    """สร้างข้อความสถิติ win rate/expectancy แยกตามแผน สำหรับคำสั่ง /stats"""
+    """สร้างข้อความสถิติ win rate/expectancy แยกตามแผน — หมายเหตุ: ไม่มีคำสั่ง Telegram เรียกใช้
+    ฟังก์ชันนี้แล้วตอนนี้ (/stats ถูกถอดออกแล้ว) เก็บไว้เผื่อ Data Layer ในอนาคตเรียกใช้ซ้ำได้"""
     if not stats:
         return f"📊 <b>สถิติผลลัพธ์: {symbol}</b>\n\nยังไม่มีออเดอร์ที่ปิดจบ (win/loss) ให้วัดผลเลยครับ"
 
@@ -414,6 +415,5 @@ def build_orders_dashboard(symbol, orders, current_price):
     if expired:
         summary_parts.append(f"หมดอายุ ⌛: {expired}")
     lines.append(" | ".join(summary_parts))
-    lines.append("พิมพ์ /stats เพื่อดู win rate/expectancy แยกตามแผน")
 
     return "\n".join(lines)

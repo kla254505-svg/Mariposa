@@ -57,12 +57,12 @@ CONFIG = {
     # กลุ่ม Telegram แยกต่างหาก (optional) — ใช้เฉพาะ "สัญญาณเข้าเทรด" กับ "เตือนข่าวล่วงหน้า 1 ชม."
     # ถ้าไม่ตั้งค่า env ตัวนี้ไว้ ระบบจะไม่ส่งเข้ากลุ่ม (ส่งแค่ telegram_chat_id เดิมตามปกติ)
     "telegram_group_chat_id": os.environ.get("TELEGRAM_GROUP_CHAT_ID", ""),
-    # ID ผู้ใช้ Telegram ของเจ้าของบอท (ตัวเลข ไม่ใช่ username) — คำสั่ง /order /trend /news /status /summary
+    # ID ผู้ใช้ Telegram ของเจ้าของบอท (ตัวเลข ไม่ใช่ username) — คำสั่ง /order /trend /news /status /aicheck
     # จะตอบเฉพาะคนนี้เท่านั้น คนอื่นในกลุ่มพิมพ์คำสั่งจะถูกเมินเงียบๆ หาได้จาก @userinfobot บน Telegram
     # ถ้าไม่ตั้งค่านี้ไว้ ระบบจะไม่ประมวลผลคำสั่งใดๆ เลย (ปลอดภัยไว้ก่อน)
     "telegram_owner_id": os.environ.get("TELEGRAM_OWNER_ID", ""),
     # ปิด/เปิดการแจ้งเตือนอัตโนมัติ (Push) ทั้งหมด — ถ้า False บอทจะเงียบสนิท ไม่ส่งอะไรเองเลย
-    # ต้องพิมพ์คำสั่ง /order /trend /news /status /summary เอาเองถึงจะได้คำตอบ (Pull-only mode)
+    # ต้องพิมพ์คำสั่ง /order /trend /news /status /aicheck เอาเองถึงจะได้คำตอบ (Pull-only mode)
     # ตั้งเป็น True เมื่อไหร่ก็ได้ถ้าอยากได้ Push กลับมาเหมือนเดิม ไม่ต้องแก้โค้ดที่อื่นเลย
     "push_notifications_enabled": False,
     # ตัวนี้คุมว่าจะยิง Telegram Alert จริงหรือไม่ (ต่างจาก min_score_console_watchlist ด้านบนที่แค่ print console)
@@ -84,9 +84,9 @@ CONFIG = {
     # ตั้งใจ (เจอบั๊กนี้จริงตอนเทส: ตั้งไว้ 10 นาทีแล้ว Plan ใหม่ที่เกิดขึ้นในรอบถัดไป — ห่างจากครั้งก่อน
     # แค่ 5 นาที — ถูกกันไม่ให้ AI วิเคราะห์ไปด้วย ทั้งที่ state เปลี่ยนจริงและควรแจ้งเตือน)
     "ai_cooldown_minutes": 2,
-    # ออเดอร์ที่ถูกสร้าง (โดย Strategy ผ่าน orders.py) ภายในกี่นาทีที่ผ่านมา ถือว่า "active ในรอบนี้"
-    # สำหรับส่งให้ Central AI ดู — ตั้งไว้มากกว่าความถี่ cron จริง (5 นาที) เผื่อ cron รันช้า/คลาดเคลื่อน
-    "ai_recent_signal_window_minutes": 10,
+    # ราคาปัจจุบันเข้าใกล้ entry ของออเดอร์ที่ยัง pending ภายในกี่เท่าของ ATR ถึงจะถือว่าเป็น event
+    # "PRICE_APPROACH_ENTRY" (ให้ Central AI Layer วิเคราะห์เพิ่มได้ แม้ยังไม่ถึง entry จริงก็ตาม)
+    "ai_price_approach_atr_mult": 0.5,
 
 
 }

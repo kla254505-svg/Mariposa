@@ -6,7 +6,7 @@ run_bot.py
   1. เปิด Flask web server เล็กๆ (แค่ route "/" ตอบ "OK") — Render ต้องการให้ service bind พอร์ต
      และตอบ HTTP ได้ ไม่งั้นจะคิดว่า service ตายแล้วรีสตาร์ทวนไปเรื่อยๆ (Web Service ต้องมี HTTP endpoint)
   2. รัน telegram_bot.py's run_polling_loop() ใน background thread แยกต่างหาก — อันนี้คือตัวที่ทำให้
-     บอทตอบคำสั่ง /order /trend /news /status /summary ได้จริงแบบเกือบ real-time
+     บอทตอบคำสั่ง /order /trend /news /status /aicheck ได้จริงแบบเกือบ real-time
 
 ⚠️ ไฟล์นี้ "ไม่ได้" รันการวิเคราะห์/ส่ง Alert อัตโนมัติ (นั่นยังเป็นหน้าที่ของ main.py บน GitHub Actions
 cron เหมือนเดิม) ไฟล์นี้ทำหน้าที่แค่ตอบคำสั่งที่พิมพ์เข้ามาเท่านั้น สองระบบนี้แชร์ข้อมูลกันผ่าน kvdb

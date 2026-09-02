@@ -24,7 +24,7 @@ def check_plan2_plan3_triggers(df, config, symbol):
     """
     Plan 2/3 จาก Hourly Briefing (Breakout / สวนเทรนด์): เช็คทุกรอบว่า "เข้าออเดอร์จริง" หรือยัง
     ไม่ใช่แค่ข้อความในบรีฟฟิ่งเฉยๆ แล้ว ถ้าทริกเกอร์จริงจะยิง Telegram (แชทเดิม + กลุ่ม) พร้อมหมายเหตุ
-    และบันทึกลง Order Dashboard ด้วย เพื่อให้ /stats วัด win rate/expectancy แยกรายแผนได้ครบ ใช้
+    และบันทึกลง Order Dashboard ด้วย เพื่อเก็บสถิติ win rate/expectancy แยกรายแผนไว้ครบ ใช้
     calc_breakout_order/calc_counter_trend_order จาก scenario.py (จุดเดียวกับที่ /order ใน
     telegram_bot.py ใช้แสดงผล กันตรรกะคำนวณ SL/TP ซ้ำซ้อนสองที่)
 
@@ -91,7 +91,7 @@ def check_plan2_plan3_triggers(df, config, symbol):
                 "ควรพิจารณาความเสี่ยงเพิ่มเติมเอง หรือลดขนาดไม้ก่อนเข้า"
             )
 
-            # --- คำนวณ SL/TP ของแผนนี้แล้วบันทึกลง Order Dashboard (ให้ /stats วัดผลได้) ---
+            # --- คำนวณ SL/TP ของแผนนี้แล้วบันทึกลง Order Dashboard (เก็บสถิติไว้วัดผลย้อนหลังได้) ---
             # ใช้ calc_breakout_order/calc_counter_trend_order จาก scenario.py จุดเดียวกับที่
             # telegram_bot.py ใช้แสดงผลใน /order — ถ้าคำนวณไม่สำเร็จ (หา swing/ATR ไม่ได้) จะข้าม
             # การบันทึกออเดอร์ไปเงียบๆ แต่ยังคงส่ง Telegram alert ตามปกติ (ไม่ให้ alert หายเพราะ
@@ -263,7 +263,7 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
             f"SL: {order['stop_loss']:.4f}\n"
             f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
             "หมายเหตุ: แจ้งทันทีที่เจอ zone (Set \u0026 Forget) — วาง Limit Order ไว้รอได้เลย "
-            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (เช็คสถานะที่ /summary)"
+            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
         send_alert_to_targets(config, msg)
 
@@ -330,7 +330,7 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
             f"SL: {order['stop_loss']:.4f}\n"
             f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
             "หมายเหตุ: แจ้งทันทีที่เจอโอกาส (Set \u0026 Forget) — วาง Limit Order ไว้รอได้เลย "
-            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (เช็คสถานะที่ /summary)"
+            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
         send_alert_to_targets(config, msg)
 
@@ -398,7 +398,7 @@ def check_qm_pattern_trigger(df, config, symbol):
             f"SL: {order['stop_loss']:.4f}\n"
             f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
             "หมายเหตุ: แจ้งทันทีที่เจอโครงสร้าง (Set \u0026 Forget) — วาง Limit Order ไว้รอได้เลย "
-            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (เช็คสถานะที่ /summary)"
+            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
         send_alert_to_targets(config, msg)
 
@@ -466,7 +466,7 @@ def check_flag_pattern_trigger(df, config, symbol):
             f"SL: {order['stop_loss']:.4f}\n"
             f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
             "หมายเหตุ: แจ้งทันทีที่เจอ pattern (Set \u0026 Forget) — วาง Stop Order รอ breakout ได้เลย "
-            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะทะลุกรอบไปถึง Entry (เช็คสถานะที่ /summary)"
+            "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะทะลุกรอบไปถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
         send_alert_to_targets(config, msg)
 

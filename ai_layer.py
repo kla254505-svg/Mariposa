@@ -20,6 +20,7 @@ ai_layer.py — Central AI Second Opinion Layer (Choice B)
 
 import hashlib
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -27,6 +28,7 @@ import requests
 from kvstore import kv_get, kv_set
 
 AI_MEMORY_KEY_PREFIX = "ai_market_state"
+AI_LOG_MAX_ENTRIES = 20  # เก็บประวัติการวิเคราะห์ล่าสุดกี่รายการ (bounded — กัน kvdb value โตไม่หยุด)
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
 
@@ -81,13 +83,20 @@ def is_within_ai_time_window(config, now=None):
     return start_hour <= now.hour < end_hour
 
 
-def _normalize_market_state(symbol, active_plans, market_context):
+def _normalize_market_state(symbol, active_plans, market_context, events=None):
     """สร้าง state แบบ normalized (เรียง key/ลำดับคงที่เสมอ) สำหรับเอาไป hash เทียบว่า 'สถานการณ์
     เปลี่ยนไปมีนัยสำคัญไหม' จากรอบก่อนหน้า — เรียง active_plans ตาม plan name กันกรณีลำดับใน list
-    สลับกันเฉยๆ (ไม่ได้มีอะไรเปลี่ยนจริง) ทำให้ hash เปลี่ยนโดยไม่จำเป็น"""
+    สลับกันเฉยๆ (ไม่ได้มีอะไรเปลี่ยนจริง) ทำให้ hash เปลี่ยนโดยไม่จำเป็น
+
+    ตั้งใจไม่ใส่ current_price ดิบๆ ลงใน state เลย (แม้จะมีอยู่ใน market_context) เพราะราคาขยับเล็กน้อย
+    ทุก 5 นาทีไม่ควรทำให้ hash เปลี่ยนทุกรอบ — จุดที่ราคาขยับมีนัยสำคัญจริง (เข้าใกล้ entry) ถูกจับด้วย
+    event "PRICE_APPROACH_ENTRY" ต่างหากแทน (ดู detect_events) ซึ่งจะรวมอยู่ใน events ที่ส่งเข้ามาที่นี่
+    events: sorted list ของ event ที่ detect_events ตรวจเจอในรอบนี้ (None = โหมดเดิมก่อนมี event system)
+    """
     plans_normalized = sorted(
-        [{"plan": p.get("plan"), "direction": p.get("direction")} for p in active_plans],
-        key=lambda p: (p["plan"] or "", p["direction"] or ""),
+        [{"plan": p.get("plan"), "direction": p.get("direction"),
+          "signal_state": p.get("signal_state")} for p in active_plans],
+        key=lambda p: (p["plan"] or "", p["direction"] or "", p["signal_state"] or ""),
     )
     state = {
         "symbol": symbol,
@@ -96,6 +105,8 @@ def _normalize_market_state(symbol, active_plans, market_context):
         "trend_1h": market_context.get("trend_1h"),
         "trend_15m": market_context.get("trend_15m"),
         "structure_event": market_context.get("structure_event"),
+        "structure_event_4h": market_context.get("structure_event_4h"),
+        "events": sorted(events) if events else None,
     }
     return state
 
@@ -205,40 +216,215 @@ def _call_claude_api(context_text, config):
     return parsed, "ANALYZED", None
 
 
-def _build_ai_context_text(symbol, active_plans, market_context):
+def _build_ai_context_text(symbol, active_plans, market_context, events=None):
     """ประกอบข้อมูลจริงทั้งหมดเป็นข้อความให้ Claude อ่าน — ใส่เฉพาะข้อมูลที่มีจริง ค่าไหนไม่มีใส่
-    'not_available' ตรงๆ (ห้าม AI เดาแทนค่าที่หายไป ตามกติกาใน SYSTEM_PROMPT)"""
+    'not_available' ตรงๆ (ห้าม AI เดาแทนค่าที่หายไป ตามกติกาใน SYSTEM_PROMPT) รวม MTF context เท่าที่
+    ระบบมีข้อมูลจริง — 30M ไม่ได้ถูกดึงที่ไหนในระบบเลยตอนนี้ (มีแค่ 5M/15M/1H(เทรนด์)/4H) จึงใส่
+    not_available ทั้งชุดตามกติกา แทนที่จะยิง TwelveData เพิ่มเพียงเพื่อ AI Context (ผิดหลักการ
+    'ห้ามยิง API เพิ่มโดยไม่จำเป็น')"""
     def _fmt(v):
         return "not_available" if v is None else v
 
     lines = [f"Symbol: {symbol}", ""]
-    lines.append("=== Market Context ===")
-    lines.append(f"Current Price: {_fmt(market_context.get('current_price'))}")
-    lines.append(f"HTF Bias (4H): {_fmt(market_context.get('htf_bias'))}")
-    lines.append(f"Trend 1H: {_fmt(market_context.get('trend_1h'))}")
-    lines.append(f"Trend 15M: {_fmt(market_context.get('trend_15m'))}")
-    lines.append(f"Structure Event (15M): {_fmt(market_context.get('structure_event'))}")
-    lines.append(f"RSI (15M): {_fmt(market_context.get('rsi'))}")
-    lines.append(f"MACD Histogram (15M): {_fmt(market_context.get('macd_hist'))}")
-    lines.append(f"ADX (15M): {_fmt(market_context.get('adx'))}")
+
+    if events:
+        lines.append(f"=== Event ที่ทำให้เรียกวิเคราะห์รอบนี้ === \n{', '.join(sorted(events))}")
+        lines.append("")
+
+    lines.append("=== 4H ===")
+    lines.append(f"Trend: {_fmt(market_context.get('htf_bias'))}")
+    lines.append(f"Structure Event: {_fmt(market_context.get('structure_event_4h'))}")
+    lines.append(f"Zone: {_fmt(market_context.get('zone_4h'))}")
+    lines.append(f"EMA50: {_fmt(market_context.get('ema50_4h'))}")
+    lines.append(f"EMA200: {_fmt(market_context.get('ema200_4h'))}")
+    lines.append("")
+    lines.append("=== 1H ===")
+    lines.append(f"Trend: {_fmt(market_context.get('trend_1h'))}")
+    lines.append(f"EMA50: {_fmt(market_context.get('ema50_1h'))}")
+    lines.append(f"EMA200: {_fmt(market_context.get('ema200_1h'))}")
+    lines.append("")
+    lines.append("=== 30M ===")
+    lines.append("(ไม่มีข้อมูล — ระบบไม่ได้ดึงกรอบเวลานี้เลยตอนนี้) not_available ทั้งหมด")
+    lines.append("")
+    lines.append("=== 15M ===")
+    lines.append(f"Trend: {_fmt(market_context.get('trend_15m'))}")
+    lines.append(f"Structure Event: {_fmt(market_context.get('structure_event'))}")
+    lines.append(f"EMA50: {_fmt(market_context.get('ema50_15m'))}")
+    lines.append(f"EMA200: {_fmt(market_context.get('ema200_15m'))}")
+    lines.append(f"RSI: {_fmt(market_context.get('rsi'))}")
+    lines.append(f"MACD Histogram: {_fmt(market_context.get('macd_hist'))}")
+    lines.append(f"ADX: {_fmt(market_context.get('adx'))}")
+    lines.append(f"Order Block / FVG นับเป็น Supply-Demand: {_fmt(market_context.get('ob_fvg_note'))}")
+    lines.append(f"Volume: not_available (ฟีด forex/gold ที่ใช้ไม่มี volume จริง)")
+    lines.append("")
+    lines.append("=== Current Price ===")
+    lines.append(f"{_fmt(market_context.get('current_price'))}")
     lines.append("")
     lines.append("=== Strategy Signals (Plan 1-8) — ค่าพวกนี้ตัดสินใจแล้ว ห้ามเสนอค่าใหม่ ===")
     if not active_plans:
         lines.append("(ไม่มีแผนไหน active ในรอบนี้)")
     for p in active_plans:
         lines.append(
-            f"- {p.get('plan')}: {p.get('direction')} | Entry {p.get('entry')} | "
-            f"SL {p.get('sl')} | TP {p.get('tp')} | RR {p.get('rr')}"
+            f"- {p.get('plan')} [{p.get('signal_state', 'unknown')}]: {p.get('direction')} | "
+            f"Entry {p.get('entry')} | SL {p.get('sl')} | TP {p.get('tp')} | RR {p.get('rr')}"
         )
     return "\n".join(lines)
 
 
-def analyze_market_state(symbol, active_plans, market_context, config):
-    """จุดเรียกเดียวของ Central AI Layer ทั้งระบบ — เรียกจาก main.py หลังเช็คครบ 8 แผนแล้วเท่านั้น
+def _load_orders_safe(bucket, symbol):
+    """เรียก orders.load_orders() แบบกันเหนียว — import ในฟังก์ชันกันปัญหา circular import (orders.py
+    ไม่ import ai_layer.py กลับมา แต่กันไว้เผื่ออนาคต) อ่านอย่างเดียว ไม่เคยเขียนกลับ"""
+    try:
+        from orders import load_orders
+        return load_orders(bucket, symbol)
+    except Exception as e:
+        print(f"[AI Layer] {symbol}: อ่าน orders.py ไม่สำเร็จ: {e}")
+        return []
 
-    active_plans: list ของ dict {plan, direction, entry, sl, tp, rr} — อ่านมาจาก orders.py (Strategy
-    เป็นคนสร้างค่าพวกนี้ ฟังก์ชันนี้แค่ "อ่าน" ไม่เคยแก้ไข)
+
+def _append_ai_log(memory, symbol, events, ai_result):
+    """เก็บประวัติการวิเคราะห์แต่ละครั้งแบบ append (ไม่ overwrite ของเก่าทิ้ง) ตามหลักการ 'ห้าม
+    overwrite historical AI analysis' — เก็บแบบ bounded (ล่าสุด AI_LOG_MAX_ENTRIES รายการ) ไม่ใช่ระบบ
+    Log แยกฐานข้อมูล (เกินสโคปเฟสนี้ตามสเปก ห้ามแตะ Google Sheets/Data Layer) แต่ยังคงประวัติไว้พอให้
+    ตรวจสอบย้อนหลังได้ภายใน kvdb เดิมที่มีอยู่แล้ว ไม่สร้างระบบเก็บข้อมูลใหม่"""
+    log = memory.get("ai_log", [])
+    log.append({
+        "at": datetime.now(timezone.utc).isoformat(),
+        "events": sorted(events) if events else [],
+        "overall_bias": ai_result.get("overall_bias"),
+        "signal_assessment": ai_result.get("signal_assessment"),
+        "confidence": ai_result.get("confidence"),
+    })
+    memory["ai_log"] = log[-AI_LOG_MAX_ENTRIES:]
+
+
+def detect_events(symbol, config, market_context, current_price, memory=None):
+    """ตรวจจับ Event ที่มีความหมายทั้งหมดเทียบกับที่เก็บไว้ใน Memory จากรอบก่อนหน้า:
+      - NEW_SIGNAL / ENTRY_HIT / TP_HIT / SL_HIT: จาก diff สถานะออเดอร์ใน orders.py (อ่านอย่างเดียว
+        ไม่เคยเขียนกลับไปที่ orders.py เลย — Signal Lifecycle ยังคงเป็นของ Strategy/orders.py เพียง
+        ผู้เดียวตามเดิม ที่นี่แค่ "สังเกต" การเปลี่ยนสถานะที่เกิดขึ้นแล้วเท่านั้น)
+      - PRICE_APPROACH_ENTRY: ราคาปัจจุบันเข้าใกล้ entry ของออเดอร์ที่ยัง pending ภายใน threshold (x ATR)
+      - MARKET_STRUCTURE_CHANGE: BOS/CHoCH ใหม่ (15M หรือ 4H) ต่างจากที่เก็บไว้ล่าสุด
+      - HTF_BIAS_CHANGE: เทรนด์ 4H หรือ 1H เปลี่ยนจากที่เก็บไว้ล่าสุด (ไม่นับตอนเพิ่งเริ่มมีข้อมูล
+        ครั้งแรกที่ยังไม่มีค่าเก่าให้เทียบ)
+
+    active_plans ที่คืนมาคือออเดอร์ที่ยัง pending/running อยู่ (relevant ต่อเนื่องไม่ว่าจะสร้างมานานแค่
+    ไหนแล้ว — ไม่ตัดด้วยเวลาสร้างอีกต่อไป) รวมกับออเดอร์ที่เพิ่งเปลี่ยนสถานะไปเมื่อรอบนี้เอง (win/loss/
+    expired ก็ยังส่งให้ AI เห็นผลได้ในรอบที่มันเพิ่งปิดจบพอดี)
+
+    คืนค่า (events: set[str], active_plans: list[dict], updated_memory: dict) — ผู้เรียก
+    (run_central_ai_cycle) เป็นคนบันทึก updated_memory กลับเสมอ ไม่ว่าจะมี event เกิดขึ้นหรือไม่ก็ตาม
+    เพื่อให้ diff ในรอบถัดไปแม่นยำ"""
+    memory = dict(memory or {})
+    events = set()
+
+    orders_list = _load_orders_safe(config.get("kvdb_bucket"), symbol)
+    prev_snapshot = memory.get("order_status_snapshot", {})
+    current_snapshot = {}
+    active_plans = []
+
+    for o in orders_list:
+        oid = o.get("id")
+        status = o.get("status")
+        current_snapshot[oid] = status
+        prev_status = prev_snapshot.get(oid)
+        just_transitioned = False
+
+        if prev_status is None and status in ("pending", "running"):
+            events.add("NEW_SIGNAL")
+            just_transitioned = True
+        elif prev_status == "pending" and status == "running":
+            events.add("ENTRY_HIT")
+            just_transitioned = True
+        elif prev_status == "running" and status == "win":
+            events.add("TP_HIT")
+            just_transitioned = True
+        elif prev_status == "running" and status == "loss":
+            events.add("SL_HIT")
+            just_transitioned = True
+
+        if status in ("pending", "running") or just_transitioned:
+            take_profits = o.get("take_profits") or {}
+            tp = take_profits.get("TP1") or (next(iter(take_profits.values())) if take_profits else None)
+            active_plans.append({
+                "plan": o.get("plan"), "direction": o.get("direction"),
+                "entry": o.get("entry_price"), "sl": o.get("stop_loss"), "tp": tp,
+                "rr": o.get("rr_tp1"), "signal_state": status,
+            })
+
+        if status == "pending" and current_price is not None:
+            atr = market_context.get("atr_15m")
+            entry_price = o.get("entry_price")
+            if atr and entry_price is not None:
+                threshold = config.get("ai_price_approach_atr_mult", 0.5) * atr
+                if abs(current_price - entry_price) <= threshold:
+                    events.add("PRICE_APPROACH_ENTRY")
+
+    memory["order_status_snapshot"] = current_snapshot
+
+    prev_struct_15m = memory.get("last_structure_event_15m")
+    cur_struct_15m = market_context.get("structure_event")
+    if cur_struct_15m and cur_struct_15m != prev_struct_15m:
+        events.add("MARKET_STRUCTURE_CHANGE")
+    memory["last_structure_event_15m"] = cur_struct_15m
+
+    prev_struct_4h = memory.get("last_structure_event_4h")
+    cur_struct_4h = market_context.get("structure_event_4h")
+    if cur_struct_4h and cur_struct_4h != prev_struct_4h:
+        events.add("MARKET_STRUCTURE_CHANGE")
+    memory["last_structure_event_4h"] = cur_struct_4h
+
+    prev_bias = memory.get("last_htf_bias")
+    cur_bias = market_context.get("htf_bias")
+    if cur_bias and prev_bias and cur_bias != prev_bias:
+        events.add("HTF_BIAS_CHANGE")
+    memory["last_htf_bias"] = cur_bias
+
+    prev_1h = memory.get("last_trend_1h")
+    cur_1h = market_context.get("trend_1h")
+    if cur_1h and prev_1h and cur_1h != prev_1h:
+        events.add("HTF_BIAS_CHANGE")
+    memory["last_trend_1h"] = cur_1h
+
+    return events, active_plans, memory
+
+
+def run_central_ai_cycle(symbol, config, market_context, current_price, manual_recheck=False):
+    """จุดเรียกหลักจาก main.py (แทนที่การเรียก analyze_market_state() ตรงๆ) — ตรวจ Event ก่อนเสมอ
+    (detect_events) แล้วค่อยตัดสินใจว่าควรเรียก AI ไหม บันทึก event-tracking memory ไว้ทุกครั้งไม่ว่า
+    จะเรียก AI จริงหรือไม่ (กัน diff รอบถัดไปพลาด) ไม่โยน exception ออกไปเลย
+
+    manual_recheck=True: บังคับให้ถือว่ามี event "MANUAL_RECHECK" เพิ่ม แม้ detect_events จะไม่เจอ
+    อะไรเปลี่ยนเลยก็ตาม (ยังต้องมี active_plans อย่างน้อย 1 อันอยู่ดีถึงจะเรียก AI จริง — ไม่มีอะไรให้
+    AI ดูก็ไม่มีประโยชน์จะเรียก)"""
+    bucket = config.get("kvdb_bucket")
+    try:
+        memory = _load_ai_memory(bucket, symbol)
+        events, active_plans, memory = detect_events(symbol, config, market_context, current_price, memory)
+
+        if manual_recheck:
+            events.add("MANUAL_RECHECK")
+
+        _save_ai_memory(bucket, symbol, memory)  # บันทึก event-tracking เสมอ ไม่ว่าจะเรียก AI หรือไม่
+
+        if not events or not active_plans:
+            return None
+
+        return analyze_market_state(symbol, active_plans, market_context, config, events=sorted(events))
+    except Exception as e:
+        print(f"[AI Layer] {symbol}: เกิดข้อผิดพลาดใน run_central_ai_cycle: {e}")
+        return {"error": str(e), "ai_state": "ERROR"}
+
+
+def analyze_market_state(symbol, active_plans, market_context, config, events=None):
+    """จุดเรียกเดียวของ Central AI Layer ทั้งระบบ — เรียกจาก run_central_ai_cycle() ด้านล่างเท่านั้น
+    (ซึ่ง main.py เรียกอีกที) หลังเช็คครบ 8 แผนแล้วเท่านั้น
+
+    active_plans: list ของ dict {plan, direction, entry, sl, tp, rr, signal_state} — อ่านมาจาก
+    orders.py (Strategy เป็นคนสร้างค่าพวกนี้ ฟังก์ชันนี้แค่ "อ่าน" ไม่เคยแก้ไข)
     market_context: dict ข้อมูลตลาดปัจจุบัน (ดู _build_ai_context_text ด้านบนว่าใช้ field ไหนบ้าง)
+    events: sorted list ของ event ที่ detect_events ตรวจเจอ (None = เรียกแบบไม่มี event system,
+    เก็บไว้เพื่อ backward-compat กับตอนเรียกฟังก์ชันนี้ตรงๆ โดยไม่ผ่าน run_central_ai_cycle)
 
     คืนค่า None ถ้า: ไม่มีแผน active เลย / state ไม่เปลี่ยนจากรอบก่อน (SKIPPED) / อยู่ใน cooldown
     คืนค่า dict {"ai_result":..., "active_plans":..., "ai_state": "ANALYZED"} ถ้าเรียก AI สำเร็จ
@@ -255,7 +441,7 @@ def analyze_market_state(symbol, active_plans, market_context, config):
     try:
         memory = _load_ai_memory(bucket, symbol)
 
-        normalized = _normalize_market_state(symbol, active_plans, market_context)
+        normalized = _normalize_market_state(symbol, active_plans, market_context, events=events)
         current_hash = _compute_state_hash(normalized)
 
         if memory.get("last_state_hash") == current_hash and memory.get("ai_state") == "ANALYZED":
@@ -264,7 +450,7 @@ def analyze_market_state(symbol, active_plans, market_context, config):
         # Cooldown กันเรียก AI ซ้อนกันเฉพาะกรณีผิดปกติ (เช่น cron รันซ้อน/เรียกถี่ผิดจังหวะ) — ต้อง
         # ตั้งค่าไว้ "สั้นกว่า" รอบ cron จริงเสมอ (ดูเหตุผลเต็มใน config.py: ai_cooldown_minutes) ไม่งั้น
         # จะไปกันสัญญาณใหม่ที่เกิดขึ้นจริงในรอบถัดไปด้วยโดยไม่ตั้งใจ — ไม่นับรวมตอน SKIPPED ด้านบน
-        cooldown_minutes = config.get("ai_cooldown_minutes", 10)
+        cooldown_minutes = config.get("ai_cooldown_minutes", 2)
         last_call_iso = memory.get("last_ai_call_iso")
         if last_call_iso:
             try:
@@ -274,7 +460,7 @@ def analyze_market_state(symbol, active_plans, market_context, config):
             except Exception:
                 pass
 
-        context_text = _build_ai_context_text(symbol, active_plans, market_context)
+        context_text = _build_ai_context_text(symbol, active_plans, market_context, events=events)
         ai_result, ai_state, error = _call_claude_api(context_text, config)
 
         memory["last_ai_call_iso"] = datetime.now(timezone.utc).isoformat()
@@ -285,6 +471,7 @@ def analyze_market_state(symbol, active_plans, market_context, config):
             # ค้างสถานะไว้เป็น "เหมือนวิเคราะห์ไปแล้ว" ทั้งที่จริงยังไม่สำเร็จ (รอบหน้าจะได้ลองใหม่ถ้า
             # state ยังต่างจาก last_state_hash เดิมอยู่)
             memory["last_ai_analysis"] = ai_result
+            _append_ai_log(memory, symbol, events, ai_result)
             _save_ai_memory(bucket, symbol, memory)
             return {"ai_result": ai_result, "active_plans": active_plans, "ai_state": "ANALYZED"}
 
@@ -346,3 +533,51 @@ def format_ai_telegram_messages(symbol, ai_payload):
     )
 
     return [msg1, msg2, msg3, msg4]
+
+def test_ai_connection(config):
+    """ทดสอบว่าตั้งค่า AI ถูกต้องและเรียก Claude API ได้จริงไหม (ใช้โดยคำสั่ง /aicheck) — ยิง prompt
+    สั้นที่สุดเท่าที่จะทำได้ ไม่ใช้ SYSTEM_PROMPT เต็มของ Central AI Layer เพื่อประหยัด token ตอนแค่
+    ทดสอบการเชื่อมต่อ ไม่ได้วิเคราะห์อะไรจริง คืนค่า (ok: bool, message: str) ไม่โยน exception"""
+    api_key = config.get("anthropic_api_key")
+    if not api_key:
+        return False, "ยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY บน Render (Environment Variables)"
+
+    payload = {
+        "model": config.get("ai_model", "claude-sonnet-5"),
+        "max_tokens": 10,
+        "messages": [{"role": "user", "content": "ตอบคำว่า OK คำเดียวพอ ไม่ต้องพูดอะไรเพิ่ม"}],
+    }
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_API_VERSION,
+        "content-type": "application/json",
+    }
+
+    start = time.time()
+    try:
+        resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=15)
+    except requests.exceptions.Timeout:
+        return False, "เรียก Claude API timeout (เกิน 15 วิ) — เช็คเน็ต/ลองใหม่อีกครั้ง"
+    except requests.exceptions.RequestException as e:
+        return False, f"เรียก Claude API ไม่สำเร็จ (network error): {e}"
+    elapsed_ms = int((time.time() - start) * 1000)
+
+    if resp.status_code == 401:
+        return False, "API key ไม่ถูกต้อง (HTTP 401) — เช็คว่าคัดลอกมาครบ/ยังไม่หมดอายุ/ยังไม่ถูกลบ"
+    if resp.status_code == 429:
+        return False, "โดน Rate Limit (HTTP 429) — คีย์ใช้งานได้ แค่ตอนนี้เรียกถี่ไป ลองใหม่อีกสักครู่"
+    if resp.status_code != 200:
+        return False, f"Claude API ตอบ HTTP {resp.status_code}: {resp.text[:150]}"
+
+    try:
+        text = resp.json()["content"][0]["text"].strip()
+    except Exception:
+        text = "(อ่านข้อความตอบกลับไม่ได้ แต่ HTTP 200 คือเชื่อมต่อสำเร็จ)"
+
+    return True, f"เชื่อมต่อ Claude API สำเร็จ ({elapsed_ms}ms) — โมเดลตอบกลับ: \"{text[:50]}\""
+
+
+def get_ai_memory_snapshot(config, symbol):
+    """ดึงสถานะล่าสุดของ Central AI Layer สำหรับ symbol นี้ (ใช้โดย /aicheck แสดงประกอบ) — คืน dict
+    ว่างเปล่า {} ถ้ายังไม่เคยมีการเรียกอะไรเลย (ยังไม่มีแผนไหน active ในช่วงเวลาที่อนุญาตมาก่อน)"""
+    return _load_ai_memory(config.get("kvdb_bucket"), symbol)

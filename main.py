@@ -22,56 +22,13 @@ from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
-from orders import add_order, update_orders_status, update_pending_orders, build_orders_dashboard, load_orders
+from orders import add_order, update_orders_status, update_pending_orders, build_orders_dashboard
 import plan_runner
 import ai_layer
 from news_scheduler import (
     refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning,
     check_and_send_post_news_result, is_in_news_blackout,
 )
-
-
-def _get_recent_active_plans(bucket, symbol, window_minutes):
-    """อ่านออเดอร์ที่ Strategy (Plan 1-8) เพิ่งสร้างไว้ใน orders.py ภายใน window_minutes นาทีที่ผ่านมา
-    แปลงเป็น active_plans list ให้ Central AI Layer ดู — เป็นวิธี "อ่านอย่างเดียว" (read-only) จาก
-    Signal Memory ที่มีอยู่แล้ว ไม่ได้ไปแก้ Plan 1-8 หรือ orders.py แม้แต่บรรทัดเดียว (ตามหลักการ
-    ห้ามเปลี่ยน Logic เดิม) ใช้เวลาสร้างออเดอร์จริง (created_at_iso ถ้ามี, ไม่งั้น parse จาก id) เทียบ
-    เวลาปัจจุบัน — ไม่ใช่แค่ดูว่า status เป็นอะไร เพราะออเดอร์เก่าที่ยัง 'running'/'pending' ค้างอยู่
-    จากหลายชั่วโมงก่อนไม่ควรถูกนับว่า 'active ในรอบนี้' อีก (จะทำให้ AI ถูกเรียกซ้ำเรื่อยๆ ทั้งที่ไม่มี
-    อะไรใหม่เกิดขึ้นจริง)"""
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(minutes=window_minutes)
-    result = []
-
-    for o in load_orders(bucket, symbol):
-        created_at = None
-        if o.get("created_at_iso"):
-            try:
-                created_at = datetime.fromisoformat(o["created_at_iso"])
-            except Exception:
-                created_at = None
-        if created_at is None:
-            # เดิม (แผน 1-4) ไม่มี created_at_iso — parse เอาจาก id: "{symbol}_{YYYYMMDDHHMMSSffffff}"
-            try:
-                ts_part = o["id"].split("_", 1)[1]
-                created_at = datetime.strptime(ts_part, "%Y%m%d%H%M%S%f").replace(tzinfo=timezone.utc)
-            except Exception:
-                continue  # parse ไม่ได้จริงๆ ข้ามออเดอร์นี้ไป ไม่ใช่ตัวบล็อกทั้งระบบ
-
-        if created_at < cutoff:
-            continue
-
-        take_profits = o.get("take_profits") or {}
-        tp = take_profits.get("TP1") or (next(iter(take_profits.values())) if take_profits else None)
-        result.append({
-            "plan": o.get("plan"),
-            "direction": o.get("direction"),
-            "entry": o.get("entry_price"),
-            "sl": o.get("stop_loss"),
-            "tp": tp,
-            "rr": o.get("rr_tp1"),
-        })
-    return result
 
 
 def _current_hour_key():
@@ -94,24 +51,31 @@ def get_cached_htf_context(kvdb_bucket, symbol):
     """
     บอทวิเคราะห์ทุก 5 นาที แต่เทรนด์ 1H และ Bias 4H ไม่จำเป็นต้องดึงข้อมูลใหม่ทุกรอบ
     ฟังก์ชันนี้จะอ่านค่าที่ cache ไว้จาก kvdb ถ้ายังอยู่ใน "ช่วง 30 นาทีเดียวกัน" กับตอนนี้ (ประหยัด API quota)
-    คืนค่า (higher_tf_trend, bias_4h) หรือ (None, None) ถ้ายังไม่มี cache/cache หมดอายุแล้ว
+    คืนค่า (higher_tf_trend, bias_4h, ema_context) หรือ (None, None, None) ถ้ายังไม่มี cache/cache หมดอายุแล้ว
+    ema_context: dict {ema50_1h, ema200_1h, ema50_4h, ema200_4h} — เพิ่มใหม่ ใช้โดย Central AI Layer
     """
     raw = kv_get(kvdb_bucket, f"htf_ctx_{symbol}")
     if not raw:
-        return None, None
+        return None, None, None
     try:
         data = json.loads(raw)
     except Exception:
-        return None, None
+        return None, None, None
     if data.get("bucket") != _htf_cache_bucket_key():
-        return None, None
-    return data.get("higher_tf_trend"), data.get("bias_4h")
+        return None, None, None
+    return data.get("higher_tf_trend"), data.get("bias_4h"), data.get("ema_context")
 
 
-def set_cached_htf_context(kvdb_bucket, symbol, higher_tf_trend, bias_4h):
-    """บันทึกผล 1H trend + 4H bias ที่เพิ่งคำนวณลง kvdb ให้รอบ 5 นาทีถัดไปในช่วง 30 นาทีเดียวกันใช้ซ้ำได้"""
+def set_cached_htf_context(kvdb_bucket, symbol, higher_tf_trend, bias_4h, ema_context=None):
+    """บันทึกผล 1H trend + 4H bias ที่เพิ่งคำนวณลง kvdb ให้รอบ 5 นาทีถัดไปในช่วง 30 นาทีเดียวกันใช้ซ้ำได้
+
+    ema_context (เพิ่มใหม่): dict {ema50_1h, ema200_1h, ema50_4h, ema200_4h} — เก็บพ่วงไปด้วยตอนที่
+    df_1h_ind/df_4h_ind ถูกคำนวณอยู่แล้ว (ไม่ต้องยิง TwelveData เพิ่มเลยแม้แต่ request เดียว) ไว้ให้
+    Central AI Layer เอาไปใช้แสดง EMA50/200 ของ 4H/1H ใน context ได้ ไม่งั้นจะมีแค่ 15M เท่านั้นที่มี
+    EMA ให้ดู (ค่า default None เพื่อไม่ให้โค้ดเก่าที่เรียกแค่ 3 argument พัง — เก็บเป็น {} แทน)"""
     payload = json.dumps(
-        {"bucket": _htf_cache_bucket_key(), "higher_tf_trend": higher_tf_trend, "bias_4h": bias_4h},
+        {"bucket": _htf_cache_bucket_key(), "higher_tf_trend": higher_tf_trend, "bias_4h": bias_4h,
+         "ema_context": ema_context or {}},
         default=float,
     )
     kv_set(kvdb_bucket, f"htf_ctx_{symbol}", payload)
@@ -431,7 +395,7 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                     sent = send_telegram_alert(config["telegram_token"], target_chat_id, msg)
                 print(f"[Telegram -> {target_chat_id}] ส่งแจ้งเตือนสำเร็จ" if sent else f"[Telegram -> {target_chat_id}] ส่งแจ้งเตือนล้มเหลว")
 
-        # --- บันทึกออเดอร์ไว้ให้ /summary และสรุปรายวันเช็คผล TP/SL ย้อนหลังได้ (ทำเสมอ ไม่ว่าจะ push หรือไม่) ---
+        # --- บันทึกออเดอร์ไว้ให้สรุปผลประจำวันอัตโนมัติเช็คผล TP/SL ย้อนหลังได้ (ทำเสมอ ไม่ว่าจะ push หรือไม่) ---
         try:
             result = add_order(config["kvdb_bucket"], symbol, entry_signal["direction"],
                                 entry_signal["entry_price"], stop_loss, take_profits, confidence["score"],
@@ -476,7 +440,9 @@ if __name__ == "__main__":
                 session_info = get_session_info(CONFIG)
 
                 # เทรนด์ 1H + Bias 4H ไม่เปลี่ยนทุก 5 นาที -> ใช้ cache ในชั่วโมงเดียวกัน ประหยัด API quota
-                higher_tf_trend, bias_4h = get_cached_htf_context(CONFIG["kvdb_bucket"], display_symbol)
+                higher_tf_trend, bias_4h, ema_context = get_cached_htf_context(
+                    CONFIG["kvdb_bucket"], display_symbol
+                )
                 if higher_tf_trend is None or bias_4h is None:
                     df_1h = fetch_twelvedata(
                         symbol=td_symbol, interval="1h", outputsize=300,
@@ -494,7 +460,22 @@ if __name__ == "__main__":
                     df_4h_ind = add_indicators(df_4h, CONFIG)
                     bias_4h = analyze_4h_bias(df_4h_ind, CONFIG)
 
-                    set_cached_htf_context(CONFIG["kvdb_bucket"], display_symbol, higher_tf_trend, bias_4h)
+                    # เก็บ EMA50/200 ของ 1H/4H พ่วงไปกับ cache นี้เลย (คำนวณอยู่แล้วใน add_indicators
+                    # ด้านบน ไม่ต้องยิง API เพิ่ม) ให้ Central AI Layer เอาไปใช้ต่อได้ (ดู ai_layer.py)
+                    ema_context = {
+                        "ema50_1h": round(float(df_1h_ind["ema_slow"].iloc[-1]), 3)
+                        if "ema_slow" in df_1h_ind.columns else None,
+                        "ema200_1h": round(float(df_1h_ind["ema_trend"].iloc[-1]), 3)
+                        if "ema_trend" in df_1h_ind.columns else None,
+                        "ema50_4h": round(float(df_4h_ind["ema_slow"].iloc[-1]), 3)
+                        if "ema_slow" in df_4h_ind.columns else None,
+                        "ema200_4h": round(float(df_4h_ind["ema_trend"].iloc[-1]), 3)
+                        if "ema_trend" in df_4h_ind.columns else None,
+                    }
+
+                    set_cached_htf_context(
+                        CONFIG["kvdb_bucket"], display_symbol, higher_tf_trend, bias_4h, ema_context
+                    )
             except Exception as e:
                 print(f"[Data Error] {display_symbol}: {e}")
                 continue  # ข้ามคู่เงินนี้ไป แต่คู่อื่น/ping ยังทำงานต่อได้
@@ -505,11 +486,11 @@ if __name__ == "__main__":
                          higher_tf_trend=higher_tf_trend, session_info=session_info,
                          bias_4h=bias_4h, df_5m=df_5m)
 
-            # --- เช็คราคาปัจจุบันเทียบ SL/TP1 ของออเดอร์ที่ยัง 'running' ทุกรอบ (ให้ /summary ข้อมูลสด) ---
+            # --- เช็คราคาปัจจุบันเทียบ SL/TP1 ของออเดอร์ที่ยัง 'running' ทุกรอบ (ให้สรุปผลประจำวันข้อมูลสด) ---
             try:
                 current_price = df["close"].iloc[-1]
                 # เช็ค pending -> running/expired ก่อนเสมอ (แผน Set & Forget อย่าง Plan 5) ให้ auto-alert
-                # เจอสถานะสดล่าสุดทุกรอบ ไม่ใช่รอให้มีคนพิมพ์ /order5 หรือ /summary ซ้ำถึงจะขยับสถานะ
+                # เจอสถานะสดล่าสุดทุกรอบ ไม่ต้องรอสรุปผลประจำวันตอนกลางคืนถึงจะขยับสถานะ
                 update_pending_orders(CONFIG["kvdb_bucket"], display_symbol, current_price,
                                        CONFIG.get("spread_buffer", 0.0))
                 update_orders_status(CONFIG["kvdb_bucket"], display_symbol, current_price)
@@ -535,47 +516,66 @@ if __name__ == "__main__":
             # --- กลุ่ม B (Flag Pattern — เดิมต้องพิมพ์ /order8 เองเท่านั้น) ---
             plan_runner.check_flag_pattern_trigger(df, CONFIG, display_symbol)
 
-            # --- Central AI Second Opinion Layer (Choice B) ---
-            # เช็คหลังแผน 1-8 ครบแล้วเท่านั้น (จุดเดียว ไม่แตะ Plan 1-8 หรือ orders.py เลย) อ่านออเดอร์
-            # ที่ Strategy เพิ่งสร้างไว้แบบ read-only แล้วส่งให้ AI ให้ความเห็นเสริม "1 ครั้งต่อรอบ"
-            # เท่านั้น (ai_layer.analyze_market_state เป็นจุดเรียก Claude API จุดเดียวในทั้งระบบ) และ
-            # แค่ตอนมีอะไรใหม่ให้ดูจริงๆ (มีแผน active ในรอบนี้ + สถานการณ์เปลี่ยนจากที่เคยวิเคราะห์ไปแล้ว
-            # + อยู่ในช่วงเวลาที่อนุญาต) — ห่อด้วย try/except เสมอ: AI พังต้องไม่กระทบ Strategy Alert
-            # ที่ส่งไปแล้วด้านบน (จบไปแล้วก่อนถึงจุดนี้ ไม่ขึ้นกับส่วนนี้เลย)
+            # --- Central AI Second Opinion Layer (Choice B, Event-Driven) ---
+            # เช็คหลังแผน 1-8 ครบแล้วเท่านั้น (จุดเดียว ไม่แตะ Plan 1-8 หรือ orders.py เลย)
+            # ai_layer.run_central_ai_cycle() เป็นจุดตัดสินใจ+เรียก Claude API จุดเดียวในทั้งระบบ —
+            # ข้างในจะเช็ค Event เอง (NEW_SIGNAL/ENTRY_HIT/TP_HIT/SL_HIT/PRICE_APPROACH_ENTRY/
+            # MARKET_STRUCTURE_CHANGE/HTF_BIAS_CHANGE) จากข้อมูลที่ส่งเข้าไปนี้ + ออเดอร์ที่อ่านจาก
+            # orders.py เอง (อ่านอย่างเดียว) ไม่ต้องเตรียม active_plans ที่นี่แล้ว — ห่อด้วย try/except
+            # เสมอ: AI พังต้องไม่กระทบ Strategy Alert ที่ส่งไปแล้วด้านบน (จบไปแล้วก่อนถึงจุดนี้)
             try:
                 if CONFIG.get("ai_analysis_enabled", True) and ai_layer.is_within_ai_time_window(CONFIG):
-                    active_plans = _get_recent_active_plans(
-                        CONFIG["kvdb_bucket"], display_symbol,
-                        CONFIG.get("ai_recent_signal_window_minutes", 10),
+                    # คำนวณ indicator/structure สดใหม่ตรงนี้ (ในหน่วยความจำล้วนๆ ไม่ยิง API เพิ่ม) แทนที่
+                    # จะพึ่งพาตัวแปรจาก run_pipeline() ด้านบน เพราะ structure/entry_signal เป็นตัวแปร
+                    # local ภายในฟังก์ชันนั้น ดึงออกมาใช้ตรงนี้ไม่ได้
+                    df_ind_ai = add_indicators(df, CONFIG)
+                    structure_ai = analyze_structure(df_ind_ai, CONFIG)
+                    current_price_ai = float(df_ind_ai["close"].iloc[-1])
+                    ema_ctx = ema_context or {}
+
+                    entry_signal_ai = evaluate_entry(df_ind_ai, structure_ai, CONFIG)
+                    ob_fvg_bits = []
+                    if entry_signal_ai.get("ob"):
+                        ob_fvg_bits.append("มี Order Block")
+                    if entry_signal_ai.get("fvg"):
+                        ob_fvg_bits.append("มี FVG")
+                    ob_fvg_note = " + ".join(ob_fvg_bits) if ob_fvg_bits else "ไม่มี Order Block/FVG ที่ตรวจพบตอนนี้"
+
+                    market_context = {
+                        "current_price": round(current_price_ai, 3),
+                        "htf_bias": bias_4h.get("trend") if bias_4h else None,
+                        "structure_event_4h": bias_4h.get("event") if bias_4h else None,
+                        "zone_4h": bias_4h.get("zone") if bias_4h else None,
+                        "ema50_4h": ema_ctx.get("ema50_4h"),
+                        "ema200_4h": ema_ctx.get("ema200_4h"),
+                        "trend_1h": higher_tf_trend,
+                        "ema50_1h": ema_ctx.get("ema50_1h"),
+                        "ema200_1h": ema_ctx.get("ema200_1h"),
+                        "trend_15m": structure_ai.get("trend"),
+                        "structure_event": structure_ai.get("event"),
+                        "ema50_15m": round(float(df_ind_ai["ema_slow"].iloc[-1]), 3)
+                        if "ema_slow" in df_ind_ai.columns else None,
+                        "ema200_15m": round(float(df_ind_ai["ema_trend"].iloc[-1]), 3)
+                        if "ema_trend" in df_ind_ai.columns else None,
+                        "rsi": round(float(df_ind_ai["rsi"].iloc[-1]), 1)
+                        if "rsi" in df_ind_ai.columns else None,
+                        "macd_hist": round(float(df_ind_ai["macd_hist"].iloc[-1]), 4)
+                        if "macd_hist" in df_ind_ai.columns else None,
+                        "adx": round(float(df_ind_ai["adx"].iloc[-1]), 1)
+                        if "adx" in df_ind_ai.columns else None,
+                        "atr_15m": round(float(df_ind_ai["atr"].iloc[-1]), 3)
+                        if "atr" in df_ind_ai.columns else None,
+                        "ob_fvg_note": ob_fvg_note,
+                    }
+                    ai_payload = ai_layer.run_central_ai_cycle(
+                        display_symbol, CONFIG, market_context, current_price_ai
                     )
-                    if active_plans:
-                        # คำนวณ indicator/structure สดใหม่ตรงนี้ (ในหน่วยความจำล้วนๆ ไม่ยิง API เพิ่ม)
-                        # แทนที่จะพึ่งพาตัวแปรจาก run_pipeline() ด้านบน เพราะ structure/entry_signal
-                        # เป็นตัวแปร local ภายในฟังก์ชันนั้น ดึงออกมาใช้ตรงนี้ไม่ได้
-                        df_ind_ai = add_indicators(df, CONFIG)
-                        structure_ai = analyze_structure(df_ind_ai, CONFIG)
-                        market_context = {
-                            "current_price": round(float(df_ind_ai["close"].iloc[-1]), 3),
-                            "htf_bias": bias_4h.get("trend") if bias_4h else None,
-                            "trend_1h": higher_tf_trend,
-                            "trend_15m": structure_ai.get("trend"),
-                            "structure_event": structure_ai.get("event"),
-                            "rsi": round(float(df_ind_ai["rsi"].iloc[-1]), 1)
-                            if "rsi" in df_ind_ai.columns else None,
-                            "macd_hist": round(float(df_ind_ai["macd_hist"].iloc[-1]), 4)
-                            if "macd_hist" in df_ind_ai.columns else None,
-                            "adx": round(float(df_ind_ai["adx"].iloc[-1]), 1)
-                            if "adx" in df_ind_ai.columns else None,
-                        }
-                        ai_payload = ai_layer.analyze_market_state(
-                            display_symbol, active_plans, market_context, CONFIG
-                        )
-                        for ai_msg in ai_layer.format_ai_telegram_messages(display_symbol, ai_payload):
-                            send_telegram_alert(CONFIG["telegram_token"], CONFIG["telegram_chat_id"], ai_msg)
+                    for ai_msg in ai_layer.format_ai_telegram_messages(display_symbol, ai_payload):
+                        send_telegram_alert(CONFIG["telegram_token"], CONFIG["telegram_chat_id"], ai_msg)
             except Exception as e:
                 print(f"[AI Layer Error] {display_symbol}: {e}")
 
-            # หมายเหตุ: การตอบคำสั่ง Telegram (/order /trend /news /status /summary /stats) ย้ายไปทำที่
+            # หมายเหตุ: การตอบคำสั่ง Telegram (/order /trend /news /status /aicheck) ย้ายไปทำที่
             # run_bot.py บน Render แล้ว (รันแบบ polling loop ตลอดเวลา ตอบเร็วกว่านี้มาก)
             # main.py ตัวนี้ (บน GitHub Actions cron) ทำหน้าที่แค่วิเคราะห์ + ส่ง Alert เท่านั้น
             # ห้ามเรียก handle_telegram_commands() ที่นี่ซ้ำ เพราะจะแย่ง offset ของ getUpdates กับ Render
@@ -652,7 +652,7 @@ if __name__ == "__main__":
                         CONFIG["kvdb_bucket"], key=f"briefing_plan1_{display_symbol}_group"
                     )
 
-            # --- สรุปผลประกอบการประจำวัน (23:55-23:59 เวลาไทย) ครั้งเดียวต่อวัน — ข้ามถ้าปิด push (ใช้ /summary แทน) ---
+            # --- สรุปผลประกอบการประจำวัน (23:55-23:59 เวลาไทย) ครั้งเดียวต่อวัน — ข้ามถ้าปิด push (ไม่มีคำสั่งดูย้อนหลังแล้ว) ---
             try:
                 if CONFIG.get("push_notifications_enabled", True) and should_send_daily_summary(
                     CONFIG["kvdb_bucket"], display_symbol

@@ -1,7 +1,7 @@
 """
 telegram_bot.py
 ระบบรับคำสั่งจาก Telegram (Interactive Commands) เพิ่มเติมจากที่บอทส่งแจ้งเตือนอัตโนมัติอยู่แล้ว
-รองรับ: /order /trend /news /status /summary /stats
+รองรับ: /order /trend /news /status /aicheck
 
 /order รวมทั้ง 8 แผนไว้คำสั่งเดียว: เช็คเงื่อนไขของแผนที่ 1-8 พร้อมกันในรอบเดียว แล้วสรุปผลรวมเป็น
 ข้อความเดียว (ยาว อาจถูกแบ่งส่งหลายข้อความถ้าเกินลิมิตของ Telegram — ดู _reply/_split_message)
@@ -43,6 +43,7 @@ from qm_pattern_entry import find_qm_pattern, calc_qm_entry_order
 from flag_pattern_entry import find_flag_pattern, calc_flag_entry_order
 from plan_score import generic_plan_score, determine_master_trend
 from config import get_symbol_config
+import ai_layer
 
 TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
 STRENGTH_LABEL = {"strong": "(Strong)", "weak": "(Weak — กำลังก่อตัว)", "none": ""}
@@ -131,7 +132,7 @@ def _normalize_order_shorthand(command, args):
     """รองรับพิมพ์ติดกันแบบ "/ordereth" "/trendgold" เป็นทางลัดของ "/order eth" "/trend gold"
     (เผื่อพิมพ์เร็วๆ ไม่ทันเว้นวรรค) — เทียบส่วนที่ต่อท้ายชื่อคำสั่งใน SYMBOL_AWARE_COMMANDS กับ
     SYMBOL_ALIASES ถ้าตรงกับคู่เงินที่รู้จัก จะแปลงเป็นคำสั่งนั้นพร้อม argument ให้อัตโนมัติ ไม่กระทบ
-    คำสั่งอื่นที่ไม่ได้อยู่ใน SYMBOL_AWARE_COMMANDS เลย (เช่น /news /status /summary /stats)"""
+    คำสั่งอื่นที่ไม่ได้อยู่ใน SYMBOL_AWARE_COMMANDS เลย (เช่น /news /status /aicheck)"""
     if command in SYMBOL_AWARE_COMMANDS:
         return command, args
     for base in SYMBOL_AWARE_COMMANDS:
@@ -705,6 +706,37 @@ def _cmd_status(ctx):
     return "\n".join(lines)
 
 
+def _cmd_aicheck(ctx):
+    """เช็คว่า Central AI Layer (Choice B — ai_layer.py) ใช้งานได้จริงไหม ทำ 2 อย่าง:
+    1. ทดสอบเรียก Claude API จริงๆ สั้นๆ (ประหยัด token ไม่ใช้ prompt เต็มของ Central AI Layer)
+    2. โชว์สถานะล่าสุดที่ Central AI Layer เคยทำงานจริงจากฝั่ง cron (ai_layer.get_ai_memory_snapshot)
+       ถ้ายังไม่เคยมีเลย (ยังไม่มีแผนไหน active ในช่วงเวลาที่อนุญาตมาก่อน) จะบอกตรงๆ ว่ายังไม่เคยเรียก"""
+    config = ctx["config"]
+    ok, message = ai_layer.test_ai_connection(config)
+    icon = "✅" if ok else "❌"
+    lines = [f"{icon} <b>เช็คสถานะ AI</b>", "", message]
+
+    memory = ai_layer.get_ai_memory_snapshot(config, ctx["symbol"])
+    lines.append("")
+    if memory:
+        lines.append("📋 <b>ครั้งล่าสุดที่ Central AI Layer ทำงานจริง (ฝั่ง cron)</b>")
+        lines.append(f"เวลา: {memory.get('last_ai_call_iso', '-')}")
+        lines.append(f"สถานะ: {memory.get('ai_state', '-')}")
+        log = memory.get("ai_log") or []
+        if log:
+            lines.append(f"จำนวนครั้งที่วิเคราะห์สำเร็จ (เก็บย้อนหลังไว้): {len(log)} ครั้งล่าสุด")
+    else:
+        lines.append("📋 Central AI Layer ยังไม่เคยถูกเรียกจริงเลย (ยังไม่มี Event ที่น่าสนใจเกิดขึ้น "
+                      "ในช่วงเวลาที่อนุญาตให้ทำงานมาก่อน)")
+
+    hours = config.get("ai_time_filter_hours", (10, 22))
+    lines.append("")
+    lines.append(f"ช่วงเวลาที่ AI ทำงาน: จ-ศ {hours[0]}:00-{hours[1]}:00 เวลาไทย")
+    lines.append(f"เปิดใช้งานอยู่: {'ใช่' if config.get('ai_analysis_enabled', True) else 'ปิดอยู่'}")
+
+    return "\n".join(lines)
+
+
 # หมายเหตุ: /order1-8 และ /confirm1-4 ถูกรวมเป็น /order เดียวแล้ว (เช็คทั้ง 8 แผนพร้อมกันในรอบเดียว
 # ไม่มี Confirm อีกต่อไป) คำสั่งเก่าที่ไม่รู้จักจะถูกเมินเงียบๆ ตามพฤติกรรมปกติของ handle_telegram_commands()
 # /summary และ /stats ถูกถอดออกตามที่ขอ (ไม่มีคนใช้ รกโค้ด) — หมายเหตุ: การบันทึกออเดอร์อัตโนมัติของฝั่ง
@@ -715,6 +747,7 @@ COMMAND_HANDLERS = {
     "trend": _cmd_trend,
     "news": _cmd_news,
     "status": _cmd_status,
+    "aicheck": _cmd_aicheck,
 }
 
 
@@ -920,7 +953,7 @@ def run_polling_loop(config, symbol="XAUUSD"):
 
                 try:
                     # /order และ /trend รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/trend eth")
-                    # ดู SYMBOL_AWARE_COMMANDS — คำสั่งอื่น (/news /status /summary /stats) ยังผูกกับ
+                    # ดู SYMBOL_AWARE_COMMANDS — คำสั่งอื่น (/news /status /aicheck) ยังผูกกับ
                     # คู่เงินหลักของ instance นี้เหมือนเดิม ไม่รับ argument
                     if command in SYMBOL_AWARE_COMMANDS:
                         target_symbol, resolve_err = _resolve_symbol_arg(command_args, symbol)
