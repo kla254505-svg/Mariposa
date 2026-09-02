@@ -313,9 +313,17 @@ def _send_single(token, chat_id, text, parse_mode="HTML"):
 def _reply(token, chat_id, text):
     """ส่งข้อความตอบกลับ — แบ่งเป็นหลายก้อนอัตโนมัติถ้ายาวเกินลิมิตของ Telegram (ดู _split_message)
     และ fallback เป็น plain text อัตโนมัติถ้า HTML parsing พัง (ดู _send_single) กันข้อความยาวๆ
-    อย่าง /order (รวม 8 แผน) ส่งไม่สำเร็จเงียบๆ"""
-    for chunk in _split_message(text):
-        _send_single(token, chat_id, chunk)
+    อย่าง /order (รวม 8 แผน) ส่งไม่สำเร็จเงียบๆ
+
+    รับได้ทั้ง str (ข้อความเดียว) และ list/tuple ของ str (หลายข้อความแยกกัน) — คำสั่งที่อยากส่งหลาย
+    ข้อความแยกฟองกันใน Telegram (เช่น /test ที่ส่งสรุปผลทดสอบ + ผลวิเคราะห์ AI 4 ข้อความ) แค่ return
+    เป็น list กลับมาได้เลย ไม่ต้องแก้ dispatcher ทั้ง 2 จุดแยกกัน"""
+    parts = text if isinstance(text, (list, tuple)) else [text]
+    for part in parts:
+        if not part:
+            continue
+        for chunk in _split_message(str(part)):
+            _send_single(token, chat_id, chunk)
 
 
 def _fetch_plan4_context(symbol, config):
@@ -757,6 +765,113 @@ def _cmd_sheetscheck(ctx):
     return "\n".join(lines)
 
 
+
+
+def _cmd_test(ctx):
+    """คำสั่ง /test — End-to-End Test ของทั้งระบบในคำสั่งเดียว
+
+    ต่างจาก /aicheck และ /sheetscheck ที่เช็คแค่ "เชื่อมต่อได้ไหม" ทีละส่วน — /test จะไล่ทดสอบทั้งสาย
+    จริงๆ ตั้งแต่ดึงข้อมูล -> เช็คแผน 1-8 -> เรียก Claude API จริง -> เขียน Google Sheets จริง
+    โดย "บังคับ" ให้ทำงานทุกขั้นตอน แม้ตอนนี้จะไม่มีแผนไหนเข้าเงื่อนไขก็ตาม (ข้าม Event Detection /
+    state hash / cooldown / time filter ทั้งหมด) — ใช้ยืนยันว่าระบบยังไม่พังโดยไม่ต้องรอจังหวะตลาดจริง
+
+    พฤติกรรมตามที่ผู้ใช้ระบุ:
+      - มีแผน active -> เรียก AI จริง + เขียน Google Sheets จริง + ส่งผลเข้า Telegram ครบทุกส่วน
+      - ไม่มีแผน active -> แจ้งใน Telegram อย่างเดียวว่า "ตอนนี้ไม่มีจุดเข้า" ไม่เขียน Sheets
+        (ไม่สร้างข้อมูลปลอมลงฐานข้อมูลจริง — Signal_Log/Signal_Context ต้องมีแต่ข้อมูลจริงเท่านั้น
+        ไม่งั้นสถิติที่เอาไปวิเคราะห์ทีหลังจะเพี้ยน)
+
+    หมายเหตุ: /test เรียก Claude API จริง = มีค่าใช้จ่ายจริงต่อครั้ง (ประมาณ 0.4-0.5 บาท) ใช้เท่าที่
+    จำเป็นตอนอยากยืนยันว่าระบบทำงาน ไม่ใช่กดรัวๆ เล่น"""
+    config = ctx["config"]
+    symbol = ctx["symbol"]
+    lines = [f"🧪 <b>ทดสอบระบบทั้งสาย (End-to-End) — {_symbol_label(symbol)}</b>", ""]
+
+    # --- ขั้นที่ 1: ข้อมูลตลาด (ถ้ามาถึงตรงนี้ได้ = ดึง TwelveData + คำนวณ indicator สำเร็จแล้ว) ---
+    structure = ctx["structure"]
+    bias_4h = ctx.get("bias_4h") or {}
+    df_ind = ctx["df_ind"]
+    current_price = float(df_ind["close"].iloc[-1])
+    lines.append(f"1️⃣ ข้อมูลตลาด: ✅ ดึงสำเร็จ (ราคาปัจจุบัน {current_price:.2f})")
+    lines.append(f"   เทรนด์ 15M: {structure.get('trend')} | 4H Bias: {bias_4h.get('trend') or '-'}")
+
+    # --- ขั้นที่ 2: เช็คแผน 1-8 (ใช้ตรรกะเดียวกับ /order เป๊ะ) ---
+    try:
+        results = _check_all_plans(ctx)
+        active = [r for r in results if r["active"]]
+        lines.append(f"2️⃣ เช็คแผน 1-8: ✅ สำเร็จ (เข้าเงื่อนไข {len(active)} จาก 8 แผน)")
+        for r in active:
+            direction_th = "LONG" if r["direction"] == "bullish" else "SHORT"
+            lines.append(f"   • {r['label']}: {direction_th} (คะแนน {r['score']})")
+    except Exception as e:
+        lines.append(f"2️⃣ เช็คแผน 1-8: ❌ ล้มเหลว — {e}")
+        return "\n".join(lines)
+
+    # --- ขั้นที่ 3-4: ทดสอบ AI + Google Sheets ---
+    if not active:
+        # ไม่มีแผน active -> ทดสอบการเชื่อมต่อทั้งสองส่วน แต่ไม่เขียนข้อมูลลง Sheets จริง
+        lines.append("")
+        lines.append("📭 <b>ตอนนี้ไม่มีจุดเข้า</b> — ไม่มีแผนไหนเข้าเงื่อนไขเลย")
+        lines.append("   (ไม่บันทึกลง Google Sheets — ไม่สร้างข้อมูลปลอมลงฐานข้อมูลจริง)")
+        lines.append("")
+        lines.append("3️⃣ ทดสอบเรียก Claude API...")
+        ok_ai, ai_msg = ai_layer.test_ai_connection(config)
+        lines.append(f"   {'✅' if ok_ai else '❌'} {ai_msg}")
+        lines.append("")
+        lines.append("4️⃣ ทดสอบเชื่อมต่อ Google Sheets...")
+        ok_sheets, sheets_msg = sheets_log.test_sheets_connection()
+        lines.append(f"   {'✅' if ok_sheets else '❌'} {sheets_msg}")
+        lines.append("")
+        lines.append("🎉 <b>สรุป: ระบบพร้อมใช้งาน ไม่พัง</b>" if (ok_ai and ok_sheets)
+                     else "⚠️ <b>สรุป: มีบางส่วนใช้งานไม่ได้ (ดูรายละเอียดด้านบน)</b>")
+        return "\n".join(lines)
+
+    # --- มีแผน active: บังคับเรียก AI วิเคราะห์จริงเต็มรูปแบบ ---
+    # เรียก analyze_market_state() ตรงๆ (ไม่ผ่าน run_central_ai_cycle) เพื่อข้าม Event Detection/
+    # state hash/cooldown ที่ปกติจะบล็อกไว้ — /test ต้องรันได้ทุกครั้งที่กด ไม่ว่า state จะซ้ำเดิมไหม
+    # ใช้ signal_id ที่ขึ้นต้นด้วย "TEST-" ให้แยกออกชัดเจนจากสัญญาณจริงใน AI_Log
+    market_context = {
+        "current_price": round(current_price, 3),
+        "htf_bias": bias_4h.get("trend"),
+        "structure_event_4h": bias_4h.get("event"),
+        "zone_4h": bias_4h.get("zone"),
+        "trend_1h": ctx.get("higher_tf_trend"),
+        "trend_15m": structure.get("trend"),
+        "structure_event": structure.get("event"),
+        "rsi": round(float(df_ind["rsi"].iloc[-1]), 1) if "rsi" in df_ind.columns else None,
+        "macd_hist": round(float(df_ind["macd_hist"].iloc[-1]), 4) if "macd_hist" in df_ind.columns else None,
+        "adx": round(float(df_ind["adx"].iloc[-1]), 1) if "adx" in df_ind.columns else None,
+        "atr_15m": round(float(df_ind["atr"].iloc[-1]), 3) if "atr" in df_ind.columns else None,
+        "ema50_15m": round(float(df_ind["ema_slow"].iloc[-1]), 3) if "ema_slow" in df_ind.columns else None,
+        "ema200_15m": round(float(df_ind["ema_trend"].iloc[-1]), 3) if "ema_trend" in df_ind.columns else None,
+        "ema50_4h": None, "ema200_4h": None, "ema50_1h": None, "ema200_1h": None,
+        "ob_fvg_note": None,
+    }
+    active_plans = [{
+        "id": f"TEST-{symbol}-{r['num']}", "plan": r["label"], "direction": r["direction"],
+        "entry": None, "sl": None, "tp": None, "rr": None, "signal_state": "TEST",
+    } for r in active]
+
+    lines.append("")
+    lines.append("3️⃣ เรียก Claude API วิเคราะห์จริง (บังคับ ข้าม Event/cooldown)...")
+
+    ai_payload = ai_layer.analyze_market_state(
+        symbol, active_plans, market_context, config, events=["MANUAL_RECHECK"]
+    )
+
+    ai_ok = bool(ai_payload and ai_payload.get("ai_state") == "ANALYZED")
+    if ai_ok:
+        lines.append("   ✅ AI วิเคราะห์สำเร็จ (ผลเต็มอยู่ในข้อความถัดไป)")
+        lines.append("   ✅ บันทึกลง Google Sheets (AI_Log) แล้ว — เช็คได้ในชีต")
+    else:
+        err = (ai_payload or {}).get("error") if ai_payload else "state ซ้ำเดิม/ติด cooldown"
+        lines.append(f"   ❌ AI ไม่ได้วิเคราะห์: {err}")
+
+    messages = ["\n".join(lines)]
+    if ai_ok:
+        messages.extend(ai_layer.format_ai_telegram_messages(symbol, ai_payload))
+    return messages
+
 # หมายเหตุ: /order1-8 และ /confirm1-4 ถูกรวมเป็น /order เดียวแล้ว (เช็คทั้ง 8 แผนพร้อมกันในรอบเดียว
 # ไม่มี Confirm อีกต่อไป) คำสั่งเก่าที่ไม่รู้จักจะถูกเมินเงียบๆ ตามพฤติกรรมปกติของ handle_telegram_commands()
 # /summary และ /stats ถูกถอดออกตามที่ขอ (ไม่มีคนใช้ รกโค้ด) — หมายเหตุ: การบันทึกออเดอร์อัตโนมัติของฝั่ง
@@ -769,6 +884,7 @@ COMMAND_HANDLERS = {
     "status": _cmd_status,
     "aicheck": _cmd_aicheck,
     "sheetscheck": _cmd_sheetscheck,
+    "test": _cmd_test,
 }
 
 
