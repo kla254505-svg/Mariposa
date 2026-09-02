@@ -293,3 +293,67 @@ def log_ai_analysis(signal_ids, events, ai_result, ai_model, ai_status="SUCCESS"
     except Exception as e:
         print(f"[Sheets Log] บันทึก AI_Log ไม่สำเร็จ: {e}")
         return False
+
+
+def test_sheets_connection():
+    """ทดสอบว่าตั้งค่า Google Sheets ถูกต้องและเขียนได้จริงไหม (ใช้โดยคำสั่ง /sheetscheck) — ทำจริง
+    ไม่ใช่แค่เช็คว่า credential parse ได้ ต้องลองเปิด Spreadsheet + เห็น worksheet ครบ 3 อันจริงๆ
+    คืนค่า (ok: bool, message: str) ไม่โยน exception เด็ดขาด
+
+    บอกสาเหตุที่พบบ่อยแยกเป็นข้อความต่างกันชัดเจน (env var หาย / JSON parse ไม่ได้ / share สิทธิ์ไม่ครบ /
+    Sheet ID ผิด / worksheet name ไม่ตรง) แทนที่จะโยน error ดิบๆ ให้อ่านยาก"""
+    creds_json = os.environ.get("GOOGLE_SHEETS_CREDENTIALS_JSON", "").strip()
+    sheet_id = os.environ.get("GOOGLE_SHEET_ID", "").strip()
+
+    if not creds_json:
+        return False, "ยังไม่ได้ตั้งค่า GOOGLE_SHEETS_CREDENTIALS_JSON บน Render (Environment Variables)"
+    if not sheet_id:
+        return False, "ยังไม่ได้ตั้งค่า GOOGLE_SHEET_ID บน Render (Environment Variables)"
+
+    try:
+        creds_dict = json.loads(creds_json)
+    except json.JSONDecodeError as e:
+        return False, f"GOOGLE_SHEETS_CREDENTIALS_JSON ไม่ใช่ JSON ที่ถูกต้อง (วางไฟล์มาไม่ครบ/เพี้ยน?): {e}"
+
+    client_email = creds_dict.get("client_email", "(ไม่พบ client_email ใน JSON)")
+
+    # บังคับลองเชื่อมใหม่ (ไม่ใช้ cache) เพื่อให้ /sheetscheck สะท้อนสถานะจริง ณ ตอนนี้เสมอ
+    global _spreadsheet, _client, _last_conn_attempt
+    _spreadsheet = None
+    _client = None
+    _last_conn_attempt = 0.0
+
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(credentials)
+    except Exception as e:
+        return False, f"สร้าง credential ไม่สำเร็จ (ตรวจ private_key ในไฟล์ JSON ว่าคัดลอกมาครบไหม): {e}"
+
+    try:
+        spreadsheet = client.open_by_key(sheet_id)
+    except Exception as e:
+        return False, (
+            f"เปิด Google Sheet ไม่สำเร็จ (Sheet ID ผิด หรือยังไม่ได้ Share สิทธิ์ Editor ให้ "
+            f"{client_email} — เช็คได้ที่ปุ่ม Share บน Google Sheet): {e}"
+        )
+
+    try:
+        sheet_names = [ws.title for ws in spreadsheet.worksheets()]
+    except Exception as e:
+        return False, f"เปิด Sheet ได้ แต่อ่านรายชื่อ worksheet ไม่สำเร็จ: {e}"
+
+    required = {"Signal_Log", "Signal_Context", "AI_Log"}
+    missing = required - set(sheet_names)
+    if missing:
+        return False, (
+            f"เชื่อมต่อสำเร็จ แต่หา worksheet ไม่เจอ: {', '.join(missing)} "
+            f"(เจอจริง: {', '.join(sheet_names)}) — ชื่อ Sheet ต้องตรงเป๊ะ ตัวพิมพ์เล็ก-ใหญ่มีผล"
+        )
+
+    _spreadsheet = spreadsheet
+    _client = client
+    return True, f"เชื่อมต่อสำเร็จ ({client_email}) — เจอ worksheet ครบ: {', '.join(sheet_names)}"

@@ -44,6 +44,7 @@ from flag_pattern_entry import find_flag_pattern, calc_flag_entry_order
 from plan_score import generic_plan_score, determine_master_trend
 from config import get_symbol_config
 import ai_layer
+import sheets_log
 
 TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
 STRENGTH_LABEL = {"strong": "(Strong)", "weak": "(Weak — กำลังก่อตัว)", "none": ""}
@@ -737,6 +738,25 @@ def _cmd_aicheck(ctx):
     return "\n".join(lines)
 
 
+def _cmd_sheetscheck(ctx):
+    """เช็คว่า Google Sheets Logging (sheets_log.py) เชื่อมต่อได้จริงไหม — ทดสอบเปิด Spreadsheet จริง
+    (ไม่ใช้ cache) + เช็คว่าเจอ worksheet ครบ 3 อัน (Signal_Log/Signal_Context/AI_Log) เพื่อบอกสาเหตุ
+    ที่พบบ่อยแยกเป็นข้อความชัดเจน (env var หาย/JSON เพี้ยน/ยังไม่ Share สิทธิ์/ชื่อ Sheet ไม่ตรง)
+    แทนที่จะให้เดาว่าทำไม Sheets ไม่มีข้อมูลขึ้น"""
+    ok, message = sheets_log.test_sheets_connection()
+    icon = "✅" if ok else "❌"
+    lines = [f"{icon} <b>เช็คสถานะ Google Sheets</b>", "", message]
+
+    if ok:
+        lines.append("")
+        lines.append("💡 หมายเหตุ: เชื่อมต่อได้ไม่ได้แปลว่ามีข้อมูลขึ้นทันที — Sheets Log ทำงานแบบ "
+                      "Event-Driven เหมือน AI Layer (บันทึกเฉพาะตอนมี Signal ใหม่/เปลี่ยนสถานะจริงๆ "
+                      "ผ่าน orders.py เท่านั้น) ถ้ายังไม่มีแผนไหน active เลย ก็ยังไม่มีอะไรให้บันทึก "
+                      "เป็นเรื่องปกติ ไม่ใช่บั๊ก")
+
+    return "\n".join(lines)
+
+
 # หมายเหตุ: /order1-8 และ /confirm1-4 ถูกรวมเป็น /order เดียวแล้ว (เช็คทั้ง 8 แผนพร้อมกันในรอบเดียว
 # ไม่มี Confirm อีกต่อไป) คำสั่งเก่าที่ไม่รู้จักจะถูกเมินเงียบๆ ตามพฤติกรรมปกติของ handle_telegram_commands()
 # /summary และ /stats ถูกถอดออกตามที่ขอ (ไม่มีคนใช้ รกโค้ด) — หมายเหตุ: การบันทึกออเดอร์อัตโนมัติของฝั่ง
@@ -748,6 +768,7 @@ COMMAND_HANDLERS = {
     "news": _cmd_news,
     "status": _cmd_status,
     "aicheck": _cmd_aicheck,
+    "sheetscheck": _cmd_sheetscheck,
 }
 
 
