@@ -177,7 +177,13 @@ def _call_claude_api(context_text, config):
 
     payload = {
         "model": config.get("ai_model", "claude-sonnet-5"),
-        "max_tokens": 700,
+        # ตั้ง 2000 (เดิม 700 น้อยเกินไป) — เจอปัญหาจริงตอนใช้งาน: โมเดลรุ่นใหม่ใช้ thinking token
+        # ก่อนตอบจริง พอโควตาหมดไปกับการคิด เลยไม่เหลือให้เขียน JSON ออกมาเลย ได้ response ที่ไม่มี
+        # text block (stop_reason=max_tokens) ทำให้ Central AI Layer ใช้งานไม่ได้ทั้งระบบ
+        # JSON ที่ต้องการจริงยาวแค่ ~300-400 token ที่เหลือเผื่อไว้ให้ thinking โดยเฉพาะ
+        # หมายเหตุเรื่องต้นทุน: จ่ายตาม token ที่ใช้จริงเท่านั้น ไม่ใช่ตามค่า max_tokens ที่ตั้งไว้
+        # การเพิ่มเพดานตรงนี้จึงไม่ได้ทำให้ค่าใช้จ่ายต่อครั้งเพิ่มขึ้นถ้าโมเดลตอบสั้นเท่าเดิม
+        "max_tokens": 2000,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": context_text}],
     }
@@ -586,7 +592,10 @@ def test_ai_connection(config):
 
     payload = {
         "model": config.get("ai_model", "claude-sonnet-5"),
-        "max_tokens": 10,
+        # ตั้ง 100 (เดิม 10 น้อยเกินไป) — เหตุผลเดียวกับใน _call_claude_api: โมเดลรุ่นใหม่ใช้ thinking
+        # token ก่อนตอบ ถ้าเพดานต่ำมากอาจไม่เหลือให้ตอบข้อความจริงเลย ทำให้ /aicheck รายงานผลเพี้ยน
+        # ได้ทั้งที่ API ใช้งานได้ปกติ (ยังถือว่าประหยัดมาก เพราะจ่ายตาม token ที่ใช้จริงเท่านั้น)
+        "max_tokens": 100,
         "messages": [{"role": "user", "content": "ตอบคำว่า OK คำเดียวพอ ไม่ต้องพูดอะไรเพิ่ม"}],
     }
     headers = {
