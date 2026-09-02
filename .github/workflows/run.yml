@@ -1,8 +1,12 @@
-
 name: Gold Trading Bot
 
 on:
   workflow_dispatch:
+  # รันอัตโนมัติทุก 5 นาที (ไม่ต้องพึ่ง cron-job.org อีกต่อไป — ถ้ายังเปิด "Gold bot Trigger" ไว้
+  # ที่ cron-job.org อยู่ ให้ปิด/ลบทิ้ง ไม่งั้นจะรันซ้อนกัน 2 ทาง)
+  # หมายเหตุ: GitHub ไม่การันตีว่ารันตรงเป๊ะทุก 5 นาที ช่วงคนใช้เยอะอาจดีเลย์บ้าง (ปกติของ GitHub
+  # Actions) และถ้า repo ไม่มี commit ใหม่เกิน 60 วัน GitHub จะปิด schedule อัตโนมัติ ต้องเข้าไป
+  # กด enable ใหม่ในหน้า Actions
   schedule:
     - cron: '*/5 * * * *'
 
@@ -11,16 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run Gold Trading Bot
-        run: python main.py
+      - run: pip install -r requirements.txt
+      - run: python main.py
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -28,5 +27,14 @@ jobs:
           HEALTHCHECKS_URL: ${{ secrets.HEALTHCHECKS_URL }}
           KVDB_BUCKET: ${{ secrets.KVDB_BUCKET }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+          # --- 2 ตัวนี้คือตัวที่หายไป ทำให้บันทึกออเดอร์ลง kvdb ไม่สำเร็จทุกครั้ง (เห็นใน log:
+          # "[kvstore] ยังไม่ได้ตั้งค่า UPSTASH_REDIS_REST_URL/TOKEN ครบ") ส่งผลให้ AI Layer หา Event
+          # ไม่เจอ -> ไม่เรียก AI -> ไม่เขียน Google Sheets -> ไม่มีข้อความ AI เข้า Telegram ---
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          # --- Central AI Layer (ai_layer.py) ---
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          # --- Google Sheets Logging (sheets_log.py) ---
+          GOOGLE_SHEETS_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
