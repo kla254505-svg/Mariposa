@@ -29,7 +29,6 @@ import requests
 from datetime import datetime, timedelta, timezone
 
 from kvstore import kv_get, kv_set
-from orders import update_orders_status, update_pending_orders, build_orders_dashboard, calc_stats, build_stats_message
 from news import fetch_usd_calendar_events
 from news_scheduler import THAI_TZ, is_in_news_blackout
 from scenario import (
@@ -75,9 +74,14 @@ SYMBOL_ALIASES = {
     "eth": "ETHUSDT", "ethusdt": "ETHUSDT", "ethusd": "ETHUSDT", "eth/usdt": "ETHUSDT",
 }
 
+# --- คู่เงินที่ "ปิดใช้งานชั่วคราว" — โค้ด/ตรรกะทั้งหมด (SYMBOL_ALIASES, TD_SYMBOL_MAP, per-symbol
+# config override ฯลฯ) ยังอยู่ครบ แค่บล็อกไม่ให้เลือกใช้ผ่าน /order /trend ตอนนี้เท่านั้น เผื่อวันหลัง
+# อยากกลับมาเปิดใช้ใหม่ แค่ลบ symbol ออกจากเซ็ตนี้ ไม่ต้องเขียนโค้ดใหม่เลย (ตามที่ขอ "ซ่อนไว้ก่อน")
+DISABLED_SYMBOLS = {"ETHUSDT"}
+
 # --- คำสั่งที่รับ argument เลือกคู่เงินได้ (เช่น "/order eth", "/trend gold", หรือพิมพ์ติดกัน
-# "/ordereth" "/trendgold") ส่วนคำสั่งอื่น (/news /status /summary /stats) ยังผูกกับคู่เงินหลักของ
-# instance เหมือนเดิม ไม่รับ argument — เพิ่มคำสั่งใหม่เข้าชุดนี้ได้เลยถ้าอยากให้เลือกคู่เงินได้ด้วย
+# "/ordereth" "/trendgold") ส่วนคำสั่งอื่น (/news /status) ยังผูกกับคู่เงินหลักของ instance เหมือนเดิม
+# ไม่รับ argument — เพิ่มคำสั่งใหม่เข้าชุดนี้ได้เลยถ้าอยากให้เลือกคู่เงินได้ด้วย
 SYMBOL_AWARE_COMMANDS = {"order", "trend"}
 
 # --- display symbol -> label สั้นๆ ที่ใช้ขึ้นหัวข้อความตอบกลับ ให้เห็นชัดว่าผลลัพธ์นี้ของคู่เงินไหน
@@ -100,18 +104,25 @@ def _resolve_symbol_arg(args, default_symbol):
     ผ่าน SYMBOL_ALIASES ไม่ใส่ argument เลย (เช่น "/order" เฉยๆ) -> ใช้ default_symbol ของ instance นี้
     เหมือนพฤติกรรมเดิมทุกประการ (ไม่ breaking change สำหรับคนที่ยังพิมพ์ /order เฉยๆ อยู่)
 
-    คืนค่า (symbol, None) ถ้าแปลงได้ หรือ (None, ข้อความอธิบาย) ถ้าพิมพ์คู่เงินที่ไม่รู้จัก — เอาไป
-    _reply() ตรงๆ ได้เลยแทนที่จะโยน error"""
+    เช็ค DISABLED_SYMBOLS ก่อนเสมอ (แม้ default_symbol เองก็เช็คด้วย เผื่อวันหลัง default ไปเป็นคู่เงิน
+    ที่ปิดใช้งานอยู่โดยไม่ตั้งใจ) — คืนข้อความอธิบายที่ต่างจากกรณี "ไม่รู้จักคู่เงินเลย" ให้ชัดว่าปิดไว้
+    ชั่วคราว ไม่ใช่ไม่มีคู่เงินนี้ในระบบ
+
+    คืนค่า (symbol, None) ถ้าแปลงได้ หรือ (None, ข้อความอธิบาย) ถ้าพิมพ์คู่เงินที่ไม่รู้จัก/ปิดใช้งานอยู่
+    — เอาไป _reply() ตรงๆ ได้เลยแทนที่จะโยน error"""
     if not args:
+        if default_symbol in DISABLED_SYMBOLS:
+            return None, f"คู่เงินหลักของบอทตอนนี้ ({_symbol_label(default_symbol)}) ปิดใช้งานชั่วคราวอยู่ครับ"
         return default_symbol, None
     key = args[0].lower()
     resolved = SYMBOL_ALIASES.get(key)
+    if resolved and resolved in DISABLED_SYMBOLS:
+        return None, f"{_symbol_label(resolved)} ปิดใช้งานชั่วคราวอยู่ครับ (โฟกัสที่ GOLD (XAUUSD) ก่อน)"
     if resolved:
         return resolved, None
     return None, (
         f"ไม่รู้จักคู่เงิน \"{args[0]}\" ครับ ตอนนี้รองรับ:\n"
         f"  /order gold — XAUUSD\n"
-        f"  /order eth — ETHUSDT\n"
         f"  /order (ไม่ใส่คำต่อท้าย) — คู่เงินหลักของบอทตอนนี้"
     )
 
@@ -694,39 +705,16 @@ def _cmd_status(ctx):
     return "\n".join(lines)
 
 
-def _cmd_summary(ctx):
-    config = ctx["config"]
-    symbol = ctx["symbol"]
-    current_price = ctx["df_ind"]["close"].iloc[-1]
-    bucket = config["kvdb_bucket"]
-    # เช็ค pending -> running/expired ก่อนเสมอ (แผน Set & Forget อย่างแผนที่ 5-8) ให้ dashboard ตรง
-    # กับสถานะจริงล่าสุด ไม่ใช่รอให้มีคนพิมพ์ /order ซ้ำถึงจะขยับสถานะ
-    update_pending_orders(bucket, symbol, current_price, config.get("spread_buffer", 0.0))
-    orders = update_orders_status(bucket, symbol, current_price)
-    return build_orders_dashboard(symbol, orders, current_price)
-
-
-def _cmd_stats(ctx):
-    """แสดง win rate/expectancy แยกรายแผน จากออเดอร์ที่ปิดแล้วทั้งหมดใน Order Dashboard"""
-    config = ctx["config"]
-    symbol = ctx["symbol"]
-    current_price = ctx["df_ind"]["close"].iloc[-1]
-    bucket = config["kvdb_bucket"]
-    update_pending_orders(bucket, symbol, current_price, config.get("spread_buffer", 0.0))
-    orders = update_orders_status(bucket, symbol, current_price)
-    stats = calc_stats(orders)
-    return build_stats_message(symbol, stats)
-
-
 # หมายเหตุ: /order1-8 และ /confirm1-4 ถูกรวมเป็น /order เดียวแล้ว (เช็คทั้ง 8 แผนพร้อมกันในรอบเดียว
 # ไม่มี Confirm อีกต่อไป) คำสั่งเก่าที่ไม่รู้จักจะถูกเมินเงียบๆ ตามพฤติกรรมปกติของ handle_telegram_commands()
+# /summary และ /stats ถูกถอดออกตามที่ขอ (ไม่มีคนใช้ รกโค้ด) — หมายเหตุ: การบันทึกออเดอร์อัตโนมัติของฝั่ง
+# cron (main.py/plan_runner.py) ยังทำงานตามปกติเหมือนเดิมทุกประการ ไม่ได้ตัดออกไปด้วย (คนละส่วนกัน
+# — /summary /stats แค่เป็น "หน้าต่างดูข้อมูลที่บันทึกไว้" ผ่าน Telegram เท่านั้น ไม่ใช่ตัวบันทึกเอง)
 COMMAND_HANDLERS = {
     "order": _cmd_order_all,
     "trend": _cmd_trend,
     "news": _cmd_news,
     "status": _cmd_status,
-    "summary": _cmd_summary,
-    "stats": _cmd_stats,
 }
 
 

@@ -22,12 +22,56 @@ from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
-from orders import add_order, update_orders_status, update_pending_orders, build_orders_dashboard
+from orders import add_order, update_orders_status, update_pending_orders, build_orders_dashboard, load_orders
 import plan_runner
+import ai_layer
 from news_scheduler import (
     refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning,
     check_and_send_post_news_result, is_in_news_blackout,
 )
+
+
+def _get_recent_active_plans(bucket, symbol, window_minutes):
+    """อ่านออเดอร์ที่ Strategy (Plan 1-8) เพิ่งสร้างไว้ใน orders.py ภายใน window_minutes นาทีที่ผ่านมา
+    แปลงเป็น active_plans list ให้ Central AI Layer ดู — เป็นวิธี "อ่านอย่างเดียว" (read-only) จาก
+    Signal Memory ที่มีอยู่แล้ว ไม่ได้ไปแก้ Plan 1-8 หรือ orders.py แม้แต่บรรทัดเดียว (ตามหลักการ
+    ห้ามเปลี่ยน Logic เดิม) ใช้เวลาสร้างออเดอร์จริง (created_at_iso ถ้ามี, ไม่งั้น parse จาก id) เทียบ
+    เวลาปัจจุบัน — ไม่ใช่แค่ดูว่า status เป็นอะไร เพราะออเดอร์เก่าที่ยัง 'running'/'pending' ค้างอยู่
+    จากหลายชั่วโมงก่อนไม่ควรถูกนับว่า 'active ในรอบนี้' อีก (จะทำให้ AI ถูกเรียกซ้ำเรื่อยๆ ทั้งที่ไม่มี
+    อะไรใหม่เกิดขึ้นจริง)"""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=window_minutes)
+    result = []
+
+    for o in load_orders(bucket, symbol):
+        created_at = None
+        if o.get("created_at_iso"):
+            try:
+                created_at = datetime.fromisoformat(o["created_at_iso"])
+            except Exception:
+                created_at = None
+        if created_at is None:
+            # เดิม (แผน 1-4) ไม่มี created_at_iso — parse เอาจาก id: "{symbol}_{YYYYMMDDHHMMSSffffff}"
+            try:
+                ts_part = o["id"].split("_", 1)[1]
+                created_at = datetime.strptime(ts_part, "%Y%m%d%H%M%S%f").replace(tzinfo=timezone.utc)
+            except Exception:
+                continue  # parse ไม่ได้จริงๆ ข้ามออเดอร์นี้ไป ไม่ใช่ตัวบล็อกทั้งระบบ
+
+        if created_at < cutoff:
+            continue
+
+        take_profits = o.get("take_profits") or {}
+        tp = take_profits.get("TP1") or (next(iter(take_profits.values())) if take_profits else None)
+        result.append({
+            "plan": o.get("plan"),
+            "direction": o.get("direction"),
+            "entry": o.get("entry_price"),
+            "sl": o.get("stop_loss"),
+            "tp": tp,
+            "rr": o.get("rr_tp1"),
+        })
+    return result
 
 
 def _current_hour_key():
@@ -490,6 +534,46 @@ if __name__ == "__main__":
 
             # --- กลุ่ม B (Flag Pattern — เดิมต้องพิมพ์ /order8 เองเท่านั้น) ---
             plan_runner.check_flag_pattern_trigger(df, CONFIG, display_symbol)
+
+            # --- Central AI Second Opinion Layer (Choice B) ---
+            # เช็คหลังแผน 1-8 ครบแล้วเท่านั้น (จุดเดียว ไม่แตะ Plan 1-8 หรือ orders.py เลย) อ่านออเดอร์
+            # ที่ Strategy เพิ่งสร้างไว้แบบ read-only แล้วส่งให้ AI ให้ความเห็นเสริม "1 ครั้งต่อรอบ"
+            # เท่านั้น (ai_layer.analyze_market_state เป็นจุดเรียก Claude API จุดเดียวในทั้งระบบ) และ
+            # แค่ตอนมีอะไรใหม่ให้ดูจริงๆ (มีแผน active ในรอบนี้ + สถานการณ์เปลี่ยนจากที่เคยวิเคราะห์ไปแล้ว
+            # + อยู่ในช่วงเวลาที่อนุญาต) — ห่อด้วย try/except เสมอ: AI พังต้องไม่กระทบ Strategy Alert
+            # ที่ส่งไปแล้วด้านบน (จบไปแล้วก่อนถึงจุดนี้ ไม่ขึ้นกับส่วนนี้เลย)
+            try:
+                if CONFIG.get("ai_analysis_enabled", True) and ai_layer.is_within_ai_time_window(CONFIG):
+                    active_plans = _get_recent_active_plans(
+                        CONFIG["kvdb_bucket"], display_symbol,
+                        CONFIG.get("ai_recent_signal_window_minutes", 10),
+                    )
+                    if active_plans:
+                        # คำนวณ indicator/structure สดใหม่ตรงนี้ (ในหน่วยความจำล้วนๆ ไม่ยิง API เพิ่ม)
+                        # แทนที่จะพึ่งพาตัวแปรจาก run_pipeline() ด้านบน เพราะ structure/entry_signal
+                        # เป็นตัวแปร local ภายในฟังก์ชันนั้น ดึงออกมาใช้ตรงนี้ไม่ได้
+                        df_ind_ai = add_indicators(df, CONFIG)
+                        structure_ai = analyze_structure(df_ind_ai, CONFIG)
+                        market_context = {
+                            "current_price": round(float(df_ind_ai["close"].iloc[-1]), 3),
+                            "htf_bias": bias_4h.get("trend") if bias_4h else None,
+                            "trend_1h": higher_tf_trend,
+                            "trend_15m": structure_ai.get("trend"),
+                            "structure_event": structure_ai.get("event"),
+                            "rsi": round(float(df_ind_ai["rsi"].iloc[-1]), 1)
+                            if "rsi" in df_ind_ai.columns else None,
+                            "macd_hist": round(float(df_ind_ai["macd_hist"].iloc[-1]), 4)
+                            if "macd_hist" in df_ind_ai.columns else None,
+                            "adx": round(float(df_ind_ai["adx"].iloc[-1]), 1)
+                            if "adx" in df_ind_ai.columns else None,
+                        }
+                        ai_payload = ai_layer.analyze_market_state(
+                            display_symbol, active_plans, market_context, CONFIG
+                        )
+                        for ai_msg in ai_layer.format_ai_telegram_messages(display_symbol, ai_payload):
+                            send_telegram_alert(CONFIG["telegram_token"], CONFIG["telegram_chat_id"], ai_msg)
+            except Exception as e:
+                print(f"[AI Layer Error] {display_symbol}: {e}")
 
             # หมายเหตุ: การตอบคำสั่ง Telegram (/order /trend /news /status /summary /stats) ย้ายไปทำที่
             # run_bot.py บน Render แล้ว (รันแบบ polling loop ตลอดเวลา ตอบเร็วกว่านี้มาก)

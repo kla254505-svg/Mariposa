@@ -71,6 +71,23 @@ CONFIG = {
     "healthchecks_url": os.environ.get("HEALTHCHECKS_URL", ""),
     "kvdb_bucket": os.environ.get("KVDB_BUCKET", ""),
 
+    # --- Central AI Second Opinion Layer (Choice B) — ดู ai_layer.py ---
+    "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY", "").strip(),
+    "ai_model": os.environ.get("AI_MODEL", "claude-sonnet-5").strip(),
+    "ai_analysis_enabled": os.environ.get("AI_ANALYSIS_ENABLED", "true").strip().lower() != "false",
+    # เวลาที่อนุญาตให้เรียก AI เท่านั้น (จ-ศ 10:00-22:00 เวลาไทย) — คุมเฉพาะ AI Layer ไม่เกี่ยวกับ
+    # Strategy (Plan 1-8) ที่ยังทำงาน 24/7 เหมือนเดิมทุกประการ ห้ามเอาไปใช้ gate Strategy เด็ดขาด
+    "ai_time_filter_days": {0, 1, 2, 3, 4},  # Mon=0 ... Sun=6 (ตาม datetime.weekday())
+    "ai_time_filter_hours": (10, 22),
+    # กันเรียก AI ถี่เกินไปแม้ state จะเปลี่ยนบ่อยผิดปกติ (เช่น เผื่อ cron รันซ้อนกัน) — ตั้งไว้ "สั้น
+    # กว่า" ความถี่ cron จริง (5 นาที) เสมอ ไม่งั้นจะไปบล็อกสัญญาณใหม่ที่เกิดขึ้นจริงในรอบถัดไปโดยไม่
+    # ตั้งใจ (เจอบั๊กนี้จริงตอนเทส: ตั้งไว้ 10 นาทีแล้ว Plan ใหม่ที่เกิดขึ้นในรอบถัดไป — ห่างจากครั้งก่อน
+    # แค่ 5 นาที — ถูกกันไม่ให้ AI วิเคราะห์ไปด้วย ทั้งที่ state เปลี่ยนจริงและควรแจ้งเตือน)
+    "ai_cooldown_minutes": 2,
+    # ออเดอร์ที่ถูกสร้าง (โดย Strategy ผ่าน orders.py) ภายในกี่นาทีที่ผ่านมา ถือว่า "active ในรอบนี้"
+    # สำหรับส่งให้ Central AI ดู — ตั้งไว้มากกว่าความถี่ cron จริง (5 นาที) เผื่อ cron รันช้า/คลาดเคลื่อน
+    "ai_recent_signal_window_minutes": 10,
+
 
 }
 
