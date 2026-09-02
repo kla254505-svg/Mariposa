@@ -4,3 +4,5 @@ requests
 matplotlib
 flask
 gunicorn
+gspread
+google-auth

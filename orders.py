@@ -5,6 +5,21 @@ from kvstore import kv_get, kv_set
 from tp import calc_risk_reward
 
 ORDERS_KEY_PREFIX = "open_orders"
+
+
+def _log_to_sheets(order, symbol):
+    """เรียก sheets_log.py แบบกันเหนียวสุดขีด — ทั้ง import และเรียกฟังก์ชันห่อด้วย try/except ที่นี่
+    อีกชั้น แม้ sheets_log.py เองจะไม่โยน exception ออกมาอยู่แล้วก็ตาม (defense in depth) เพราะจุดนี้
+    คือ Signal Lifecycle หลักของ Strategy (add_order/add_pending_order/update_*) ต้องไม่มีทางถูกทำให้
+    พังได้จากฟีเจอร์เสริมอย่าง Google Sheets Logging เด็ดขาด ไม่ว่าจะกรณีไหนก็ตาม (เช่น ยังไม่ได้ติดตั้ง
+    gspread บนเครื่องที่รัน, ไฟล์ sheets_log.py หาย ฯลฯ)"""
+    try:
+        import sheets_log
+        sheets_log.log_signal(order, symbol)
+    except Exception as e:
+        print(f"[Order Tracking] เรียก Sheets Log ไม่สำเร็จ (ไม่กระทบการทำงานหลัก): {e}")
+
+
 # pending: Set & Forget วาง limit ไว้ล่วงหน้า ยังไม่ fill จริง (แผน 5-8) — ไม่นับ win/loss จนกว่าจะ
 # เปลี่ยนเป็น running ก่อน (ราคามาถึง entry จริง) กันสถิติเพี้ยนจากออเดอร์ที่ไม่เคยเข้าไม้จริง
 # expired: pending ที่ราคาไม่มาถึง entry ภายในเวลาที่กำหนด (พลาดโอกาส) ก็ไม่นับ win/loss เหมือนกัน
@@ -103,6 +118,7 @@ def add_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, s
         print(f"[Order Tracking Error] บันทึกออเดอร์ (symbol={symbol}, plan={plan}) ลง kvdb ไม่สำเร็จ "
               f"แม้ retry แล้ว — ออเดอร์นี้จะไม่ถูกนับในสถิติที่บันทึกไว้")
         return None
+    _log_to_sheets(order, symbol)
     return order
 
 
@@ -164,6 +180,7 @@ def add_pending_order(bucket, symbol, direction, entry_price, stop_loss, take_pr
         print(f"[Order Tracking Error] บันทึก pending order (symbol={symbol}, plan={plan}) ลง kvdb "
               f"ไม่สำเร็จ แม้ retry แล้ว — ออเดอร์นี้จะไม่ถูกนับในสถิติที่บันทึกไว้")
         return None
+    _log_to_sheets(order, symbol)
     return order
 
 
@@ -191,6 +208,7 @@ def update_pending_orders(bucket, symbol, current_price, spread_buffer=0.0):
     """
     orders = load_orders(bucket, symbol)
     changed = False
+    changed_orders = []
     now = datetime.now(timezone.utc)
 
     for o in orders:
@@ -204,6 +222,7 @@ def update_pending_orders(bucket, symbol, current_price, spread_buffer=0.0):
                 if now >= expires_at:
                     o["status"] = "expired"
                     changed = True
+                    changed_orders.append(o)
                     continue
             except Exception:
                 pass  # parse ไม่ได้ (ข้อมูลเก่า/เพี้ยน) ถือว่ายังไม่หมดอายุ ปล่อยให้เช็ค fill ต่อไป
@@ -222,11 +241,14 @@ def update_pending_orders(bucket, symbol, current_price, spread_buffer=0.0):
             o["status"] = "running"
             o["filled_at"] = now.strftime("%H:%M")
             changed = True
+            changed_orders.append(o)
 
     if changed:
         if not save_orders(bucket, symbol, orders):
             print(f"[Order Tracking Error] บันทึกสถานะ pending->running/expired (symbol={symbol}) "
                   f"ลง kvdb ไม่สำเร็จ — ผลลัพธ์ที่เพิ่งเปลี่ยนอาจหายไปตอน process นี้ปิดตัว")
+        for o in changed_orders:
+            _log_to_sheets(o, symbol)
 
     return orders
 
@@ -240,6 +262,7 @@ def update_orders_status(bucket, symbol, current_price):
     """
     orders = load_orders(bucket, symbol)
     changed = False
+    changed_orders = []
 
     for o in orders:
         if o["status"] != "running":
@@ -253,21 +276,27 @@ def update_orders_status(bucket, symbol, current_price):
             if tp1 is not None and current_price >= tp1:
                 o["status"] = "win"
                 changed = True
+                changed_orders.append(o)
             elif current_price <= sl:
                 o["status"] = "loss"
                 changed = True
+                changed_orders.append(o)
         else:  # bearish
             if tp1 is not None and current_price <= tp1:
                 o["status"] = "win"
                 changed = True
+                changed_orders.append(o)
             elif current_price >= sl:
                 o["status"] = "loss"
                 changed = True
+                changed_orders.append(o)
 
     if changed:
         if not save_orders(bucket, symbol, orders):
             print(f"[Order Tracking Error] บันทึกสถานะ win/loss ที่เปลี่ยนไป (symbol={symbol}) ลง kvdb "
                   f"ไม่สำเร็จ — ผลลัพธ์ที่เพิ่งเปลี่ยนอาจหายไปตอน process นี้ปิดตัว")
+        for o in changed_orders:
+            _log_to_sheets(o, symbol)
 
     return orders
 

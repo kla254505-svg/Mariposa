@@ -284,9 +284,9 @@ def _load_orders_safe(bucket, symbol):
 
 def _append_ai_log(memory, symbol, events, ai_result):
     """เก็บประวัติการวิเคราะห์แต่ละครั้งแบบ append (ไม่ overwrite ของเก่าทิ้ง) ตามหลักการ 'ห้าม
-    overwrite historical AI analysis' — เก็บแบบ bounded (ล่าสุด AI_LOG_MAX_ENTRIES รายการ) ไม่ใช่ระบบ
-    Log แยกฐานข้อมูล (เกินสโคปเฟสนี้ตามสเปก ห้ามแตะ Google Sheets/Data Layer) แต่ยังคงประวัติไว้พอให้
-    ตรวจสอบย้อนหลังได้ภายใน kvdb เดิมที่มีอยู่แล้ว ไม่สร้างระบบเก็บข้อมูลใหม่"""
+    overwrite historical AI analysis' — เก็บแบบ bounded (ล่าสุด AI_LOG_MAX_ENTRIES รายการ) ใน kvdb
+    (Runtime Memory) สำหรับ /aicheck อ่านแบบเร็วๆ โดยไม่ต้องยิง Google Sheets API — ประวัติแบบเต็ม/
+    ไม่จำกัดจำนวนอยู่ใน Google Sheets AI_Log แทน (ดู _log_ai_to_sheets ด้านล่าง เขียนคู่ขนานกัน)"""
     log = memory.get("ai_log", [])
     log.append({
         "at": datetime.now(timezone.utc).isoformat(),
@@ -296,6 +296,20 @@ def _append_ai_log(memory, symbol, events, ai_result):
         "confidence": ai_result.get("confidence"),
     })
     memory["ai_log"] = log[-AI_LOG_MAX_ENTRIES:]
+
+
+def _log_ai_to_sheets(active_plans, events, ai_result, config, ai_status, error_message):
+    """เรียก sheets_log.py แบบกันเหนียวสุดขีด (เหมือน orders.py._log_to_sheets) — ไม่ให้ Google Sheets
+    Logging (ฟีเจอร์เสริม) มีทางทำให้ Central AI Layer (ฟีเจอร์หลักของไฟล์นี้) พังได้เลยไม่ว่ากรณีไหน"""
+    try:
+        import sheets_log
+        signal_ids = [p.get("id") for p in (active_plans or []) if p.get("id")]
+        sheets_log.log_ai_analysis(
+            signal_ids, events, ai_result, config.get("ai_model", "claude-sonnet-5"),
+            ai_status=ai_status, error_message=error_message,
+        )
+    except Exception as e:
+        print(f"[AI Layer] เรียก Sheets Log (AI_Log) ไม่สำเร็จ (ไม่กระทบการทำงานหลัก): {e}")
 
 
 def detect_events(symbol, config, market_context, current_price, memory=None):
@@ -333,6 +347,16 @@ def detect_events(symbol, config, market_context, current_price, memory=None):
         if prev_status is None and status in ("pending", "running"):
             events.add("NEW_SIGNAL")
             just_transitioned = True
+            # บันทึก Market Snapshot ลง Google Sheets (Signal_Context) ตอนที่เพิ่งเกิด Signal ใหม่นี่
+            # แหละคือจังหวะที่ถูกต้องที่สุด (ภาพตลาด ณ ตอนนั้นจริงๆ) — Signal_Log (Signal ID เอง) ถูก
+            # บันทึกแยกต่างหากแล้วที่ orders.py (_log_to_sheets ใน add_order/add_pending_order) ไม่ต้อง
+            # ทำซ้ำที่นี่ กันเขียนซ้ำ 2 รอบโดยไม่จำเป็น — ห่อ try/except กันเหนียว (ดูเหตุผลเดียวกับ
+            # _log_ai_to_sheets ด้านบน: ฟีเจอร์เสริมต้องไม่มีทางทำให้ Event Detection หลักพังได้)
+            try:
+                import sheets_log
+                sheets_log.log_signal_context(oid, symbol, market_context)
+            except Exception as e:
+                print(f"[AI Layer] เรียก Sheets Log (Signal_Context) ไม่สำเร็จ (ไม่กระทบการทำงานหลัก): {e}")
         elif prev_status == "pending" and status == "running":
             events.add("ENTRY_HIT")
             just_transitioned = True
@@ -347,7 +371,7 @@ def detect_events(symbol, config, market_context, current_price, memory=None):
             take_profits = o.get("take_profits") or {}
             tp = take_profits.get("TP1") or (next(iter(take_profits.values())) if take_profits else None)
             active_plans.append({
-                "plan": o.get("plan"), "direction": o.get("direction"),
+                "id": oid, "plan": o.get("plan"), "direction": o.get("direction"),
                 "entry": o.get("entry_price"), "sl": o.get("stop_loss"), "tp": tp,
                 "rr": o.get("rr_tp1"), "signal_state": status,
             })
@@ -391,8 +415,9 @@ def detect_events(symbol, config, market_context, current_price, memory=None):
 
 def run_central_ai_cycle(symbol, config, market_context, current_price, manual_recheck=False):
     """จุดเรียกหลักจาก main.py (แทนที่การเรียก analyze_market_state() ตรงๆ) — ตรวจ Event ก่อนเสมอ
-    (detect_events) แล้วค่อยตัดสินใจว่าควรเรียก AI ไหม บันทึก event-tracking memory ไว้ทุกครั้งไม่ว่า
-    จะเรียก AI จริงหรือไม่ (กัน diff รอบถัดไปพลาด) ไม่โยน exception ออกไปเลย
+    (detect_events, ซึ่ง log Signal_Context ไป Google Sheets ให้เองตอนเจอ NEW_SIGNAL ด้วย) แล้วค่อย
+    ตัดสินใจว่าควรเรียก AI ไหม บันทึก event-tracking memory ไว้ทุกครั้งไม่ว่าจะเรียก AI จริงหรือไม่
+    (กัน diff รอบถัดไปพลาด) ไม่โยน exception ออกไปเลย
 
     manual_recheck=True: บังคับให้ถือว่ามี event "MANUAL_RECHECK" เพิ่ม แม้ detect_events จะไม่เจอ
     อะไรเปลี่ยนเลยก็ตาม (ยังต้องมี active_plans อย่างน้อย 1 อันอยู่ดีถึงจะเรียก AI จริง — ไม่มีอะไรให้
@@ -473,10 +498,12 @@ def analyze_market_state(symbol, active_plans, market_context, config, events=No
             memory["last_ai_analysis"] = ai_result
             _append_ai_log(memory, symbol, events, ai_result)
             _save_ai_memory(bucket, symbol, memory)
+            _log_ai_to_sheets(active_plans, events, ai_result, config, "SUCCESS", None)
             return {"ai_result": ai_result, "active_plans": active_plans, "ai_state": "ANALYZED"}
 
         _save_ai_memory(bucket, symbol, memory)
         print(f"[AI Layer] {symbol}: เรียก AI ไม่สำเร็จ ({ai_state}): {error}")
+        _log_ai_to_sheets(active_plans, events, None, config, ai_state, error)
         return {"error": error, "ai_state": ai_state}
 
     except Exception as e:
