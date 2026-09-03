@@ -185,7 +185,11 @@ def log_signal(order, symbol, timeframe="15m"):
         if cell:
             ws.update(f"A{cell.row}:Y{cell.row}", [row_values], value_input_option="USER_ENTERED")
         else:
-            ws.append_row(row_values, value_input_option="USER_ENTERED")
+            # table_range="A1" บังคับให้ Google Sheets รู้ว่าตารางจริงเริ่มที่คอลัมน์ A เสมอ — ถ้าไม่ระบุ
+            # Sheets API จะเดาตำแหน่งตารางจากข้อมูลที่กว้างที่สุดในชีตทั้งแผ่น เจอปัญหาจริงตอนใช้งาน:
+            # ข้อมูลหลงไปเขียนไกลออกไปทางขวาเรื่อยๆ ทบกันไปเรื่อยๆ ทุกครั้งที่ append (ดูเหมือน "เดิน
+            # ขวาไปเรื่อยๆ" ไม่กลับมาคอลัมน์ A) เพราะมันอิงตำแหน่งของรอบก่อนหน้าที่เคยเพี้ยนไปแล้ว
+            ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
         return True
     except Exception as e:
         print(f"[Sheets Log] บันทึก Signal_Log ไม่สำเร็จ ({order.get('id')}): {e}")
@@ -240,7 +244,8 @@ def log_signal_context(signal_id, symbol, market_context):
             "Trigger_Condition": None,
         }
         row_values = [row.get(h) for h in SIGNAL_CONTEXT_HEADERS]
-        ws.append_row(row_values, value_input_option="USER_ENTERED")
+        # table_range="A1" กันปัญหาเดียวกับ log_signal — บังคับให้ Sheets รู้ว่าตารางเริ่มที่ A เสมอ
+        ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
         return True
     except Exception as e:
         print(f"[Sheets Log] บันทึก Signal_Context ไม่สำเร็จ ({signal_id}): {e}")
@@ -288,7 +293,9 @@ def log_ai_analysis(signal_ids, events, ai_result, ai_model, ai_status="SUCCESS"
             }
             rows.append([row.get(h) for h in AI_LOG_HEADERS])
 
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        # table_range="A1" กันปัญหาเดียวกัน — นี่คือชีตที่เจอปัญหาข้อมูลเลื่อนขวาเรื่อยๆ จริงตามภาพ
+        # ที่ผู้ใช้ส่งมา บังคับ anchor กลับมาคอลัมน์ A เสมอ ไม่ปล่อยให้ Sheets เดาตำแหน่งเอง
+        ws.append_rows(rows, value_input_option="USER_ENTERED", table_range="A1")
         return True
     except Exception as e:
         print(f"[Sheets Log] บันทึก AI_Log ไม่สำเร็จ: {e}")
