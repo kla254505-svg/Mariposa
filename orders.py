@@ -6,6 +6,17 @@ from tp import calc_risk_reward
 
 ORDERS_KEY_PREFIX = "open_orders"
 
+# เวลาไทย (UTC+7) — ใช้เฉพาะฟิลด์ที่โชว์ให้คนอ่าน (opened_at/filled_at แบบ "HH:MM") เท่านั้น
+# ส่วน id/created_at_iso/expires_at_iso ยังคงเป็น UTC ตามเดิมโดยตั้งใจ (เทียบเวลากันตรงๆ ในโค้ดได้
+# ง่ายกว่า ไม่ต้องกังวลเรื่อง DST/timezone conversion ตอนเช็ค expiry) — บั๊กเดิมคือเอา UTC ไปโชว์ตรงๆ
+# ในฟิลด์ที่คนอ่าน (เจอจริง: Signal_Log คอลัมน์ Created_Time ขึ้น 15:30 แทนที่จะเป็น 22:30 เวลาไทย)
+_BANGKOK_TZ = timezone(timedelta(hours=7))
+
+
+def _bkk_hhmm(dt_utc):
+    """แปลง datetime (UTC) เป็น string HH:MM เวลาไทย สำหรับฟิลด์ที่โชว์ให้คนอ่าน"""
+    return dt_utc.astimezone(_BANGKOK_TZ).strftime("%H:%M")
+
 
 def _log_to_sheets(order, symbol):
     """เรียก sheets_log.py แบบกันเหนียวสุดขีด — ทั้ง import และเรียกฟังก์ชันห่อด้วย try/except ที่นี่
@@ -109,7 +120,7 @@ def add_order(bucket, symbol, direction, entry_price, stop_loss, take_profits, s
         "take_profits": {k: round(float(v), 3) for k, v in take_profits.items()},
         "rr_tp1": rr_tp1,
         "score": score,
-        "opened_at": datetime.now(timezone.utc).strftime("%H:%M"),
+        "opened_at": _bkk_hhmm(datetime.now(timezone.utc)),
         "status": "running",
     }
     orders.append(order)
@@ -169,7 +180,7 @@ def add_pending_order(bucket, symbol, direction, entry_price, stop_loss, take_pr
         "take_profits": {k: round(float(v), 3) for k, v in take_profits.items()},
         "rr_tp1": rr_tp1,
         "score": score,
-        "opened_at": now.strftime("%H:%M"),
+        "opened_at": _bkk_hhmm(now),
         "created_at_iso": now.isoformat(),
         "expires_at_iso": (now + timedelta(hours=expires_in_hours)).isoformat(),
         "status": "pending",
@@ -239,7 +250,7 @@ def update_pending_orders(bucket, symbol, current_price, spread_buffer=0.0):
         )
         if filled:
             o["status"] = "running"
-            o["filled_at"] = now.strftime("%H:%M")
+            o["filled_at"] = _bkk_hhmm(now)
             changed = True
             changed_orders.append(o)
 
