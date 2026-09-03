@@ -149,6 +149,9 @@ def run_plan_summary_cycle(bucket, symbol, config):
                     # ที่เหมาะสม (ที่ 3 ถ้ามีตัวจบแล้วอย่างน้อย 1 ตัว ไม่งั้นที่ 2)
                     _save_batch(bucket, symbol, prev_ids, current_snapshot)
                     any_resolved = any(o.get("status") in ("win", "loss", "expired") for o in batch_orders)
+                    print(f"[Plan Summary] {symbol}: batch เดิมมีสถานะเปลี่ยน -> ส่ง"
+                          f" {'ข้อความที่ 3 (ผลลัพธ์)' if any_resolved else 'ข้อความที่ 2 (สถานะเข้าไม้)'}"
+                          f" ({len(batch_orders)} แผน: {[o.get('plan') for o in batch_orders]})")
                     if any_resolved:
                         return [format_result_message(symbol, batch_orders)]
                     return [format_status_message(symbol, batch_orders)]
@@ -156,9 +159,15 @@ def run_plan_summary_cycle(bucket, symbol, config):
                 if not all_resolved:
                     # batch เดิมยังไม่มีอะไรเปลี่ยน และยังไม่จบครบทุกตัว — รอต่อ ยังไม่ไปมองหา
                     # batch ใหม่ (กันสลับความสนใจไปมาระหว่าง batch ที่ยังไม่จบ)
+                    print(f"[Plan Summary] {symbol}: batch เดิม ({len(batch_orders)} แผน) ยังไม่มี"
+                          f" อะไรเปลี่ยน ไม่ส่งซ้ำ (ids={prev_ids})")
                     return []
                 # ถ้า all_resolved แล้วและไม่มีอะไรเปลี่ยน (เคยส่งผลไปแล้วรอบก่อน) -> ตกไปหา batch
                 # ใหม่ด้านล่างต่อได้เลย
+                print(f"[Plan Summary] {symbol}: batch เดิมจบครบทุกตัวแล้ว กำลังมองหาชุดใหม่")
+            else:
+                print(f"[Plan Summary] {symbol}: batch เดิม (ids={prev_ids}) หาไม่เจอใน orders "
+                      f"ปัจจุบันเลยสักตัว (ข้อมูลอาจถูกล้าง) กำลังมองหาชุดใหม่")
 
         # ไม่มี batch เดิม หรือ batch เดิมจบครบแล้ว -> มองหาชุดใหม่จากแผนที่ยัง active อยู่ตอนนี้
         active = [o for o in all_orders if o.get("status") in ("pending", "running")]
@@ -166,10 +175,13 @@ def run_plan_summary_cycle(bucket, symbol, config):
         current_ids = [o["id"] for o in ranked if o.get("id")]
 
         if not current_ids:
+            print(f"[Plan Summary] {symbol}: ไม่มีแผน active เลยตอนนี้ (all_orders={len(all_orders)} รายการ)")
             return []  # ไม่มีแผน active เลยตอนนี้ ไม่มีอะไรต้องส่ง
 
         status_snapshot = {o["id"]: o.get("status") for o in ranked}
         _save_batch(bucket, symbol, current_ids, status_snapshot)
+        print(f"[Plan Summary] {symbol}: เจอชุดใหม่ {len(ranked)} แผน "
+              f"({[o.get('plan') for o in ranked]}) -> ส่งข้อความที่ 1")
         return [format_plan_list_message(symbol, ranked)]
 
     except Exception as e:

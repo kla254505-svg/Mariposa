@@ -63,9 +63,11 @@ STATUS_TO_SIGNAL_STATUS = {
 }
 STATUS_TO_RESULT = {"win": "WIN", "loss": "LOSS", "expired": "EXPIRED"}
 
+BANGKOK_TZ = timezone(timedelta(hours=7))
+
 
 def _now_bangkok():
-    return datetime.now(timezone(timedelta(hours=7)))
+    return datetime.now(BANGKOK_TZ)
 
 
 def _get_spreadsheet():
@@ -149,11 +151,23 @@ def log_signal(order, symbol, timeframe="15m"):
         elif status == "loss":
             r_multiple = -1.0
 
+        # Timestamp: pending order มี created_at_iso อยู่แล้ว (UTC, มาจาก orders.py ตั้งใจเก็บ UTC
+        # ไว้เทียบ expiry) ต้องแปลงเป็นเวลาไทย + format ให้เหมือนกับกรณีไม่มี (order ที่เพิ่งสร้างแบบ
+        # running ทันที) กันปัญหาคอลัมน์เดียวกันมีทั้ง UTC/ไทย ปนกันเหมือนที่เจอจริง
+        created_at_iso = order.get("created_at_iso")
+        if created_at_iso:
+            try:
+                timestamp_str = datetime.fromisoformat(created_at_iso).astimezone(BANGKOK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                timestamp_str = now_bkk.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            timestamp_str = now_bkk.strftime("%Y-%m-%d %H:%M:%S")
+
         row = {
             "Signal_ID": signal_id,
             "Created_Date": now_bkk.strftime("%Y-%m-%d"),
             "Created_Time": order.get("opened_at", now_bkk.strftime("%H:%M")),
-            "Timestamp": order.get("created_at_iso") or now_bkk.isoformat(),
+            "Timestamp": timestamp_str,
             "Symbol": symbol,
             "Plan_ID": _plan_id_short(order.get("plan")),
             "Direction": _direction_label(order.get("direction")),
@@ -169,7 +183,7 @@ def log_signal(order, symbol, timeframe="15m"):
             # หมายเหตุ: orders.py ยังไม่เก็บเวลา/ราคาที่ TP/SL ถูก trigger แบบละเอียด (เช็คจาก
             # current_price ทุก 5 นาที ไม่ tick-by-tick) — ใช้เวลาที่เพิ่ง log นี้ + ระดับ TP/SL ตามแผน
             # เป็นค่าประมาณ ไม่ใช่ราคา fill จริงเป๊ะ (ตามข้อจำกัดของระบบเช็คราคาแบบ polling ทุก 5 นาที)
-            "Exit_Time": now_bkk.isoformat() if status in ("win", "loss") else None,
+            "Exit_Time": now_bkk.strftime("%Y-%m-%d %H:%M:%S") if status in ("win", "loss") else None,
             "Exit_Price": (tp if status == "win" else order.get("stop_loss")) if status in ("win", "loss") else None,
             "Result": STATUS_TO_RESULT.get(status),
             "R_Multiple": r_multiple,
@@ -177,7 +191,7 @@ def log_signal(order, symbol, timeframe="15m"):
             "Cancel_Reason": None,
             "Telegram_Message_ID": None,  # ยังไม่ได้เชื่อม — notify.py ยังไม่ capture message_id กลับมา
             "Created_By": "BOT",
-            "Last_Updated": now_bkk.isoformat(),
+            "Last_Updated": now_bkk.strftime("%Y-%m-%d %H:%M:%S"),
         }
         row_values = [row.get(h) for h in SIGNAL_LOG_HEADERS]
 
@@ -211,7 +225,7 @@ def log_signal_context(signal_id, symbol, market_context):
 
         row = {
             "Signal_ID": signal_id,
-            "Snapshot_Time": now_bkk.isoformat(),
+            "Snapshot_Time": now_bkk.strftime("%Y-%m-%d %H:%M:%S"),
             "Symbol": symbol,
             "HTF_Bias": (market_context.get("htf_bias") or "").upper() or None,
             "Trend_4H": market_context.get("htf_bias"),

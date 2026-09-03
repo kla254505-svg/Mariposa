@@ -66,7 +66,9 @@ CONFIG = {
     # ตั้งเป็น True เมื่อไหร่ก็ได้ถ้าอยากได้ Push กลับมาเหมือนเดิม ไม่ต้องแก้โค้ดที่อื่นเลย
     "push_notifications_enabled": False,
     # ตัวนี้คุมว่าจะยิง Telegram Alert จริงหรือไม่ (ต่างจาก min_score_console_watchlist ด้านบนที่แค่ print console)
-    "min_score_to_alert": 45,
+    # ปรับจาก 45 -> 55 (3 ก.ย. 69) ทดสอบว่าคะแนนสูงขึ้นช่วยลดอัตราโดน SL ไหม (ของเดิม 45/120 ≈ 37.5%
+    # ผ่านง่ายไป โดน SL บ่อยตามที่สังเกตจริง) ถ้าลองแล้วยังไม่ดีขึ้นค่อยปรับใหม่ได้ ไม่ตายตัว
+    "min_score_to_alert": 55,
     "twelvedata_api_key": os.environ.get("TWELVEDATA_API_KEY", ""),
     "healthchecks_url": os.environ.get("HEALTHCHECKS_URL", ""),
     "kvdb_bucket": os.environ.get("KVDB_BUCKET", ""),
