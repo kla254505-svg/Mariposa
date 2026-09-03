@@ -5,7 +5,7 @@ import pandas as pd
 def fetch_binance(symbol="BTCUSDT", interval="15m", limit=500):
     url = "https://api.binance.com/api/v3/klines"
     params = dict(symbol=symbol.upper(), interval=interval, limit=limit)
-    resp = requests.get(url, params=params, timeout=15)
+    resp = requests.get(url, params=params, timeout=30)
     resp.raise_for_status()
     raw = resp.json()
 
@@ -21,7 +21,7 @@ def fetch_yahoo(symbol="GC=F", interval="15m", range_="5d"):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = dict(interval=interval, range=range_)
     headers = {"User-Agent": "Mozilla/5.0"}
-    resp = requests.get(url, params=params, headers=headers, timeout=15)
+    resp = requests.get(url, params=params, headers=headers, timeout=30)
     resp.raise_for_status()
     data = resp.json()
 
@@ -42,7 +42,15 @@ def fetch_yahoo(symbol="GC=F", interval="15m", range_="5d"):
 def fetch_twelvedata(symbol="XAU/USD", interval="15min", outputsize=300, api_key=""):
     url = "https://api.twelvedata.com/time_series"
     params = dict(symbol=symbol, interval=interval, outputsize=outputsize, apikey=api_key)
-    resp = requests.get(url, params=params, timeout=15)
+
+    # timeout เดิม 15 วิ สั้นไป เจอ "Read timed out" บ่อยตอน TwelveData ตอบช้า (โหลดสูง/เน็ตหน่วง) —
+    # เพิ่มเป็น 30 วิ + ลอง retry อีก 1 ครั้งถ้า timeout เพราะนี่คือราคาหลักที่ทุก plan ต้องใช้ร่วมกัน
+    # พังแล้วทั้งรอบ cron นั้นวิเคราะห์ไม่ได้เลย คุ้มที่จะลองซ้ำก่อนยอมแพ้
+    try:
+        resp = requests.get(url, params=params, timeout=30)
+    except requests.exceptions.Timeout:
+        resp = requests.get(url, params=params, timeout=30)
+
     resp.raise_for_status()
     data = resp.json()
 
