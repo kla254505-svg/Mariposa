@@ -86,11 +86,6 @@ DISABLED_SYMBOLS = {"ETHUSDT"}
 # ไม่รับ argument — เพิ่มคำสั่งใหม่เข้าชุดนี้ได้เลยถ้าอยากให้เลือกคู่เงินได้ด้วย
 SYMBOL_AWARE_COMMANDS = {"order", "trend"}
 
-# --- คำสั่งที่ตั้งใจให้ทำงานหนัก/ใช้เวลานานเป็นปกติ (ดึงข้อมูลหลาย timeframe + เรียก API ภายนอก
-# หลายเจ้า) — ได้รับการยกเว้นจากตัวกรอง STALE_MESSAGE_SECONDS และจะถูกตอบรับทันทีก่อนเริ่มทำงานจริง
-# (ดู run_polling_loop) ไม่งั้นจะโดนข้ามทิ้งเงียบๆ ตอนทำงานเกิน 90 วิ ทั้งที่ผู้ใช้เพิ่งกดสดๆ
-SLOW_COMMANDS = {"test"}
-
 # --- display symbol -> label สั้นๆ ที่ใช้ขึ้นหัวข้อความตอบกลับ ให้เห็นชัดว่าผลลัพธ์นี้ของคู่เงินไหน
 # (กันสับสนตอนสลับดู /order gold กับ /order eth ถี่ๆ ในแชทเดียวกัน) ---
 SYMBOL_DISPLAY_LABEL = {"XAUUSD": "GOLD (XAUUSD)", "ETHUSDT": "ETH (ETHUSDT)"}
@@ -382,59 +377,6 @@ def _plan_result(num, label, active, direction=None, score=None, breakdown=None,
     }
 
 
-def _build_recommendation(active_sorted, master_trend):
-    """สร้างบรรทัด "🎯 แนะนำ" สำหรับ /order — จัดอันดับจากข้อมูลที่คำนวณไว้แล้วเท่านั้น (คะแนน +
-    ทิศทางเทียบเทรนด์หลัก) ไม่ได้คิดตัวเลข Entry/SL/TP ใหม่ และไม่ได้เรียก AI — เป็นแค่การ "สรุปสิ่งที่
-    มีอยู่แล้วให้อ่านง่ายขึ้น" ตอบโจทย์เวลาหลายแผนขึ้นพร้อมกันแล้วไม่รู้จะเลือกอันไหน
-
-    ลำดับการตัดสิน (สำคัญ: ทิศทางมาก่อนคะแนนเสมอ):
-      1. ถ้ามีเทรนด์หลักชัดเจน -> เลือกเฉพาะแผนที่ "ตามเทรนด์หลัก" มาจัดอันดับก่อน แล้วเอาคะแนนสูงสุด
-         ในกลุ่มนั้น — เหตุผล: จากข้อมูลเทรดจริงที่วิเคราะห์ร่วมกัน ไม้ที่สวนเทรนด์หลักแพ้เยอะกว่าชัดเจน
-         (โดยเฉพาะ Plan 2 ที่แพ้ 5/5 และมีโน้ต "สวนเทรนด์" ติดมาด้วย) คะแนนสูงแต่สวนเทรนด์จึงไม่ควร
-         ถูกแนะนำเหนือแผนที่ตามเทรนด์
-      2. ถ้าไม่มีแผนไหนตามเทรนด์หลักเลย (active ทุกอันสวนเทรนด์) -> เตือนให้ระวังเป็นพิเศษ
-      3. ถ้าเทรนด์หลักเป็น sideway (ไม่มีทิศทางชัด) -> ใช้คะแนนล้วนๆ ตัดสิน พร้อมหมายเหตุกำกับ
-
-    คืนค่าเป็น list ของบรรทัดข้อความ (อาจว่างเปล่าถ้าไม่มีอะไรให้แนะนำ)"""
-    if not active_sorted:
-        return []
-
-    aligned = [r for r in active_sorted if master_trend and r["direction"] == master_trend]
-    against = [r for r in active_sorted if master_trend and r["direction"] != master_trend]
-    directions = {r["direction"] for r in active_sorted}
-    has_conflict = len(directions) > 1
-
-    lines = ["🎯 <b>แนะนำ</b>"]
-
-    if not master_trend:
-        top = active_sorted[0]
-        dir_th = "LONG" if top["direction"] == "bullish" else "SHORT"
-        lines.append(f"{top['label']} — {dir_th} (คะแนนสูงสุด {top['score']})")
-        lines.append("⚠️ ตอนนี้เทรนด์หลักเป็น Sideway ไม่มีทิศทางชัดเจน — ตัดสินจากคะแนนล้วนๆ "
-                     "ความน่าเชื่อถือต่ำกว่าปกติ ควรพิจารณาให้รอบคอบเป็นพิเศษ")
-        return lines
-
-    if aligned:
-        top = aligned[0]
-        dir_th = "LONG" if top["direction"] == "bullish" else "SHORT"
-        reason = "คะแนนสูงสุดในกลุ่มที่ตามเทรนด์หลัก" if len(aligned) > 1 else "ตามเทรนด์หลัก"
-        lines.append(f"{top['label']} — {dir_th} ({reason}, คะแนน {top['score']}) ⭐")
-        if has_conflict and against:
-            names = ", ".join(r["label"] for r in against)
-            lines.append(f"ข้ามแผนที่สวนเทรนด์หลักไปก่อน: {names} ⚠️")
-        elif len(aligned) > 1:
-            lines.append(f"(แผนที่เหลืออีก {len(aligned) - 1} แผนไปทางเดียวกัน = ยืนยันซึ่งกันและกัน "
-                         f"เลือกอันที่ RR ถูกใจได้เลย)")
-    else:
-        top = active_sorted[0]
-        dir_th = "LONG" if top["direction"] == "bullish" else "SHORT"
-        lines.append(f"⚠️ ทุกแผนที่เข้าเงื่อนไขตอนนี้ <b>สวนเทรนด์หลักทั้งหมด</b> — ถ้าจะเข้าจริง "
-                     f"ควรลดขนาดไม้/ระวังเป็นพิเศษ")
-        lines.append(f"อันที่คะแนนดีสุดคือ {top['label']} — {dir_th} (คะแนน {top['score']})")
-
-    return lines
-
-
 def _fmt_score_line(score, breakdown):
     if score is None:
         return "คะแนน: -"
@@ -666,10 +608,6 @@ def _cmd_order_all(ctx):
             score_text = r["score"] if r["score"] is not None else "-"
             lines.append(f"{r['num']}. {r['label']} — {direction_th} | คะแนน {score_text} {tag}".rstrip())
         lines.append("")
-        recommendation = _build_recommendation(active_sorted, master_trend)
-        if recommendation:
-            lines.extend(recommendation)
-            lines.append("")
         lines.append("💡 หมายเหตุ: คะแนนแผนที่ 1 คำนวณจากสูตร Confidence Score ละเอียดเฉพาะของแผนนั้น "
                       "(เต็ม ~120) ส่วนแผนที่ 2-8 คำนวณแบบทั่วไป (เต็ม 100) จากสัญญาณ+RR+ความสอดคล้อง "
                       "เทรนด์ — ใช้เทียบ \"ลำดับความน่าสนใจสัมพัทธ์\" ระหว่างแผน ไม่ใช่ % ความแม่นยำที่เทียบ"
@@ -793,6 +731,9 @@ def _cmd_aicheck(ctx):
         lines.append("📋 <b>ครั้งล่าสุดที่ Central AI Layer ทำงานจริง (ฝั่ง cron)</b>")
         lines.append(f"เวลา: {memory.get('last_ai_call_iso', '-')}")
         lines.append(f"สถานะ: {memory.get('ai_state', '-')}")
+        last_error = memory.get("last_error")
+        if last_error:
+            lines.append(f"⚠️ สาเหตุที่พัง: {last_error}")
         log = memory.get("ai_log") or []
         if log:
             lines.append(f"จำนวนครั้งที่วิเคราะห์สำเร็จ (เก็บย้อนหลังไว้): {len(log)} ครั้งล่าสุด")
@@ -993,6 +934,11 @@ def handle_telegram_commands(config, ctx):
         if not is_owner and not is_allowed_group:
             continue  # ไม่ใช่เจ้าของบอท และไม่ได้พิมพ์จากกลุ่มที่อนุญาต เมินคำสั่งนี้ทิ้งเงียบๆ
 
+        # ข้ามคำสั่งเก่าที่ค้างคิวมานาน (เช่นตอน Render suspend ไปนานแล้วเพิ่ง resume) ไม่ไล่ตอบย้อนหลัง
+        msg_age = time.time() - message.get("date", time.time())
+        if msg_age > STALE_MESSAGE_SECONDS:
+            continue
+
         text = (message.get("text") or "").strip()
         if not text.startswith("/"):
             continue
@@ -1002,19 +948,10 @@ def handle_telegram_commands(config, ctx):
         command = text_parts[0].lower()
         command_args = text_parts[1:]
         command, command_args = _normalize_order_shorthand(command, command_args)
-
-        # ข้ามคำสั่งเก่าที่ค้างคิวมานาน (เช่นตอน Render suspend ไปนานแล้วเพิ่ง resume) ไม่ไล่ตอบย้อนหลัง
-        # ยกเว้น SLOW_COMMANDS ที่ใช้เวลานานเป็นปกติ (ดูเหตุผลเต็มใน run_polling_loop ด้านล่าง)
-        msg_age = time.time() - message.get("date", time.time())
-        if msg_age > STALE_MESSAGE_SECONDS and command not in SLOW_COMMANDS:
-            continue
         handler = COMMAND_HANDLERS.get(command)
         chat_id = message["chat"]["id"]
 
         if handler:
-            # คำสั่งที่ใช้เวลานาน: ตอบรับทันทีก่อนเริ่มทำงานจริง (ดูเหตุผลใน run_polling_loop)
-            if command in SLOW_COMMANDS:
-                _reply(token, chat_id, "⏳ กำลังทดสอบระบบทั้งสาย... (อาจใช้เวลา 1-2 นาที)")
             try:
                 # /order และ /trend รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/trend eth")
                 # ดู SYMBOL_AWARE_COMMANDS — เหตุผลเดียวกับใน run_polling_loop() ด้านล่าง
@@ -1134,6 +1071,13 @@ def run_polling_loop(config, symbol="XAUUSD"):
                 if not is_owner and not is_allowed_group:
                     continue  # ไม่ใช่เจ้าของบอท และไม่ได้พิมพ์จากกลุ่มที่อนุญาต เมินเงียบๆ
 
+                # ข้ามคำสั่งเก่าที่ค้างคิวมาตั้งแต่ก่อน instance นี้เริ่ม (เช่นตอน resume จาก suspend)
+                # offset ยัง advance ปกติด้านบนแล้ว แค่ไม่ประมวลผล/ไม่ตอบกลับคำสั่งที่ตกยุคนี้
+                msg_age = time.time() - message.get("date", time.time())
+                if msg_age > STALE_MESSAGE_SECONDS:
+                    print(f"[Telegram Bot] ข้ามคำสั่งเก่า (อายุ {msg_age:.0f} วิ) — เกิน {STALE_MESSAGE_SECONDS} วิ")
+                    continue
+
                 text = (message.get("text") or "").strip()
                 if not text.startswith("/"):
                     continue
@@ -1142,31 +1086,10 @@ def run_polling_loop(config, symbol="XAUUSD"):
                 command = text_parts[0].lower()
                 command_args = text_parts[1:]
                 command, command_args = _normalize_order_shorthand(command, command_args)
-
-                # ข้ามคำสั่งเก่าที่ค้างคิวมาตั้งแต่ก่อน instance นี้เริ่ม (เช่นตอน resume จาก suspend)
-                # offset ยัง advance ปกติด้านบนแล้ว แค่ไม่ประมวลผล/ไม่ตอบกลับคำสั่งที่ตกยุคนี้
-                #
-                # ยกเว้นคำสั่งใน SLOW_COMMANDS (เช่น /test) ที่ตั้งใจให้ทำงานหนักและใช้เวลานานเป็นปกติ
-                # (ดึงข้อมูลหลาย timeframe + เช็ค 8 แผน + เรียก Claude API + เขียน Google Sheets) — บน
-                # Render แพลนฟรีมักเกิน 90 วิ โดยเฉพาะตอน service เพิ่งตื่นจาก sleep ทำให้เคยโดนตัวกรอง
-                # นี้ข้ามทิ้งเงียบๆ ไม่ตอบอะไรเลย ทั้งที่ผู้ใช้เพิ่งกดสดๆ (เจอปัญหานี้จริงตอนใช้งาน)
-                msg_age = time.time() - message.get("date", time.time())
-                if msg_age > STALE_MESSAGE_SECONDS and command not in SLOW_COMMANDS:
-                    print(f"[Telegram Bot] ข้ามคำสั่งเก่า (อายุ {msg_age:.0f} วิ) — เกิน {STALE_MESSAGE_SECONDS} วิ")
-                    continue
-
-                command = text_parts[0].lower()
-                command_args = text_parts[1:]
-                command, command_args = _normalize_order_shorthand(command, command_args)
                 handler = COMMAND_HANDLERS.get(command)
                 chat_id = message["chat"]["id"]
                 if not handler:
                     continue  # คำสั่งไม่รู้จัก เมินเงียบๆ
-
-                # คำสั่งที่ใช้เวลานาน: ตอบรับทันทีก่อนเริ่มทำงานจริง ให้ผู้ใช้รู้ว่าบอทได้รับคำสั่งแล้ว
-                # (ไม่งั้นจะเงียบเป็นนาที เข้าใจผิดว่าบอทพัง/ไม่ตอบสนอง)
-                if command in SLOW_COMMANDS:
-                    _reply(token, chat_id, "⏳ กำลังทดสอบระบบทั้งสาย... (อาจใช้เวลา 1-2 นาที)")
 
                 try:
                     # /order และ /trend รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/trend eth")

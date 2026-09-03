@@ -517,11 +517,15 @@ def analyze_market_state(symbol, active_plans, market_context, config, events=No
             # ค้างสถานะไว้เป็น "เหมือนวิเคราะห์ไปแล้ว" ทั้งที่จริงยังไม่สำเร็จ (รอบหน้าจะได้ลองใหม่ถ้า
             # state ยังต่างจาก last_state_hash เดิมอยู่)
             memory["last_ai_analysis"] = ai_result
+            memory["last_error"] = None  # เคลียร์ error เก่าทิ้งเมื่อรอบล่าสุดสำเร็จ
             _append_ai_log(memory, symbol, events, ai_result)
             _save_ai_memory(bucket, symbol, memory)
             _log_ai_to_sheets(active_plans, events, ai_result, config, "SUCCESS", None)
             return {"ai_result": ai_result, "active_plans": active_plans, "ai_state": "ANALYZED"}
 
+        # เก็บข้อความ error ไว้ใน memory ด้วย (เดิมแค่ print ไปที่ Render log อย่างเดียว มองไม่เห็นผ่าน
+        # Telegram) เพื่อให้ /aicheck ดึงมาโชว์ได้ตรงๆ ว่ารอบ cron ล่าสุดพังเพราะอะไร
+        memory["last_error"] = error
         _save_ai_memory(bucket, symbol, memory)
         print(f"[AI Layer] {symbol}: เรียก AI ไม่สำเร็จ ({ai_state}): {error}")
         _log_ai_to_sheets(active_plans, events, None, config, ai_state, error)
