@@ -206,8 +206,22 @@ def _call_claude_api(context_text, config):
     except requests.exceptions.RequestException as e:
         return None, "ERROR", f"เรียก Claude API ไม่สำเร็จ (network): {e}"
 
+    # 529 = Anthropic เซิร์ฟเวอร์โหลดสูงชั่วคราว (ปัญหาฝั่งเขา ไม่ใช่เรา) เจอจริงตอนใช้งาน — มักหาย
+    # เองภายในไม่กี่วินาที ต่างจาก error อื่นที่ retry ทันทีไม่ช่วย จึงคุ้มที่จะรอสั้นๆ แล้วลองซ้ำ 1 ครั้ง
+    # ก่อนยอมแพ้ (ไม่ retry วนไม่รู้จบ กันรอบ cron ค้างนานเกินไป)
+    if resp.status_code == 529:
+        time.sleep(5)
+        try:
+            resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=45)
+        except requests.exceptions.Timeout:
+            return None, "TIMEOUT", "เรียก Claude API timeout (หลัง retry จาก 529)"
+        except requests.exceptions.RequestException as e:
+            return None, "ERROR", f"เรียก Claude API ไม่สำเร็จ (network, หลัง retry จาก 529): {e}"
+
     if resp.status_code == 429:
         return None, "ERROR", "Claude API ตอบ 429 (rate limit) — จะลองใหม่รอบถัดไปที่ state เปลี่ยน"
+    if resp.status_code == 529:
+        return None, "ERROR", "Claude API ตอบ 529 (เซิร์ฟเวอร์ Anthropic โหลดสูงชั่วคราว) — ลอง retry แล้วยังโดนอยู่ จะลองใหม่รอบถัดไป"
     if resp.status_code != 200:
         return None, "ERROR", f"Claude API ตอบ HTTP {resp.status_code}: {resp.text[:200]}"
 
@@ -476,7 +490,7 @@ def run_central_ai_cycle(symbol, config, market_context, current_price, manual_r
         return {"error": str(e), "ai_state": "ERROR"}
 
 
-def analyze_market_state(symbol, active_plans, market_context, config, events=None):
+def analyze_market_state(symbol, active_plans, market_context, config, events=None, force=False):
     """จุดเรียกเดียวของ Central AI Layer ทั้งระบบ — เรียกจาก run_central_ai_cycle() ด้านล่างเท่านั้น
     (ซึ่ง main.py เรียกอีกที) หลังเช็คครบ 8 แผนแล้วเท่านั้น
 
@@ -485,6 +499,9 @@ def analyze_market_state(symbol, active_plans, market_context, config, events=No
     market_context: dict ข้อมูลตลาดปัจจุบัน (ดู _build_ai_context_text ด้านบนว่าใช้ field ไหนบ้าง)
     events: sorted list ของ event ที่ detect_events ตรวจเจอ (None = เรียกแบบไม่มี event system,
     เก็บไว้เพื่อ backward-compat กับตอนเรียกฟังก์ชันนี้ตรงๆ โดยไม่ผ่าน run_central_ai_cycle)
+    force: True = ข้ามทั้ง dedup (state ซ้ำเดิม) และ cooldown ไปเลย บังคับเรียก Claude API จริงเสมอ
+    ใช้เฉพาะตอนผู้ใช้กด /test เท่านั้น (คนละกรณีกับ manual_recheck ใน run_central_ai_cycle ซึ่งแค่เติม
+    event พิเศษเข้าไปแต่ยังต้องผ่าน dedup/cooldown ตามปกติ — force=True ข้ามด่านเหล่านั้นไปเลยจริงๆ)
 
     คืนค่า None ถ้า: ไม่มีแผน active เลย / state ไม่เปลี่ยนจากรอบก่อน (SKIPPED) / อยู่ใน cooldown
     คืนค่า dict {"ai_result":..., "active_plans":..., "ai_state": "ANALYZED"} ถ้าเรียก AI สำเร็จ
@@ -504,15 +521,16 @@ def analyze_market_state(symbol, active_plans, market_context, config, events=No
         normalized = _normalize_market_state(symbol, active_plans, market_context, events=events)
         current_hash = _compute_state_hash(normalized)
 
-        if memory.get("last_state_hash") == current_hash and memory.get("ai_state") == "ANALYZED":
+        if not force and memory.get("last_state_hash") == current_hash and memory.get("ai_state") == "ANALYZED":
             return None  # SKIPPED — state เดิมเป๊ะ เคยวิเคราะห์สำเร็จไปแล้ว ไม่เรียกซ้ำ
 
         # Cooldown กันเรียก AI ซ้อนกันเฉพาะกรณีผิดปกติ (เช่น cron รันซ้อน/เรียกถี่ผิดจังหวะ) — ต้อง
         # ตั้งค่าไว้ "สั้นกว่า" รอบ cron จริงเสมอ (ดูเหตุผลเต็มใน config.py: ai_cooldown_minutes) ไม่งั้น
         # จะไปกันสัญญาณใหม่ที่เกิดขึ้นจริงในรอบถัดไปด้วยโดยไม่ตั้งใจ — ไม่นับรวมตอน SKIPPED ด้านบน
+        # force=True (มาจาก /test) ข้ามด่านนี้ไปเลย ไม่งั้นกด /test ถี่ๆ จะโดนบล็อกทั้งที่ตั้งใจบังคับแล้ว
         cooldown_minutes = config.get("ai_cooldown_minutes", 2)
         last_call_iso = memory.get("last_ai_call_iso")
-        if last_call_iso:
+        if not force and last_call_iso:
             try:
                 last_call = datetime.fromisoformat(last_call_iso)
                 if datetime.now(timezone.utc) - last_call < timedelta(minutes=cooldown_minutes):

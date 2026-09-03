@@ -741,7 +741,7 @@ def _cmd_aicheck(ctx):
         lines.append("📋 Central AI Layer ยังไม่เคยถูกเรียกจริงเลย (ยังไม่มี Event ที่น่าสนใจเกิดขึ้น "
                       "ในช่วงเวลาที่อนุญาตให้ทำงานมาก่อน)")
 
-    hours = config.get("ai_time_filter_hours", (10, 22))
+    hours = config.get("ai_time_filter_hours", (12, 4))
     lines.append("")
     lines.append(f"ช่วงเวลาที่ AI ทำงาน: จ-ศ {hours[0]}:00-{hours[1]}:00 เวลาไทย")
     lines.append(f"เปิดใช้งานอยู่: {'ใช่' if config.get('ai_analysis_enabled', True) else 'ปิดอยู่'}")
@@ -859,7 +859,7 @@ def _cmd_test(ctx):
     lines.append("3️⃣ เรียก Claude API วิเคราะห์จริง (บังคับ ข้าม Event/cooldown)...")
 
     ai_payload = ai_layer.analyze_market_state(
-        symbol, active_plans, market_context, config, events=["MANUAL_RECHECK"]
+        symbol, active_plans, market_context, config, events=["MANUAL_RECHECK"], force=True
     )
 
     ai_ok = bool(ai_payload and ai_payload.get("ai_state") == "ANALYZED")
@@ -867,7 +867,7 @@ def _cmd_test(ctx):
         lines.append("   ✅ AI วิเคราะห์สำเร็จ (ผลเต็มอยู่ในข้อความถัดไป)")
         lines.append("   ✅ บันทึกลง Google Sheets (AI_Log) แล้ว — เช็คได้ในชีต")
     else:
-        err = (ai_payload or {}).get("error") if ai_payload else "state ซ้ำเดิม/ติด cooldown"
+        err = (ai_payload or {}).get("error") if ai_payload else "ไม่มีเหตุผลที่ชัดเจน (ไม่ควรเกิดขึ้นเมื่อ force=True — แจ้งทีมพัฒนาถ้าเจอ)"
         lines.append(f"   ❌ AI ไม่ได้วิเคราะห์: {err}")
 
     messages = ["\n".join(lines)]
@@ -1047,14 +1047,6 @@ def run_polling_loop(config, symbol="XAUUSD"):
 
             offset = (known_offset + 1) if known_offset is not None else None
             updates = _get_updates(token, offset=offset, timeout=30)
-
-            # long-poll รอบนี้ยิงสำเร็จ (ไม่ว่าจะมี update ใหม่มาไหมก็ตาม) — บันทึก heartbeat ให้
-            # Dashboard เห็นว่า loop นี้บน Render ยังวิ่งอยู่จริง ไม่ได้ค้าง/ตาย
-            try:
-                from status_tracker import heartbeat
-                heartbeat("telegram_polling")
-            except Exception:
-                pass
 
             for update in updates:
                 update_id = update.get("update_id", 0)
