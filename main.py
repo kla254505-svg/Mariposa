@@ -674,3 +674,10 @@ if __name__ == "__main__":
         # ping บอก Healthchecks.io เสมอ ไม่ว่าข้างบนจะสำเร็จหรือมี error ก็ตาม
         # (นี่คือหน้าที่จริงของ Dead Man's Switch — ต้องรู้ว่าบอทยังไม่ตายแม้ตอน API ล่ม)
         ping_healthcheck(CONFIG["healthchecks_url"])
+        # เช่นเดียวกัน บันทึก heartbeat ของรอบนี้ไว้ให้หน้า Dashboard เห็นว่า cron-job.org →
+        # GitHub Actions → main.py ยังวิ่งมาถึงจุดนี้อยู่ (ห้าม throw ออกไปเด็ดขาด)
+        try:
+            from status_tracker import heartbeat
+            heartbeat("main_cycle")
+        except Exception:
+            pass

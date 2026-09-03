@@ -49,6 +49,14 @@ def fetch_twelvedata(symbol="XAU/USD", interval="15min", outputsize=300, api_key
     if "values" not in data:
         raise ValueError(f"Twelve Data Error: {data}")
 
+    # ดึงสำเร็จจริง (ผ่านทั้ง HTTP + มี "values" กลับมา) — บันทึก heartbeat ให้ Dashboard เห็นว่า
+    # TwelveData ยังใช้งานได้อยู่ ณ เวลานี้ (ห้าม throw ออกไปกระทบ pipeline หลักเด็ดขาด)
+    try:
+        from status_tracker import heartbeat
+        heartbeat("twelvedata")
+    except Exception:
+        pass
+
     df = pd.DataFrame(data["values"])
 
     # ทอง/Forex มักไม่มีคอลัมน์ volume ส่งมา ต้องเช็คก่อน

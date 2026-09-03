@@ -1048,6 +1048,14 @@ def run_polling_loop(config, symbol="XAUUSD"):
             offset = (known_offset + 1) if known_offset is not None else None
             updates = _get_updates(token, offset=offset, timeout=30)
 
+            # long-poll รอบนี้ยิงสำเร็จ (ไม่ว่าจะมี update ใหม่มาไหมก็ตาม) — บันทึก heartbeat ให้
+            # Dashboard เห็นว่า loop นี้บน Render ยังวิ่งอยู่จริง ไม่ได้ค้าง/ตาย
+            try:
+                from status_tracker import heartbeat
+                heartbeat("telegram_polling")
+            except Exception:
+                pass
+
             for update in updates:
                 update_id = update.get("update_id", 0)
                 # อัปเดตตัวแปรในหน่วยความจำก่อนเสมอ (เชื่อถือได้ทันที ไม่ต้องรอ kvdb)

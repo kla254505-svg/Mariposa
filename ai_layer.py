@@ -234,6 +234,14 @@ def _call_claude_api(context_text, config):
     if not _validate_ai_response(parsed):
         return None, "ERROR", "JSON ที่ Claude ตอบมาขาด field หรือค่าไม่ตรงสเปกที่กำหนด"
 
+    # เรียกสำเร็จจริง (parse + validate ผ่านหมด) — บันทึก heartbeat ให้ Dashboard เห็นว่า Claude API
+    # ยังใช้งานได้อยู่ (ห้าม throw ออกไปกระทบ pipeline หลักเด็ดขาด)
+    try:
+        from status_tracker import heartbeat
+        heartbeat("claude_ai")
+    except Exception:
+        pass
+
     return parsed, "ANALYZED", None
 
 

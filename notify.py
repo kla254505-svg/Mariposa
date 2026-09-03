@@ -8,6 +8,11 @@ def send_telegram_alert(token, chat_id, message):
     try:
         resp = requests.post(url, data=payload, timeout=10)
         resp.raise_for_status()
+        try:
+            from status_tracker import heartbeat
+            heartbeat("telegram_alert")
+        except Exception:
+            pass
         return True
     except Exception as e:
         print(f"[Telegram Error] {e}")
