@@ -185,7 +185,9 @@ def log_signal(order, symbol, timeframe="15m"):
         if cell:
             ws.update(f"A{cell.row}:Y{cell.row}", [row_values], value_input_option="USER_ENTERED")
         else:
-            ws.append_row(row_values, value_input_option="USER_ENTERED")
+            # table_range="A1" กันปัญหาเดียวกับ AI_Log/Signal_Context ด้านล่าง (Sheets API เดา
+            # ตำแหน่งตารางผิดถ้ามีข้อมูลหลงเหลืออยู่ไกลทางขวาของชีต)
+            ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
         return True
     except Exception as e:
         print(f"[Sheets Log] บันทึก Signal_Log ไม่สำเร็จ ({order.get('id')}): {e}")
@@ -240,7 +242,10 @@ def log_signal_context(signal_id, symbol, market_context):
             "Trigger_Condition": None,
         }
         row_values = [row.get(h) for h in SIGNAL_CONTEXT_HEADERS]
-        ws.append_row(row_values, value_input_option="USER_ENTERED")
+        # ระบุ table_range="A1" ชัดเจนเสมอ กัน Google Sheets API เดาตำแหน่งตารางผิด (เจอปัญหาจริง:
+        # ถ้ามีข้อมูล/การจัดรูปแบบหลงเหลืออยู่ไกลๆ ทางขวาของชีต Sheets จะเข้าใจผิดว่านั่นคือตารางจริง
+        # แล้วต่อแถวใหม่ผิดที่ไปไกลลิบ แทนที่จะต่อใต้หัวตาราง A-Z ที่ถูกต้อง)
+        ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
         return True
     except Exception as e:
         print(f"[Sheets Log] บันทึก Signal_Context ไม่สำเร็จ ({signal_id}): {e}")
@@ -288,7 +293,10 @@ def log_ai_analysis(signal_ids, events, ai_result, ai_model, ai_status="SUCCESS"
             }
             rows.append([row.get(h) for h in AI_LOG_HEADERS])
 
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
+        # table_range="A1" เหตุผลเดียวกับ log_signal_context ด้านบน — กัน Sheets API เดาตำแหน่ง
+        # ตารางผิดไปไกลทางขวา (เจอจริงเป็นสาเหตุที่ AI_Log ไปโผล่แถวใหม่ที่คอลัมน์ HM-HW แทนที่จะ
+        # ต่อใต้หัวตาราง A-D ตามปกติ)
+        ws.append_rows(rows, value_input_option="USER_ENTERED", table_range="A1")
         return True
     except Exception as e:
         print(f"[Sheets Log] บันทึก AI_Log ไม่สำเร็จ: {e}")
