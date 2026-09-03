@@ -23,7 +23,9 @@ from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
 from orders import add_order, update_orders_status, update_pending_orders, build_orders_dashboard
+from alert_dispatcher import send_alert_to_targets
 import plan_runner
+import plan_summary
 import ai_layer
 from news_scheduler import (
     refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning,
@@ -515,6 +517,16 @@ if __name__ == "__main__":
 
             # --- กลุ่ม B (Flag Pattern — เดิมต้องพิมพ์ /order8 เองเท่านั้น) ---
             plan_runner.check_flag_pattern_trigger(df, CONFIG, display_symbol)
+
+            # --- Ranked Plan Summary (แผนหลัก/แผนที่ 2/แผนที่ 3 เรียงตามคะแนน) ---
+            # ฟีเจอร์เสริมแยกจาก Order Alert ปกติทั้งหมดด้านบน (ตกลงออกแบบกับผู้ใช้ไว้ 3 ก.ย. 69)
+            # อ่านอย่างเดียวจาก orders.py (เหมือน Central AI Layer ด้านล่าง) ไม่แตะ Plan 1-8 เลย
+            # เช็คหลัง update_pending_orders/update_orders_status ด้านบนเสมอ ให้เห็นสถานะสดล่าสุด
+            try:
+                for msg in plan_summary.run_plan_summary_cycle(CONFIG["kvdb_bucket"], display_symbol, CONFIG):
+                    send_alert_to_targets(CONFIG, msg, log_prefix="[Plan Summary]")
+            except Exception as e:
+                print(f"[Plan Summary Error] {display_symbol}: {e}")
 
             # --- Central AI Second Opinion Layer (Choice B, Event-Driven) ---
             # เช็คหลังแผน 1-8 ครบแล้วเท่านั้น (จุดเดียว ไม่แตะ Plan 1-8 หรือ orders.py เลย)
