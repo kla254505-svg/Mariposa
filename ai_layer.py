@@ -55,7 +55,12 @@ SYSTEM_PROMPT = """คุณเป็น "Second Opinion" ให้บอทเ�
   "conflict": "<ข้อความสั้นๆ ภาษาไทย อธิบายว่ามีแผนไหนขัดกันไหม หรือ 'ไม่มี' ถ้าไม่มี>",
   "reason": "<เหตุผลสั้นๆ ภาษาไทย 1-3 ประโยค ว่าทำไมประเมินแบบนี้ อ้างอิงข้อมูลที่ได้รับมาเท่านั้น>",
   "key_observation": "<ภาษาไทย สิ่งที่ควรจับตาดูต่อไป เช่น เงื่อนไขที่จะยืนยัน/ยกเลิกสมมติฐานนี้>",
-  "next_event_to_watch": "<ภาษาไทย เหตุการณ์ถัดไปที่ควรรอดู>"
+  "next_event_to_watch": "<ภาษาไทย เหตุการณ์ถัดไปที่ควรรอดู>",
+  "preferred_entry_zone": "<ถ้ามีมากกว่า 1 แผน active พร้อมกันตอนนี้ ให้เลือกว่าแผนไหนน่าเข้าที่สุด
+    ระบุชื่อแผนตามที่ให้มาในลิสต์เป๊ะๆ (เช่น plan1_pullback) ตามด้วยเหตุผลสั้นๆ 1 ประโยคว่าทำไมเลือกแผน
+    นั้น — ต้องเลือกจากแผนที่มีอยู่จริงในลิสต์ที่ให้มาเท่านั้น ห้ามเสนอ Entry/SL/TP/แผนใหม่เด็ดขาด
+    (ยังอยู่ภายใต้กติกาข้อ 1 เหมือนเดิม) ถ้ามีแผน active แค่แผนเดียว ให้ตอบชื่อแผนนั้นไปตรงๆ
+    ถ้าไม่มีแผนไหน active เลยในรอบนี้ ให้ตอบ 'ไม่มีแผน active ให้เลือก'>"
 }
 """
 
@@ -149,7 +154,8 @@ def _validate_ai_response(data):
     response ที่ parse ผ่านเป็น JSON ได้ แต่โครงสร้าง/ค่าไม่ตรงสเปก (เช่น พิมพ์ 'bullish' ตัวเล็ก
     หรือลืม field) หลุดไปสร้างข้อความ Telegram ที่พังหรือเข้าใจผิดได้"""
     required = {"overall_bias", "signal_assessment", "confidence", "risk_level",
-                "conflict", "reason", "key_observation", "next_event_to_watch"}
+                "conflict", "reason", "key_observation", "next_event_to_watch",
+                "preferred_entry_zone"}
     if not required.issubset(data.keys()):
         return False
     if data["overall_bias"] not in ALLOWED_BIAS:
@@ -177,11 +183,10 @@ def _call_claude_api(context_text, config):
 
     payload = {
         "model": config.get("ai_model", "claude-sonnet-5"),
-        # ตั้ง 4096 (เดิม 2000 ยังไม่พอ เจอ error จริง "Unterminated string" — โดนตัดกลาง JSON
-        # ตอนมีหลายแผน active พร้อมกัน (ยิ่งหลายแผนยิ่งต้องอธิบายเยอะ ยิ่งกินโควตา) ก่อนหน้านั้นเคย
-        # ปรับจาก 700 -> 2000 มาแล้วครั้งหนึ่งด้วยเหตุผลเดียวกัน (โมเดลใช้ thinking token ก่อนตอบจริง
-        # พอโควตาหมดไปกับการคิดเลยไม่เหลือให้เขียน JSON ออกมาครบ)
-        # JSON ที่ต้องการจริงยาวแค่ ~300-500 token ที่เหลือเผื่อไว้ให้ thinking โดยเฉพาะ
+        # ตั้ง 2000 (เดิม 700 น้อยเกินไป) — เจอปัญหาจริงตอนใช้งาน: โมเดลรุ่นใหม่ใช้ thinking token
+        # ก่อนตอบจริง พอโควตาหมดไปกับการคิด เลยไม่เหลือให้เขียน JSON ออกมาเลย ได้ response ที่ไม่มี
+        # text block (stop_reason=max_tokens) ทำให้ Central AI Layer ใช้งานไม่ได้ทั้งระบบ
+        # JSON ที่ต้องการจริงยาวแค่ ~300-400 token ที่เหลือเผื่อไว้ให้ thinking โดยเฉพาะ
         # หมายเหตุเรื่องต้นทุน: จ่ายตาม token ที่ใช้จริงเท่านั้น ไม่ใช่ตามค่า max_tokens ที่ตั้งไว้
         # การเพิ่มเพดานตรงนี้จึงไม่ได้ทำให้ค่าใช้จ่ายต่อครั้งเพิ่มขึ้นถ้าโมเดลตอบสั้นเท่าเดิม
         "max_tokens": 4096,
@@ -577,6 +582,11 @@ def format_ai_telegram_messages(symbol, ai_payload):
             f"• {p.get('plan')}: {dir_th}\n"
             f"  Entry {p.get('entry')} | SL {p.get('sl')} | TP {p.get('tp')} | RR {p.get('rr')}"
         )
+    preferred = ai.get("preferred_entry_zone")
+    if preferred and preferred != "ไม่มีแผน active ให้เลือก" and len(active_plans) > 1:
+        # โชว์เฉพาะตอนมีมากกว่า 1 แผนให้เลือกจริงๆ — ถ้ามีแผนเดียวอยู่แล้วไม่ต้องบอกซ้ำว่า "เลือกแผนนี้"
+        # เพราะไม่ได้ช่วยตัดสินใจอะไรเพิ่ม (ผู้ใช้เห็นอยู่แล้วว่ามีแผนเดียว)
+        order_lines.append(f"\n⭐ <b>ถ้าต้องเลือกแผนเดียว AI มองว่า</b>\n{preferred}")
     msg2 = "\n".join(order_lines)
 
     # ข้อความ 3: เหตุผลย่อ + conflict
