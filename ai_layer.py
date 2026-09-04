@@ -16,6 +16,19 @@ ai_layer.py — Central AI Second Opinion Layer (Choice B)
     หลัก analyze_market_state() เองก็ไม่โยน exception ออกไปเลย คืนค่า None หรือ dict ที่มี "error" เท่านั้น
   - เรียก AI ได้สูงสุด 1 ครั้งต่อรอบ (ต่อ symbol) ไม่ว่าจะมีกี่แผน active พร้อมกันก็ตาม (ดู
     analyze_market_state ซึ่งเป็นจุดเรียกเดียว ไม่มีฟังก์ชันอื่นเรียก Claude API เลย)
+
+*** แก้ไขล่าสุด (4 ก.ย. 2026): เพิ่ม timeout ของ _call_claude_api() จาก 20 วิ เป็น 45 วิ ***
+เจอจริงจากการไล่ดู AI_Log ย้อนหลัง: ประมาณ 18.5% ของการเรียก AI ทั้งหมด (30 จาก 162 ครั้ง) จบด้วย
+AI_Status=TIMEOUT ทั้งที่ตั้งแต่แก้ max_tokens เป็น 2000 (ดูหมายเหตุใน _call_claude_api ด้านล่าง —
+โมเดลรุ่นใหม่ใช้ thinking token ก่อนตอบจริง) เวลาที่ต้องใช้ต่อการเรียก 1 ครั้งก็มีโอกาสเกิน 20 วิได้ง่าย
+โดยเฉพาะช่วงที่ API โหลดสูง — ไม่ใช่ปัญหาเน็ต/credential (ถ้าเป็นแบบนั้นจะได้ ai_state="ERROR" ไม่ใช่
+"TIMEOUT") 45 วิยังปลอดภัยเทียบกับรอบ cron ที่รันทุก 5 นาที (run.yml) เพราะเรียก AI ได้แค่ 1 ครั้งต่อ
+รอบอยู่แล้ว (ai_cooldown/max-call-per-cycle) ไม่กระทบ Rate ของรอบถัดไป
+
+หมายเหตุ: ไม่ได้เพิ่ม retry ซ้อนในฟังก์ชันเดียวกัน เพราะรอบ cron ถัดไป (5 นาทีต่อมา, เกิน
+ai_cooldown_minutes default 2 นาทีอยู่แล้ว) ทำหน้าที่เป็น retry ตามธรรมชาติอยู่แล้ว — ดู
+analyze_market_state(): ai_state="TIMEOUT" จะไม่ถูกบันทึกเป็น last_state_hash (อัปเดตเฉพาะตอน
+ai_state="ANALYZED" เท่านั้น) รอบถัดไปที่ state ยังต่างจากที่เคยวิเคราะห์สำเร็จล่าสุด จะลองเรียกใหม่เอง
 """
 
 import hashlib
@@ -55,12 +68,7 @@ SYSTEM_PROMPT = """คุณเป็น "Second Opinion" ให้บอทเ�
   "conflict": "<ข้อความสั้นๆ ภาษาไทย อธิบายว่ามีแผนไหนขัดกันไหม หรือ 'ไม่มี' ถ้าไม่มี>",
   "reason": "<เหตุผลสั้นๆ ภาษาไทย 1-3 ประโยค ว่าทำไมประเมินแบบนี้ อ้างอิงข้อมูลที่ได้รับมาเท่านั้น>",
   "key_observation": "<ภาษาไทย สิ่งที่ควรจับตาดูต่อไป เช่น เงื่อนไขที่จะยืนยัน/ยกเลิกสมมติฐานนี้>",
-  "next_event_to_watch": "<ภาษาไทย เหตุการณ์ถัดไปที่ควรรอดู>",
-  "preferred_entry_zone": "<ถ้ามีมากกว่า 1 แผน active พร้อมกันตอนนี้ ให้เลือกว่าแผนไหนน่าเข้าที่สุด
-    ระบุชื่อแผนตามที่ให้มาในลิสต์เป๊ะๆ (เช่น plan1_pullback) ตามด้วยเหตุผลสั้นๆ 1 ประโยคว่าทำไมเลือกแผน
-    นั้น — ต้องเลือกจากแผนที่มีอยู่จริงในลิสต์ที่ให้มาเท่านั้น ห้ามเสนอ Entry/SL/TP/แผนใหม่เด็ดขาด
-    (ยังอยู่ภายใต้กติกาข้อ 1 เหมือนเดิม) ถ้ามีแผน active แค่แผนเดียว ให้ตอบชื่อแผนนั้นไปตรงๆ
-    ถ้าไม่มีแผนไหน active เลยในรอบนี้ ให้ตอบ 'ไม่มีแผน active ให้เลือก'>"
+  "next_event_to_watch": "<ภาษาไทย เหตุการณ์ถัดไปที่ควรรอดู>"
 }
 """
 
@@ -154,8 +162,7 @@ def _validate_ai_response(data):
     response ที่ parse ผ่านเป็น JSON ได้ แต่โครงสร้าง/ค่าไม่ตรงสเปก (เช่น พิมพ์ 'bullish' ตัวเล็ก
     หรือลืม field) หลุดไปสร้างข้อความ Telegram ที่พังหรือเข้าใจผิดได้"""
     required = {"overall_bias", "signal_assessment", "confidence", "risk_level",
-                "conflict", "reason", "key_observation", "next_event_to_watch",
-                "preferred_entry_zone"}
+                "conflict", "reason", "key_observation", "next_event_to_watch"}
     if not required.issubset(data.keys()):
         return False
     if data["overall_bias"] not in ALLOWED_BIAS:
@@ -189,7 +196,7 @@ def _call_claude_api(context_text, config):
         # JSON ที่ต้องการจริงยาวแค่ ~300-400 token ที่เหลือเผื่อไว้ให้ thinking โดยเฉพาะ
         # หมายเหตุเรื่องต้นทุน: จ่ายตาม token ที่ใช้จริงเท่านั้น ไม่ใช่ตามค่า max_tokens ที่ตั้งไว้
         # การเพิ่มเพดานตรงนี้จึงไม่ได้ทำให้ค่าใช้จ่ายต่อครั้งเพิ่มขึ้นถ้าโมเดลตอบสั้นเท่าเดิม
-        "max_tokens": 4096,
+        "max_tokens": 2000,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": context_text}],
     }
@@ -200,28 +207,17 @@ def _call_claude_api(context_text, config):
     }
 
     try:
+        # ตั้ง 45 วิ (เดิม 20 วิ) — เจอจริงจาก AI_Log ว่า ~18.5% ของการเรียกทั้งหมดจบด้วย TIMEOUT
+        # นับตั้งแต่ขยับ max_tokens เป็น 2000 ด้านบน (thinking token กินเวลาก่อนตอบจริง) 20 วิ
+        # ไม่พอโดยเฉพาะช่วง API โหลดสูง — ดูหมายเหตุยาวหัวไฟล์เรื่อง trade-off กับรอบ cron 5 นาที
         resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=45)
     except requests.exceptions.Timeout:
         return None, "TIMEOUT", "เรียก Claude API timeout"
     except requests.exceptions.RequestException as e:
         return None, "ERROR", f"เรียก Claude API ไม่สำเร็จ (network): {e}"
 
-    # 529 = Anthropic เซิร์ฟเวอร์โหลดสูงชั่วคราว (ปัญหาฝั่งเขา ไม่ใช่เรา) เจอจริงตอนใช้งาน — มักหาย
-    # เองภายในไม่กี่วินาที ต่างจาก error อื่นที่ retry ทันทีไม่ช่วย จึงคุ้มที่จะรอสั้นๆ แล้วลองซ้ำ 1 ครั้ง
-    # ก่อนยอมแพ้ (ไม่ retry วนไม่รู้จบ กันรอบ cron ค้างนานเกินไป)
-    if resp.status_code == 529:
-        time.sleep(5)
-        try:
-            resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=45)
-        except requests.exceptions.Timeout:
-            return None, "TIMEOUT", "เรียก Claude API timeout (หลัง retry จาก 529)"
-        except requests.exceptions.RequestException as e:
-            return None, "ERROR", f"เรียก Claude API ไม่สำเร็จ (network, หลัง retry จาก 529): {e}"
-
     if resp.status_code == 429:
         return None, "ERROR", "Claude API ตอบ 429 (rate limit) — จะลองใหม่รอบถัดไปที่ state เปลี่ยน"
-    if resp.status_code == 529:
-        return None, "ERROR", "Claude API ตอบ 529 (เซิร์ฟเวอร์ Anthropic โหลดสูงชั่วคราว) — ลอง retry แล้วยังโดนอยู่ จะลองใหม่รอบถัดไป"
     if resp.status_code != 200:
         return None, "ERROR", f"Claude API ตอบ HTTP {resp.status_code}: {resp.text[:200]}"
 
@@ -253,14 +249,6 @@ def _call_claude_api(context_text, config):
 
     if not _validate_ai_response(parsed):
         return None, "ERROR", "JSON ที่ Claude ตอบมาขาด field หรือค่าไม่ตรงสเปกที่กำหนด"
-
-    # เรียกสำเร็จจริง (parse + validate ผ่านหมด) — บันทึก heartbeat ให้ Dashboard เห็นว่า Claude API
-    # ยังใช้งานได้อยู่ (ห้าม throw ออกไปกระทบ pipeline หลักเด็ดขาด)
-    try:
-        from status_tracker import heartbeat
-        heartbeat("claude_ai")
-    except Exception:
-        pass
 
     return parsed, "ANALYZED", None
 
@@ -490,7 +478,7 @@ def run_central_ai_cycle(symbol, config, market_context, current_price, manual_r
         return {"error": str(e), "ai_state": "ERROR"}
 
 
-def analyze_market_state(symbol, active_plans, market_context, config, events=None, force=False):
+def analyze_market_state(symbol, active_plans, market_context, config, events=None):
     """จุดเรียกเดียวของ Central AI Layer ทั้งระบบ — เรียกจาก run_central_ai_cycle() ด้านล่างเท่านั้น
     (ซึ่ง main.py เรียกอีกที) หลังเช็คครบ 8 แผนแล้วเท่านั้น
 
@@ -499,9 +487,6 @@ def analyze_market_state(symbol, active_plans, market_context, config, events=No
     market_context: dict ข้อมูลตลาดปัจจุบัน (ดู _build_ai_context_text ด้านบนว่าใช้ field ไหนบ้าง)
     events: sorted list ของ event ที่ detect_events ตรวจเจอ (None = เรียกแบบไม่มี event system,
     เก็บไว้เพื่อ backward-compat กับตอนเรียกฟังก์ชันนี้ตรงๆ โดยไม่ผ่าน run_central_ai_cycle)
-    force: True = ข้ามทั้ง dedup (state ซ้ำเดิม) และ cooldown ไปเลย บังคับเรียก Claude API จริงเสมอ
-    ใช้เฉพาะตอนผู้ใช้กด /test เท่านั้น (คนละกรณีกับ manual_recheck ใน run_central_ai_cycle ซึ่งแค่เติม
-    event พิเศษเข้าไปแต่ยังต้องผ่าน dedup/cooldown ตามปกติ — force=True ข้ามด่านเหล่านั้นไปเลยจริงๆ)
 
     คืนค่า None ถ้า: ไม่มีแผน active เลย / state ไม่เปลี่ยนจากรอบก่อน (SKIPPED) / อยู่ใน cooldown
     คืนค่า dict {"ai_result":..., "active_plans":..., "ai_state": "ANALYZED"} ถ้าเรียก AI สำเร็จ
@@ -521,16 +506,15 @@ def analyze_market_state(symbol, active_plans, market_context, config, events=No
         normalized = _normalize_market_state(symbol, active_plans, market_context, events=events)
         current_hash = _compute_state_hash(normalized)
 
-        if not force and memory.get("last_state_hash") == current_hash and memory.get("ai_state") == "ANALYZED":
+        if memory.get("last_state_hash") == current_hash and memory.get("ai_state") == "ANALYZED":
             return None  # SKIPPED — state เดิมเป๊ะ เคยวิเคราะห์สำเร็จไปแล้ว ไม่เรียกซ้ำ
 
         # Cooldown กันเรียก AI ซ้อนกันเฉพาะกรณีผิดปกติ (เช่น cron รันซ้อน/เรียกถี่ผิดจังหวะ) — ต้อง
         # ตั้งค่าไว้ "สั้นกว่า" รอบ cron จริงเสมอ (ดูเหตุผลเต็มใน config.py: ai_cooldown_minutes) ไม่งั้น
         # จะไปกันสัญญาณใหม่ที่เกิดขึ้นจริงในรอบถัดไปด้วยโดยไม่ตั้งใจ — ไม่นับรวมตอน SKIPPED ด้านบน
-        # force=True (มาจาก /test) ข้ามด่านนี้ไปเลย ไม่งั้นกด /test ถี่ๆ จะโดนบล็อกทั้งที่ตั้งใจบังคับแล้ว
         cooldown_minutes = config.get("ai_cooldown_minutes", 2)
         last_call_iso = memory.get("last_ai_call_iso")
-        if not force and last_call_iso:
+        if last_call_iso:
             try:
                 last_call = datetime.fromisoformat(last_call_iso)
                 if datetime.now(timezone.utc) - last_call < timedelta(minutes=cooldown_minutes):
@@ -549,15 +533,11 @@ def analyze_market_state(symbol, active_plans, market_context, config, events=No
             # ค้างสถานะไว้เป็น "เหมือนวิเคราะห์ไปแล้ว" ทั้งที่จริงยังไม่สำเร็จ (รอบหน้าจะได้ลองใหม่ถ้า
             # state ยังต่างจาก last_state_hash เดิมอยู่)
             memory["last_ai_analysis"] = ai_result
-            memory["last_error"] = None  # เคลียร์ error เก่าทิ้งเมื่อรอบล่าสุดสำเร็จ
             _append_ai_log(memory, symbol, events, ai_result)
             _save_ai_memory(bucket, symbol, memory)
             _log_ai_to_sheets(active_plans, events, ai_result, config, "SUCCESS", None)
             return {"ai_result": ai_result, "active_plans": active_plans, "ai_state": "ANALYZED"}
 
-        # เก็บข้อความ error ไว้ใน memory ด้วย (เดิมแค่ print ไปที่ Render log อย่างเดียว มองไม่เห็นผ่าน
-        # Telegram) เพื่อให้ /aicheck ดึงมาโชว์ได้ตรงๆ ว่ารอบ cron ล่าสุดพังเพราะอะไร
-        memory["last_error"] = error
         _save_ai_memory(bucket, symbol, memory)
         print(f"[AI Layer] {symbol}: เรียก AI ไม่สำเร็จ ({ai_state}): {error}")
         _log_ai_to_sheets(active_plans, events, None, config, ai_state, error)
@@ -600,11 +580,6 @@ def format_ai_telegram_messages(symbol, ai_payload):
             f"• {p.get('plan')}: {dir_th}\n"
             f"  Entry {p.get('entry')} | SL {p.get('sl')} | TP {p.get('tp')} | RR {p.get('rr')}"
         )
-    preferred = ai.get("preferred_entry_zone")
-    if preferred and preferred != "ไม่มีแผน active ให้เลือก" and len(active_plans) > 1:
-        # โชว์เฉพาะตอนมีมากกว่า 1 แผนให้เลือกจริงๆ — ถ้ามีแผนเดียวอยู่แล้วไม่ต้องบอกซ้ำว่า "เลือกแผนนี้"
-        # เพราะไม่ได้ช่วยตัดสินใจอะไรเพิ่ม (ผู้ใช้เห็นอยู่แล้วว่ามีแผนเดียว)
-        order_lines.append(f"\n⭐ <b>ถ้าต้องเลือกแผนเดียว AI มองว่า</b>\n{preferred}")
     msg2 = "\n".join(order_lines)
 
     # ข้อความ 3: เหตุผลย่อ + conflict
@@ -647,9 +622,9 @@ def test_ai_connection(config):
 
     start = time.time()
     try:
-        resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=45)
+        resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload, timeout=15)
     except requests.exceptions.Timeout:
-        return False, "เรียก Claude API timeout (เกิน 45 วิ) — เช็คเน็ต/ลองใหม่อีกครั้ง"
+        return False, "เรียก Claude API timeout (เกิน 15 วิ) — เช็คเน็ต/ลองใหม่อีกครั้ง"
     except requests.exceptions.RequestException as e:
         return False, f"เรียก Claude API ไม่สำเร็จ (network error): {e}"
     elapsed_ms = int((time.time() - start) * 1000)

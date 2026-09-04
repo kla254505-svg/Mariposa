@@ -18,7 +18,27 @@ sheets_log.py — เชื่อม Bot เข้ากับ Google Sheets (Tr
   - ไม่ทำให้ Strategy Logic เปลี่ยนแปลงแม้แต่นิดเดียว — ไฟล์นี้แค่ "อ่าน" ค่าจาก order dict ที่
     Strategy สร้างไว้แล้วส่งไปเขียน Sheets เท่านั้น ไม่เคยคำนวณ Entry/SL/TP ใหม่
 
-*** แก้ไขล่าสุด: เพิ่มคอลัมน์ "Score" ใน SIGNAL_LOG_HEADERS + log_signal() ***
+*** แก้ไขล่าสุด (4 ก.ย. 2026): auto-migrate คอลัมน์ "Score" ใน Signal_Log จริง ไม่ใช่แค่ในโค้ด ***
+ตอนเพิ่มคอลัมน์ "Score" เข้า SIGNAL_LOG_HEADERS ครั้งก่อน (บันทึกไว้ด้านล่าง) โค้ดฝั่งนี้แก้ถูกแล้ว
+(คำนวณตำแหน่งคอลัมน์จาก SIGNAL_LOG_HEADERS เสมอ ผ่าน _col_letter) แต่ "ไม่เคย" ไปอัปเดต Header แถวแรก
+ของ Google Sheet จริงบน production เลย ทำให้ Header แถวแรกยังเป็นเวอร์ชันเก่า (25 คอลัมน์ ไม่มี Score)
+พอโค้ดเขียนแถวใหม่/อัปเดตแถวเดิมด้วยชุดข้อมูล 26 ค่า (ตาม SIGNAL_LOG_HEADERS เวอร์ชันใหม่) ลงในตำแหน่ง
+คอลัมน์ A:Z ตรงๆ ข้อมูลทุกอย่างตั้งแต่คอลัมน์ M (Score) เป็นต้นไปเลยเลื่อนไปทางขวา 1 ช่องเทียบกับ Header
+เดิมที่ยังไม่ได้อัปเดต (Signal_Status ว่างเปล่า อย่างอื่นเพี้ยนตามกันหมด) — ตรวจเจอจากการเอา Signal_Log
+export มาไล่ดูจริง (ดู session 4 ก.ย. 2026)
+
+เพิ่ม _ensure_score_column() แก้ตรงจุดนี้: เช็ค Header แถวแรกของ worksheet ตอนเชื่อมต่อสำเร็จครั้งแรก
+ของแต่ละ process ถ้ายังไม่มีคอลัมน์ "Score" ตรงตำแหน่งที่ SIGNAL_LOG_HEADERS กำหนดไว้ จะ "แทรก" คอลัมน์
+ว่างเข้าไปจริง (ไม่ใช่แค่เขียนทับข้อความ Header เฉยๆ) ซึ่งจะเลื่อนข้อมูลเดิมทุกแถวที่เป็นรูปแบบเก่า
+(25 คอลัมน์) ไปทางขวาให้ถูกต้องเองอัตโนมัติ ทำครั้งเดียวพอ (idempotent เช็คก่อนทุกครั้ง)
+
+ข้อจำกัดที่ควรรู้: ถ้ามีบางแถวที่ถูกเขียนไปแล้ว "หลัง" SIGNAL_LOG_HEADERS เพิ่ม Score แต่ "ก่อน"
+migration นี้รันครั้งแรก (คือแถวที่เพี้ยนแบบที่อธิบายไว้ข้างบนนี่แหละ) การแทรกคอลัมน์รอบนี้จะทำให้แถว
+เหล่านั้นเลื่อนคลาดเคลื่อนซ้อนอีกชั้น (เจอจริงแค่ไม่กี่แถวช่วงต้น ก.ย. 2026 ตอนเพิ่งแก้ตอนแรก) เป็น
+trade-off ที่ยอมรับได้เพราะ Sheets เป็น archive อย่างเดียว บอทไม่เคยอ่านกลับมาใช้ตัดสินใจเลย (ดูหมายเหตุ
+บนสุดของไฟล์) แถวที่เพี้ยนไม่กี่แถวนั้นลบทิ้งด้วยมือทีหลังได้ตามสะดวก ไม่กระทบการทำงานของบอทแต่อย่างใด
+
+*** แก้ไขก่อนหน้า: เพิ่มคอลัมน์ "Score" ใน SIGNAL_LOG_HEADERS + log_signal() ***
 ของเดิม order["score"] (คำนวณไว้แล้วใน score.py) ไม่เคยถูกเขียนลง Signal_Log เลย ทำให้ไม่มีทาง
 วิเคราะห์ย้อนหลังได้ว่า "คะแนนที่ระบบให้ สัมพันธ์กับผลจริงไหม" (ดู score_outcome_analysis.py ที่เพิ่ม
 เข้ามาพร้อมกัน) เพิ่มคอลัมน์นี้เพื่อให้วิเคราะห์ได้ ไม่กระทบพฤติกรรมอื่นของไฟล์นี้เลย — สัญญาณเก่าที่
@@ -34,6 +54,7 @@ _client = None
 _spreadsheet = None
 _last_conn_attempt = 0.0
 _CONN_RETRY_COOLDOWN_SECONDS = 60  # เชื่อมพังรอบนึงแล้ว อย่า retry รัวๆ ทุก signal ที่เข้ามาถัดไป
+_score_column_ensured = False  # ทำ migration (ดูหมายเหตุด้านบน) แค่ครั้งเดียวต่อ process พอ
 
 SIGNAL_LOG_HEADERS = [
     "Signal_ID", "Created_Date", "Created_Time", "Timestamp", "Symbol", "Plan_ID", "Direction",
@@ -110,6 +131,34 @@ def _get_spreadsheet():
         return None
 
 
+def _ensure_score_column(ws):
+    """เช็คว่า worksheet Signal_Log มีคอลัมน์ "Score" อยู่ตรงตำแหน่งที่ SIGNAL_LOG_HEADERS กำหนดไว้
+    จริงหรือยัง (ดูหมายเหตุยาวหัวไฟล์ — ปัญหานี้เกิดเพราะตอนเพิ่ม "Score" เข้า SIGNAL_LOG_HEADERS
+    ในโค้ด ไม่เคยมีอะไรไปอัปเดต Header แถวแรกของ Sheet จริงบน production เลย) ถ้ายังไม่มี จะ "แทรก"
+    คอลัมน์ว่างเข้าไปจริง (ไม่ใช่แค่เขียนทับข้อความ) ซึ่งจะเลื่อนข้อมูลเดิมทุกแถวไปทางขวาให้ถูกต้องเอง
+
+    เช็คแค่ครั้งเดียวต่อ process (ผ่าน _score_column_ensured) กันยิง API อ่าน header ซ้ำทุกครั้งที่
+    log_signal() ถูกเรียก — ไม่โยน exception ออกไปเลย (ฟีเจอร์เสริม ต้องไม่ทำให้การบันทึกสัญญาณหลักพัง)
+    """
+    global _score_column_ensured
+    if _score_column_ensured:
+        return
+    try:
+        score_col_index = SIGNAL_LOG_HEADERS.index("Score") + 1  # 1-indexed (ตอนนี้คือ 13 = M)
+        header_row = ws.row_values(1)
+        current = header_row[score_col_index - 1] if len(header_row) >= score_col_index else None
+        if current == "Score":
+            _score_column_ensured = True  # migrate ไปแล้วตั้งแต่รอบก่อนๆ ไม่ต้องทำอะไรอีก
+            return
+        ws.insert_cols([[""]], col=score_col_index)
+        ws.update_cell(1, score_col_index, "Score")
+        print("[Sheets Log] เพิ่มคอลัมน์ Score ให้ Signal_Log อัตโนมัติสำเร็จ (migration ครั้งแรก — "
+              "ดูหมายเหตุหัวไฟล์)")
+        _score_column_ensured = True
+    except Exception as e:
+        print(f"[Sheets Log] ตรวจ/แทรกคอลัมน์ Score ให้ Signal_Log ไม่สำเร็จ (ไม่กระทบการบันทึกสัญญาณหลัก): {e}")
+
+
 def _plan_id_short(plan_key):
     """แปลง plan key ภายในของ orders.py (เช่น 'plan3_counter_trend') เป็น 'P3' ตามฟอร์แมตที่ Sheets ใช้
     เผื่อ plan1_pullback_early ก็ยังได้ 'P1' (ตัด suffix ตัวอักษรออก เอาแค่ตัวเลขนำหน้า)"""
@@ -138,6 +187,7 @@ def log_signal(order, symbol, timeframe="15m"):
         return False
     try:
         ws = ss.worksheet("Signal_Log")
+        _ensure_score_column(ws)  # migration ครั้งแรกของ process (ดูหมายเหตุหัวไฟล์) — no-op ถ้าทำแล้ว
         signal_id = order.get("id")
         if not signal_id:
             return False
@@ -168,9 +218,8 @@ def log_signal(order, symbol, timeframe="15m"):
             "SL": order.get("stop_loss"),
             "TP": tp,
             "RR": order.get("rr_tp1"),
-            # เพิ่มเข้ามาใหม่: คะแนน Confidence Score ตอนเปิดสัญญาณ (order["score"] มีอยู่แล้วตั้งแต่
-            # orders.py แต่ของเดิมไม่เคยเขียนคอลัมน์นี้ลง Sheets เลย — ไม่มีอะไรให้วิเคราะห์ย้อนหลังว่า
-            # คะแนนสัมพันธ์กับผลจริงไหมถ้าไม่มีคอลัมน์นี้ ดู score_outcome_analysis.py)
+            # order["score"] มีอยู่แล้วตั้งแต่ orders.py — เขียนลงคอลัมน์ Score ตรงนี้ (ดู
+            # score_outcome_analysis.py สำหรับการวิเคราะห์ย้อนหลังว่าคะแนนสัมพันธ์กับผลจริงไหม)
             "Score": order.get("score"),
             "Signal_Status": STATUS_TO_SIGNAL_STATUS.get(status, status),
             "Entry_Status": "HIT" if entered else "NOT_HIT",
