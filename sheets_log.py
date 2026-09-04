@@ -17,6 +17,12 @@ sheets_log.py — เชื่อม Bot เข้ากับ Google Sheets (Tr
     ของ process เดียว ถ้าเชื่อมพังจะมี cooldown ก่อน retry ครั้งถัดไป ไม่ยิงรัวๆ ทุก signal ที่พลาด
   - ไม่ทำให้ Strategy Logic เปลี่ยนแปลงแม้แต่นิดเดียว — ไฟล์นี้แค่ "อ่าน" ค่าจาก order dict ที่
     Strategy สร้างไว้แล้วส่งไปเขียน Sheets เท่านั้น ไม่เคยคำนวณ Entry/SL/TP ใหม่
+
+*** แก้ไขล่าสุด: เพิ่มคอลัมน์ "Score" ใน SIGNAL_LOG_HEADERS + log_signal() ***
+ของเดิม order["score"] (คำนวณไว้แล้วใน score.py) ไม่เคยถูกเขียนลง Signal_Log เลย ทำให้ไม่มีทาง
+วิเคราะห์ย้อนหลังได้ว่า "คะแนนที่ระบบให้ สัมพันธ์กับผลจริงไหม" (ดู score_outcome_analysis.py ที่เพิ่ม
+เข้ามาพร้อมกัน) เพิ่มคอลัมน์นี้เพื่อให้วิเคราะห์ได้ ไม่กระทบพฤติกรรมอื่นของไฟล์นี้เลย — สัญญาณเก่าที่
+เคย log ไปแล้วก่อนแก้จะไม่มีค่า Score (ว่างเปล่า ไม่ error)
 """
 
 import os
@@ -31,7 +37,7 @@ _CONN_RETRY_COOLDOWN_SECONDS = 60  # เชื่อมพังรอบนึ�
 
 SIGNAL_LOG_HEADERS = [
     "Signal_ID", "Created_Date", "Created_Time", "Timestamp", "Symbol", "Plan_ID", "Direction",
-    "Timeframe", "Entry", "SL", "TP", "RR", "Signal_Status", "Entry_Status", "Entry_Time",
+    "Timeframe", "Entry", "SL", "TP", "RR", "Score", "Signal_Status", "Entry_Status", "Entry_Time",
     "Entry_Price", "Exit_Time", "Exit_Price", "Result", "R_Multiple", "Duration", "Cancel_Reason",
     "Telegram_Message_ID", "Created_By", "Last_Updated",
 ]
@@ -63,11 +69,9 @@ STATUS_TO_SIGNAL_STATUS = {
 }
 STATUS_TO_RESULT = {"win": "WIN", "loss": "LOSS", "expired": "EXPIRED"}
 
-BANGKOK_TZ = timezone(timedelta(hours=7))
-
 
 def _now_bangkok():
-    return datetime.now(BANGKOK_TZ)
+    return datetime.now(timezone(timedelta(hours=7)))
 
 
 def _get_spreadsheet():
@@ -151,23 +155,11 @@ def log_signal(order, symbol, timeframe="15m"):
         elif status == "loss":
             r_multiple = -1.0
 
-        # Timestamp: pending order มี created_at_iso อยู่แล้ว (UTC, มาจาก orders.py ตั้งใจเก็บ UTC
-        # ไว้เทียบ expiry) ต้องแปลงเป็นเวลาไทย + format ให้เหมือนกับกรณีไม่มี (order ที่เพิ่งสร้างแบบ
-        # running ทันที) กันปัญหาคอลัมน์เดียวกันมีทั้ง UTC/ไทย ปนกันเหมือนที่เจอจริง
-        created_at_iso = order.get("created_at_iso")
-        if created_at_iso:
-            try:
-                timestamp_str = datetime.fromisoformat(created_at_iso).astimezone(BANGKOK_TZ).strftime("%Y-%m-%d %H:%M:%S")
-            except Exception:
-                timestamp_str = now_bkk.strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            timestamp_str = now_bkk.strftime("%Y-%m-%d %H:%M:%S")
-
         row = {
             "Signal_ID": signal_id,
             "Created_Date": now_bkk.strftime("%Y-%m-%d"),
             "Created_Time": order.get("opened_at", now_bkk.strftime("%H:%M")),
-            "Timestamp": timestamp_str,
+            "Timestamp": order.get("created_at_iso") or now_bkk.isoformat(),
             "Symbol": symbol,
             "Plan_ID": _plan_id_short(order.get("plan")),
             "Direction": _direction_label(order.get("direction")),
@@ -176,6 +168,10 @@ def log_signal(order, symbol, timeframe="15m"):
             "SL": order.get("stop_loss"),
             "TP": tp,
             "RR": order.get("rr_tp1"),
+            # เพิ่มเข้ามาใหม่: คะแนน Confidence Score ตอนเปิดสัญญาณ (order["score"] มีอยู่แล้วตั้งแต่
+            # orders.py แต่ของเดิมไม่เคยเขียนคอลัมน์นี้ลง Sheets เลย — ไม่มีอะไรให้วิเคราะห์ย้อนหลังว่า
+            # คะแนนสัมพันธ์กับผลจริงไหมถ้าไม่มีคอลัมน์นี้ ดู score_outcome_analysis.py)
+            "Score": order.get("score"),
             "Signal_Status": STATUS_TO_SIGNAL_STATUS.get(status, status),
             "Entry_Status": "HIT" if entered else "NOT_HIT",
             "Entry_Time": order.get("filled_at") if entered else None,
@@ -183,7 +179,7 @@ def log_signal(order, symbol, timeframe="15m"):
             # หมายเหตุ: orders.py ยังไม่เก็บเวลา/ราคาที่ TP/SL ถูก trigger แบบละเอียด (เช็คจาก
             # current_price ทุก 5 นาที ไม่ tick-by-tick) — ใช้เวลาที่เพิ่ง log นี้ + ระดับ TP/SL ตามแผน
             # เป็นค่าประมาณ ไม่ใช่ราคา fill จริงเป๊ะ (ตามข้อจำกัดของระบบเช็คราคาแบบ polling ทุก 5 นาที)
-            "Exit_Time": now_bkk.strftime("%Y-%m-%d %H:%M:%S") if status in ("win", "loss") else None,
+            "Exit_Time": now_bkk.isoformat() if status in ("win", "loss") else None,
             "Exit_Price": (tp if status == "win" else order.get("stop_loss")) if status in ("win", "loss") else None,
             "Result": STATUS_TO_RESULT.get(status),
             "R_Multiple": r_multiple,
@@ -191,21 +187,33 @@ def log_signal(order, symbol, timeframe="15m"):
             "Cancel_Reason": None,
             "Telegram_Message_ID": None,  # ยังไม่ได้เชื่อม — notify.py ยังไม่ capture message_id กลับมา
             "Created_By": "BOT",
-            "Last_Updated": now_bkk.strftime("%Y-%m-%d %H:%M:%S"),
+            "Last_Updated": now_bkk.isoformat(),
         }
         row_values = [row.get(h) for h in SIGNAL_LOG_HEADERS]
 
         cell = ws.find(str(signal_id), in_column=1)
         if cell:
-            ws.update(f"A{cell.row}:Y{cell.row}", [row_values], value_input_option="USER_ENTERED")
+            # ช่วง cell คำนวณจากจำนวนคอลัมน์จริงใน SIGNAL_LOG_HEADERS แทนที่จะ hardcode "A...Y" ไว้ตรงๆ
+            # (ของเดิม hardcode Y ซึ่งพอดีกับ 25 คอลัมน์เดิม — พอเพิ่ม Score เป็น 26 คอลัมน์ ถ้ายัง
+            # hardcode Y ไว้ คอลัมน์สุดท้าย (Last_Updated) จะเขียนไม่ถึง กลายเป็นข้อมูลเก่าค้างอยู่)
+            last_col_letter = _col_letter(len(SIGNAL_LOG_HEADERS))
+            ws.update(f"A{cell.row}:{last_col_letter}{cell.row}", [row_values], value_input_option="USER_ENTERED")
         else:
-            # table_range="A1" กันปัญหาเดียวกับ AI_Log/Signal_Context ด้านล่าง (Sheets API เดา
-            # ตำแหน่งตารางผิดถ้ามีข้อมูลหลงเหลืออยู่ไกลทางขวาของชีต)
-            ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
+            ws.append_row(row_values, value_input_option="USER_ENTERED")
         return True
     except Exception as e:
         print(f"[Sheets Log] บันทึก Signal_Log ไม่สำเร็จ ({order.get('id')}): {e}")
         return False
+
+
+def _col_letter(n):
+    """แปลงลำดับคอลัมน์ (1-indexed) เป็นตัวอักษรคอลัมน์แบบ A1 notation ของ Google Sheets เช่น
+    1->A, 26->Z, 27->AA — เขียนแทนการ hardcode ตัวอักษรตรงๆ กันพังซ้ำถ้าจำนวนคอลัมน์เปลี่ยนอีกในอนาคต"""
+    letters = ""
+    while n > 0:
+        n, remainder = divmod(n - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
 
 
 def log_signal_context(signal_id, symbol, market_context):
@@ -225,7 +233,7 @@ def log_signal_context(signal_id, symbol, market_context):
 
         row = {
             "Signal_ID": signal_id,
-            "Snapshot_Time": now_bkk.strftime("%Y-%m-%d %H:%M:%S"),
+            "Snapshot_Time": now_bkk.isoformat(),
             "Symbol": symbol,
             "HTF_Bias": (market_context.get("htf_bias") or "").upper() or None,
             "Trend_4H": market_context.get("htf_bias"),
@@ -256,10 +264,7 @@ def log_signal_context(signal_id, symbol, market_context):
             "Trigger_Condition": None,
         }
         row_values = [row.get(h) for h in SIGNAL_CONTEXT_HEADERS]
-        # ระบุ table_range="A1" ชัดเจนเสมอ กัน Google Sheets API เดาตำแหน่งตารางผิด (เจอปัญหาจริง:
-        # ถ้ามีข้อมูล/การจัดรูปแบบหลงเหลืออยู่ไกลๆ ทางขวาของชีต Sheets จะเข้าใจผิดว่านั่นคือตารางจริง
-        # แล้วต่อแถวใหม่ผิดที่ไปไกลลิบ แทนที่จะต่อใต้หัวตาราง A-Z ที่ถูกต้อง)
-        ws.append_row(row_values, value_input_option="USER_ENTERED", table_range="A1")
+        ws.append_row(row_values, value_input_option="USER_ENTERED")
         return True
     except Exception as e:
         print(f"[Sheets Log] บันทึก Signal_Context ไม่สำเร็จ ({signal_id}): {e}")
@@ -287,7 +292,7 @@ def log_ai_analysis(signal_ids, events, ai_result, ai_model, ai_status="SUCCESS"
             row = {
                 "AI_ID": ai_id,
                 "Signal_ID": sid,
-                "Analysis_Time": now_bkk.strftime("%Y-%m-%d %H:%M:%S"),
+                "Analysis_Time": now_bkk.isoformat(),
                 "AI_Event": ", ".join(sorted(events)) if events else None,
                 "Overall_Bias": ai_result.get("overall_bias"),
                 "Signal_Assessment": ai_result.get("signal_assessment"),
@@ -307,10 +312,7 @@ def log_ai_analysis(signal_ids, events, ai_result, ai_model, ai_status="SUCCESS"
             }
             rows.append([row.get(h) for h in AI_LOG_HEADERS])
 
-        # table_range="A1" เหตุผลเดียวกับ log_signal_context ด้านบน — กัน Sheets API เดาตำแหน่ง
-        # ตารางผิดไปไกลทางขวา (เจอจริงเป็นสาเหตุที่ AI_Log ไปโผล่แถวใหม่ที่คอลัมน์ HM-HW แทนที่จะ
-        # ต่อใต้หัวตาราง A-D ตามปกติ)
-        ws.append_rows(rows, value_input_option="USER_ENTERED", table_range="A1")
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
         return True
     except Exception as e:
         print(f"[Sheets Log] บันทึก AI_Log ไม่สำเร็จ: {e}")
