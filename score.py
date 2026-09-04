@@ -5,6 +5,7 @@ from quality import (
     calc_macd_slope,
 )
 from bias_4h import is_bias_aligned
+from dxy_filter import calc_dxy_alignment_score
 
 WEIGHTS = {
     "structure_event": 13,
@@ -21,11 +22,18 @@ WEIGHTS = {
     "ema_bias_confluence": 8, # ใหม่: EMA Bias ตรงกับ Structure Trend หรือไม่
     "bias4h_alignment": 8,     # ใหม่: 4H trend/zone สอดคล้องกับสัญญาณ 15M หรือไม่ (ไม่ veto แล้ว แค่ไม่ได้แต้มถ้าสวนทาง)
     "htf_1h_alignment": 6,     # ใหม่: 1H trend สอดคล้องกับสัญญาณ 15M หรือไม่ (เช่นเดียวกัน ไม่ veto)
+    "dxy_alignment": 6,        # *** ใหม่ (ยังไม่เปิดใช้งานจริง) ***: DXY สอดคล้องทิศทางที่จะเข้าหรือไม่
 }
 
 
 def calc_confidence_score(entry_signal, structure, df, config, rr_tp1,
-                           bias_4h=None, higher_tf_trend=None):
+                           bias_4h=None, higher_tf_trend=None, dxy_context=None):
+    """
+    *** แก้ไขล่าสุด: เพิ่ม parameter dxy_context=None (ยังไม่เปิดใช้งานจริง) ***
+    เพิ่มไว้รองรับ dxy_filter.py (ดูหมายเหตุหัวไฟล์นั้น) — ค่า default None ทำให้คะแนนที่ได้เหมือนเดิม
+    100% ถ้าไม่มีใครส่ง dxy_context เข้ามา (main.py ตอนนี้ยังไม่ส่ง) ต้องรอวิเคราะห์ผล 8 แผนเดิมเสร็จ
+    ก่อนถึงจะตัดสินใจเปิดใช้งานจริง (แก้ main.py ให้ fetch แล้วส่งเข้ามา)
+    """
     score = 0
     breakdown = {}
 
@@ -125,5 +133,13 @@ def calc_confidence_score(entry_signal, structure, df, config, rr_tp1,
     if higher_tf_trend not in (None, "sideway") and higher_tf_trend == direction:
         score += WEIGHTS["htf_1h_alignment"]
         breakdown["htf_1h_alignment"] = WEIGHTS["htf_1h_alignment"]
+
+    # --- DXY Alignment: *** ใหม่ (ยังไม่เปิดใช้งานจริง) *** ไม่ veto เหมือนกัน แค่ให้แต้มเสริมถ้า
+    # ดอลลาร์เคลื่อนไหวสวนทางกับทิศทางที่จะเข้า (ทองกับดอลลาร์ผกผันกัน — ดู dxy_filter.py) ---
+    if dxy_context is not None:
+        dxy_bonus, _ = calc_dxy_alignment_score(direction, dxy_context)
+        if dxy_bonus:
+            score += dxy_bonus
+            breakdown["dxy_alignment"] = dxy_bonus
 
     return {"score": round(score, 1), "breakdown": breakdown}

@@ -11,20 +11,31 @@ _cmd_order_all) คนละชุดตรรกะกับ score.py (ซึ�
   - คุณภาพ RR เทียบ min_rr ที่ตั้งไว้ใน config                    สูงสุด 25 คะแนน (เต็มที่ RR >= 2 เท่าของ min_rr)
   - ทิศทางของสัญญาณตรงกับ 4H Bias                                 20 คะแนน
   - ทิศทางของสัญญาณตรงกับเทรนด์หลัก 15M (Structure)                15 คะแนน
-รวมเต็ม = 100
+รวมเต็ม = 100 (+ DXY bonus ถ้ามี — ดูหมายเหตุ dxy_context ด้านล่าง)
 
 คะแนนของแผนที่ 1 มาจาก score.py (calc_confidence_score) ตามเดิมทุกประการ ไม่ได้แก้สูตร — น้ำหนัก
 รวมเต็มๆ ของแผนที่ 1 จะสูงกว่า 100 เล็กน้อย (~120) เพราะเป็นสูตรเฉพาะที่ละเอียดกว่า (มีตัวแปรที่แผน
 อื่นไม่มี) ใช้เทียบ "ลำดับความน่าสนใจสัมพัทธ์" ระหว่างแผนได้ตามปกติ (ยิ่งสูง ยิ่งน่าสนใจ) แต่ไม่ใช่ %
 ความแม่นยำที่เทียบตรงตัวกันเป๊ะๆ ข้ามแผน — มีหมายเหตุกำกับไว้ในข้อความ /order ให้ผู้ใช้ทราบด้วย
+
+*** แก้ไขล่าสุด: เพิ่ม parameter dxy_context=None (ยังไม่เปิดใช้งานจริง) ***
+เพิ่มไว้รองรับ dxy_filter.py (ดูหมายเหตุหัวไฟล์นั้น) — ค่า default None ทำให้พฤติกรรม/คะแนนที่ได้
+เหมือนเดิม 100% ถ้าไม่มีใครส่ง dxy_context เข้ามา (main.py/plan_runner.py ตอนนี้ยังไม่ส่ง) ต้องรอ
+วิเคราะห์ผล 8 แผนเดิมเสร็จก่อนถึงจะตัดสินใจเปิดใช้งานจริง (แก้ main.py/plan_runner.py ให้ fetch แล้ว
+ส่งเข้ามา)
 """
+
+from dxy_filter import calc_dxy_alignment_score
 
 GENERIC_MAX_SCORE = 100.0
 
 
-def generic_plan_score(direction, rr, bias_4h, structure, config):
-    """คำนวณคะแนนทั่วไป (เต็ม 100) ให้แผนที่ 2-8 คืน (score, breakdown) — breakdown เป็น dict
-    label ภาษาไทย -> คะแนนที่ได้ในหมวดนั้น ใช้โชว์เหตุผลประกอบคะแนนใน /order"""
+def generic_plan_score(direction, rr, bias_4h, structure, config, dxy_context=None):
+    """คำนวณคะแนนทั่วไป (เต็ม 100 + DXY bonus ถ้ามี) ให้แผนที่ 2-8 คืน (score, breakdown) — breakdown
+    เป็น dict label ภาษาไทย -> คะแนนที่ได้ในหมวดนั้น ใช้โชว์เหตุผลประกอบคะแนนใน /order
+
+    dxy_context: ผลลัพธ์จาก dxy_filter.fetch_dxy_context() หรือ None (ค่า default — ยังไม่เปิดใช้งาน
+    จริงตอนนี้ ดูหมายเหตุหัวไฟล์)"""
     score = 40.0
     breakdown = {"สัญญาณเข้าเงื่อนไข": 40.0}
 
@@ -48,6 +59,12 @@ def generic_plan_score(direction, rr, bias_4h, structure, config):
     if main_trend and main_trend == direction:
         score += 15.0
         breakdown["สอดคล้องเทรนด์หลัก 15M"] = 15.0
+
+    if dxy_context is not None:
+        dxy_bonus, dxy_note = calc_dxy_alignment_score(direction, dxy_context)
+        if dxy_bonus:
+            score += dxy_bonus
+            breakdown[dxy_note or "DXY"] = dxy_bonus
 
     return round(score, 1), breakdown
 
