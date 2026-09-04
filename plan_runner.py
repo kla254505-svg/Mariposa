@@ -18,6 +18,36 @@ from scenario import (
 )
 from alert_dispatcher import send_alert_to_targets, save_plan_order
 from orders import load_orders, add_pending_order
+from session import get_session_info
+
+# จำนวนไม้แพ้ติดกันสูงสุดก่อนจะหยุดแจ้งเตือนแผนนั้นชั่วคราว (ดู _plan_in_loss_cooldown ด้านล่าง)
+CONSECUTIVE_LOSS_COOLDOWN = 2
+
+
+def _is_within_trading_session(config):
+    """เช็ค Session Filter เดียวกับที่ Plan 1 ใช้ใน main.py (14:00-04:00 ไทย ตามค่า
+    trading_sessions_utc) — Plan 2-8 (ไฟล์นี้ทั้งไฟล์) เดิมไม่เคยเช็คจุดนี้เลยสักบรรทัด ทำให้แจ้งเตือน
+    ได้ตลอด 24 ชม. ทั้งที่ตั้งใจให้ Session คุมทุกแผนเหมือนกันหมด (คุยแก้กันไว้ 4 ก.ย. 69)"""
+    if not config.get("session_filter_enabled", True):
+        return True
+    return get_session_info(config).get("in_session", True)
+
+
+def _plan_in_loss_cooldown(existing_orders, plan_key, max_losses=CONSECUTIVE_LOSS_COOLDOWN):
+    """เช็คว่าแผนนี้ (plan_key) เพิ่งโดน SL ติดกัน max_losses ไม้รวดล่าสุดไหม (ไม่นับ pending/running
+    ที่ยังไม่จบ) ถ้าใช่ ให้หยุดแจ้งเตือนแผนนี้ชั่วคราวจนกว่าจะมีไม้ที่ไม่ใช่ loss มาคั่น (win/expired ก็
+    นับว่า \"เบรก\" สถิติแพ้ติดกันแล้ว ไม่ใช่แค่ win อย่างเดียว)
+
+    ใช้ order id เรียงลำดับเวลาได้ตรงๆ (รูปแบบ f\"{symbol}_{YYYYMMDDHHMMSSffffff}\") ไม่ต้องเก็บ
+    ตัวนับแยกใน kvdb เพิ่ม อ่านจาก existing_orders ที่แต่ละ check_*_trigger โหลดมาอยู่แล้ว"""
+    resolved = sorted(
+        (o for o in existing_orders
+         if o.get("plan") == plan_key and o.get("status") in ("win", "loss", "expired")),
+        key=lambda o: o.get("id", ""),
+    )
+    if len(resolved) < max_losses:
+        return False
+    return all(o.get("status") == "loss" for o in resolved[-max_losses:])
 
 
 def check_plan2_plan3_triggers(df, config, symbol):
@@ -39,8 +69,15 @@ def check_plan2_plan3_triggers(df, config, symbol):
 
     bucket = config["kvdb_bucket"]
     try:
+        if not _is_within_trading_session(config):
+            return  # นอก Session (14:00-04:00 ไทย) — Plan 1 เช็คจุดนี้อยู่แล้ว ตอนนี้ Plan 2/3 เช็คด้วย
+
         df_ind_plan = add_indicators(df, config)
         structure_plan = analyze_structure(df_ind_plan, config)
+
+        # โหลดครั้งเดียว ใช้เช็ค loss cooldown ต่อแผนในลูปด้านล่าง (ไม่ใช้ dedup แบบ zone-based
+        # เหมือน Plan 5-8 เพราะ Plan 2/3 dedup ด้วย state ตามเงื่อนไขอยู่แล้ว)
+        existing_orders_plan23 = load_orders(bucket, symbol)
 
         plan_triggers = [
             ("plan2_breakout", "Breakout (แผนที่ 2)",
@@ -66,6 +103,11 @@ def check_plan2_plan3_triggers(df, config, symbol):
             if plan_blackout:
                 # อยู่ในช่วงห้ามเทรดรอบข่าว -> ข้ามไปเงียบๆ ไม่ mark state (กันไม่ให้พอข่าวผ่านไปแล้ว
                 # เงื่อนไขเดิมยังจริงอยู่ แต่ถูก dedup ทิ้งเพราะเข้าใจผิดว่าเคยแจ้งไปแล้วตอนที่จริงแค่ถูกระงับ)
+                continue
+
+            if _plan_in_loss_cooldown(existing_orders_plan23, plan_key):
+                # แพ้ติดกันครบเกณฑ์ล่าสุด -> พักแผนนี้ชั่วคราว ไม่ mark state เหมือนกัน (เหตุผลเดียวกับ
+                # news blackout ด้านบน — กันพอพ้น cooldown แล้วเงื่อนไขเดิมโดน dedup ทิ้งทั้งที่ยังไม่เคยแจ้ง)
                 continue
 
             if plan_key == "plan2_breakout":
@@ -163,6 +205,9 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol):
 
     bucket = config["kvdb_bucket"]
     try:
+        if not _is_within_trading_session(config):
+            return  # นอก Session (14:00-04:00 ไทย)
+
         daily_range = get_cached_daily_range(bucket, symbol)
         if daily_range is None:
             daily_df = fetch_twelvedata(
@@ -182,7 +227,9 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol):
                     dedup_value = f"{plan4_order['direction']}:{plan4_order['entry_price']:.4f}"
                     prev_value = kv_get(bucket, state_key)
 
-                    if prev_value != dedup_value:
+                    existing_orders_plan4 = load_orders(bucket, symbol)
+                    if (prev_value != dedup_value
+                            and not _plan_in_loss_cooldown(existing_orders_plan4, "plan4_daily_continuation")):
                         if not is_in_news_blackout(bucket, symbol)[0]:
                             direction_th = "LONG (ซื้อ)" if plan4_order["direction"] == "bullish" else "SHORT (ขาย)"
                             plan4_msg = (
@@ -226,6 +273,9 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
 
     bucket = config["kvdb_bucket"]
     try:
+        if not _is_within_trading_session(config):
+            return  # นอก Session (14:00-04:00 ไทย)
+
         df_ind_plan = add_indicators(df, config)
         result = find_zone_entry(bias_4h, df_ind_plan, config)
         if not result["valid"]:
@@ -239,6 +289,10 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
         if plan_blackout:
             return
 
+        existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง loss cooldown, dedup, save
+        if _plan_in_loss_cooldown(existing_orders, "plan5_zone_single"):
+            return  # แพ้ติดกันครบเกณฑ์ล่าสุด -> พักแผนนี้ชั่วคราว
+
         atr_period = config.get("sl_atr_avg_period", 20)
         current_atr = (
             df_ind_plan["atr"].tail(atr_period).mean()
@@ -247,7 +301,6 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
         )
         threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
-        existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง dedup check และ save
         for o in existing_orders:
             if (o["status"] in ("pending", "running") and o.get("plan") == "plan5_zone_single"
                     and o["direction"] == order["direction"]
@@ -293,6 +346,9 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
 
     bucket = config["kvdb_bucket"]
     try:
+        if not _is_within_trading_session(config):
+            return  # นอก Session (14:00-04:00 ไทย)
+
         df_ind_plan = add_indicators(df, config)
         result = find_sweep_entry(df_ind_plan, bias_4h, config)
         if not result["valid"]:
@@ -306,6 +362,10 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
         if plan_blackout:
             return
 
+        existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง loss cooldown, dedup, save
+        if _plan_in_loss_cooldown(existing_orders, "plan6_sweep_general"):
+            return  # แพ้ติดกันครบเกณฑ์ล่าสุด -> พักแผนนี้ชั่วคราว
+
         atr_period = config.get("sl_atr_avg_period", 20)
         current_atr = (
             df_ind_plan["atr"].tail(atr_period).mean()
@@ -314,7 +374,6 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
         )
         threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
-        existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง dedup check และ save
         for o in existing_orders:
             if (o["status"] in ("pending", "running") and o.get("plan") == "plan6_sweep_general"
                     and o["direction"] == order["direction"]
@@ -361,6 +420,9 @@ def check_qm_pattern_trigger(df, config, symbol):
 
     bucket = config["kvdb_bucket"]
     try:
+        if not _is_within_trading_session(config):
+            return  # นอก Session (14:00-04:00 ไทย)
+
         df_ind_plan = add_indicators(df, config)
         result = find_qm_pattern(df_ind_plan, config)
         if not result["valid"]:
@@ -383,6 +445,8 @@ def check_qm_pattern_trigger(df, config, symbol):
         threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
         existing_orders = load_orders(bucket, symbol)
+        if _plan_in_loss_cooldown(existing_orders, "plan7_qm_pattern"):
+            return  # แพ้ติดกันครบเกณฑ์ล่าสุด -> พักแผนนี้ชั่วคราว
         for o in existing_orders:
             if (o["status"] in ("pending", "running") and o.get("plan") == "plan7_qm_pattern"
                     and o["direction"] == order["direction"]
@@ -429,6 +493,9 @@ def check_flag_pattern_trigger(df, config, symbol):
 
     bucket = config["kvdb_bucket"]
     try:
+        if not _is_within_trading_session(config):
+            return  # นอก Session (14:00-04:00 ไทย)
+
         df_ind_plan = add_indicators(df, config)
         result = find_flag_pattern(df_ind_plan, config)
         if not result["valid"]:
@@ -451,6 +518,8 @@ def check_flag_pattern_trigger(df, config, symbol):
         threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
         existing_orders = load_orders(bucket, symbol)
+        if _plan_in_loss_cooldown(existing_orders, "plan8_flag_pattern"):
+            return  # แพ้ติดกันครบเกณฑ์ล่าสุด -> พักแผนนี้ชั่วคราว
         for o in existing_orders:
             if (o["status"] in ("pending", "running") and o.get("plan") == "plan8_flag_pattern"
                     and o["direction"] == order["direction"]
