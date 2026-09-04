@@ -27,6 +27,7 @@ import json
 
 from kvstore import kv_get, kv_set
 from orders import load_orders, PLAN_LABEL
+import ai_layer
 
 TOP_N = 3
 MEDALS = ["🥇", "🥈", "🥉"]
@@ -36,6 +37,35 @@ RANK_LABEL = ["แผนหลัก", "แผนที่ 2", "แผนที�
 # เลยโชว์ให้ตรงสเปกจริงไปเลย ต่างจาก Order Alert เดิมที่ยังโชว์ "/100" ไว้ตามเดิม (ผู้ใช้ตัดสินใจ
 # ไว้แล้วว่าไม่ต้องไปแก้ป้ายเดิม — ดูการคุยกัน 3 ก.ย. 69 หัวข้อ "คะแนนเต็มจริงไม่ใช่ 100")
 SCORE_MAX = 120
+
+BIAS_TH = {"BULLISH": "ขาขึ้น", "BEARISH": "ขาลง", "NEUTRAL": "กลางๆ"}
+RISK_TH = {"LOW": "ต่ำ", "MEDIUM": "กลาง", "HIGH": "สูง"}
+
+
+def _get_ai_opinion(config, symbol):
+    """ดึงผลวิเคราะห์ล่าสุดของ Central AI Layer มาใช้ซ้ำ (ai_layer.py's get_ai_memory_snapshot)
+    ไม่เรียก Claude API ใหม่เด็ดขาด — ใช้ของที่มีอยู่แล้วเท่านั้น (ผู้ใช้กังวลเรื่อง token คุยกันไว้
+    4 ก.ย. 69) คืน None ถ้ายังไม่เคยมีการวิเคราะห์เลย หรือดึงมาแล้วโครงสร้างไม่ตรงสเปก"""
+    try:
+        memory = ai_layer.get_ai_memory_snapshot(config, symbol)
+        analysis = (memory or {}).get("last_ai_analysis")
+        if not analysis or not isinstance(analysis, dict):
+            return None
+        return analysis
+    except Exception:
+        return None  # ai_layer มีปัญหาอะไรก็ตาม ไม่ทำให้ plan_summary พังตาม (เป็นแค่ของเสริม)
+
+
+def _plan_direction_conflicts_with_ai(direction, ai_opinion):
+    """เช็คว่าทิศทางของแผน (bullish/bearish) สวนทางกับมุมมองล่าสุดของ AI (overall_bias) ไหม
+    ใช้ตัดสินว่าควรเตือน \"ควรพิจารณาออกก่อน\" หรือเปล่า — ไม่นับ NEUTRAL ว่าขัดแย้ง (AI ยังไม่ฟันธง)"""
+    if not ai_opinion:
+        return False
+    bias = ai_opinion.get("overall_bias")
+    if bias == "NEUTRAL":
+        return False
+    plan_bias = "BULLISH" if direction == "bullish" else "BEARISH"
+    return bias != plan_bias
 
 
 def _plan_short_name(plan_key):
@@ -68,13 +98,19 @@ def _load_batch(bucket, symbol):
         return None
 
 
-def _save_batch(bucket, symbol, order_ids, status_snapshot):
-    payload = json.dumps({"ids": order_ids, "status_snapshot": status_snapshot})
+def _save_batch(bucket, symbol, order_ids, status_snapshot, ai_warned_ids=None):
+    payload = json.dumps({
+        "ids": order_ids,
+        "status_snapshot": status_snapshot,
+        "ai_warned_ids": ai_warned_ids or [],
+    })
     kv_set(bucket, _batch_key(symbol), payload)
 
 
-def format_plan_list_message(symbol, ranked_orders):
-    """ข้อความที่ 1 — ส่งตอนมี batch ใหม่ (เข้าเงื่อนไขเปลี่ยนไปจากรอบก่อน)"""
+def format_plan_list_message(symbol, ranked_orders, ai_opinion=None):
+    """ข้อความที่ 1 — ส่งตอนมี batch ใหม่ (เข้าเงื่อนไขเปลี่ยนไปจากรอบก่อน)
+    ai_opinion (ไม่บังคับ): ผลวิเคราะห์ล่าสุดจาก Central AI Layer (ดู _get_ai_opinion) — ถ้ามีจะ
+    ต่อท้ายเป็นส่วน "สรุปจาก AI" ให้ ถ้าไม่มี (ยังไม่เคยวิเคราะห์เลย) จะข้ามส่วนนี้ไปเฉยๆ ไม่ error"""
     lines = [f"📊 <b>แผนที่แนะนำ ({symbol})</b>", ""]
     for i, o in enumerate(ranked_orders):
         medal = MEDALS[i] if i < len(MEDALS) else "▪️"
@@ -90,6 +126,19 @@ def format_plan_list_message(symbol, ranked_orders):
             f"Entry: {o.get('entry_price')} | SL: {o.get('stop_loss')} | TP: {tp1}"
         )
         lines.append("")
+
+    if ai_opinion:
+        bias_th = BIAS_TH.get(ai_opinion.get("overall_bias"), "-")
+        risk_th = RISK_TH.get(ai_opinion.get("risk_level"), "-")
+        confidence = ai_opinion.get("confidence")
+        lines.append("🤖 <b>สรุปจาก AI</b>")
+        lines.append(f"ภาพรวม: {bias_th} | ความเสี่ยง: {risk_th}"
+                     + (f" | มั่นใจ {confidence}%" if confidence is not None else ""))
+        key_observation = ai_opinion.get("key_observation")
+        if key_observation:
+            lines.append(key_observation)
+        lines.append("")
+
     return "\n".join(lines).strip()
 
 
@@ -117,6 +166,27 @@ def format_result_message(symbol, batch_orders):
     return "\n".join(lines)
 
 
+def format_exit_warning_message(symbol, conflicting_orders, ai_opinion):
+    """ข้อความที่ 4 (ใหม่) — เตือนว่า AI เปลี่ยนมุมมองสวนทางกับแผนที่กำลังติดตามอยู่ ควรพิจารณาออก
+    ก่อนถึง SL — ใช้ผลวิเคราะห์ที่มีอยู่แล้ว ไม่เรียก AI ใหม่ (ดู _get_ai_opinion)"""
+    bias_th = BIAS_TH.get(ai_opinion.get("overall_bias"), "-")
+    risk_th = RISK_TH.get(ai_opinion.get("risk_level"), "-")
+    lines = [f"⚠️ <b>คำเตือนจาก AI ({symbol})</b>", ""]
+    for o in conflicting_orders:
+        plan_name = _plan_short_name(o.get("plan", ""))
+        direction_th = "LONG" if o.get("direction") == "bullish" else "SHORT"
+        lines.append(f"{plan_name} ({direction_th}): AI เปลี่ยนมุมมองเป็น {bias_th} แล้ว "
+                     f"ความเสี่ยง: {risk_th} — ควรพิจารณาออกก่อนถึง SL")
+    reason = ai_opinion.get("reason")
+    if reason:
+        lines.append("")
+        lines.append(f"เหตุผลจาก AI: {reason}")
+    lines.append("")
+    lines.append("⚠️ ความเห็นเสริมจาก AI ประกอบการตัดสินใจ ไม่ใช่คำแนะนำการลงทุน "
+                 "Strategy (Entry/SL/TP เดิม) เป็นผู้ตัดสินใจหลักเสมอ")
+    return "\n".join(lines)
+
+
 def run_plan_summary_cycle(bucket, symbol, config):
     """เรียกจาก main.py ทุกรอบ cron (1 ครั้งต่อ symbol) — คืน list ของข้อความที่ควรส่ง (0-1 ข้อความ
     ต่อรอบเสมอ ไม่มีทางส่งเกิน 1 ข้อความพร้อมกัน) ผู้เรียกเอาไปวนส่งผ่าน send_alert_to_targets เอง
@@ -128,14 +198,20 @@ def run_plan_summary_cycle(bucket, symbol, config):
     ระบบเข้าใจผิดว่า "ชุดเปลี่ยนไปแล้ว" แล้วส่งข้อความที่ 1 (แผนใหม่) ทับ ทั้งที่ควรส่งข้อความที่ 3
     (สรุปผล) ของ batch เดิมก่อน — ต้อง track batch เดิมจนกว่าทุกตัวจะจบ (win/loss/expired) ครบก่อน
     ถึงจะเริ่มมองหา batch ใหม่ได้
+
+    ข้อความที่ 4 (คำเตือนจาก AI): เช็คเฉพาะตอน batch เดิมยัง "นิ่ง" (ไม่มีสถานะเปลี่ยน) เท่านั้น —
+    ถ้า AI (ผลวิเคราะห์ล่าสุดที่มีอยู่แล้ว ไม่เรียกใหม่) มองสวนทางกับทิศทางของแผนที่ยัง pending/running
+    อยู่ใน batch จะเตือนครั้งเดียวต่อ order (บันทึกไว้ใน ai_warned_ids กันเตือนซ้ำทุกรอบ 5 นาที)
     """
     try:
         all_orders = load_orders(bucket, symbol)
         orders_by_id = {o["id"]: o for o in all_orders if o.get("id")}
+        ai_opinion = _get_ai_opinion(config, symbol)  # ใช้ของเดิมที่มีอยู่แล้ว ไม่เรียก AI ใหม่
 
         prev_batch = _load_batch(bucket, symbol)
         prev_ids = (prev_batch or {}).get("ids", [])
         prev_snapshot = (prev_batch or {}).get("status_snapshot", {})
+        prev_warned_ids = set((prev_batch or {}).get("ai_warned_ids", []))
 
         if prev_ids:
             # มี batch เดิมติดตามอยู่ — เช็คด้วย id ตรงๆ (ไม่กรองสถานะ) กันหลุดพูลตอนจบแล้ว
@@ -146,8 +222,9 @@ def run_plan_summary_cycle(bucket, symbol, config):
 
                 if current_snapshot != prev_snapshot:
                     # มีตัวไหนใน batch เปลี่ยนสถานะ (fill หรือจบ) — อัปเดต snapshot แล้วส่งข้อความ
-                    # ที่เหมาะสม (ที่ 3 ถ้ามีตัวจบแล้วอย่างน้อย 1 ตัว ไม่งั้นที่ 2)
-                    _save_batch(bucket, symbol, prev_ids, current_snapshot)
+                    # ที่เหมาะสม (ที่ 3 ถ้ามีตัวจบแล้วอย่างน้อย 1 ตัว ไม่งั้นที่ 2) — คง ai_warned_ids
+                    # เดิมไว้ (order ชุดเดิม ไม่ต้องเริ่มนับใหม่)
+                    _save_batch(bucket, symbol, prev_ids, current_snapshot, list(prev_warned_ids))
                     any_resolved = any(o.get("status") in ("win", "loss", "expired") for o in batch_orders)
                     print(f"[Plan Summary] {symbol}: batch เดิมมีสถานะเปลี่ยน -> ส่ง"
                           f" {'ข้อความที่ 3 (ผลลัพธ์)' if any_resolved else 'ข้อความที่ 2 (สถานะเข้าไม้)'}"
@@ -157,8 +234,22 @@ def run_plan_summary_cycle(bucket, symbol, config):
                     return [format_status_message(symbol, batch_orders)]
 
                 if not all_resolved:
-                    # batch เดิมยังไม่มีอะไรเปลี่ยน และยังไม่จบครบทุกตัว — รอต่อ ยังไม่ไปมองหา
-                    # batch ใหม่ (กันสลับความสนใจไปมาระหว่าง batch ที่ยังไม่จบ)
+                    # batch เดิมยังไม่มีอะไรเปลี่ยน และยังไม่จบครบทุกตัว — เช็คว่า AI เปลี่ยนมุมมอง
+                    # สวนทางกับแผนที่ยัง pending/running อยู่ไหม (เฉพาะตัวที่ยังไม่เคยเตือนไป)
+                    still_open = [o for o in batch_orders if o.get("status") in ("pending", "running")]
+                    conflicting = [
+                        o for o in still_open
+                        if o["id"] not in prev_warned_ids
+                        and _plan_direction_conflicts_with_ai(o.get("direction"), ai_opinion)
+                        and (ai_opinion or {}).get("risk_level") == "HIGH"
+                    ]
+                    if conflicting:
+                        new_warned = prev_warned_ids | {o["id"] for o in conflicting}
+                        _save_batch(bucket, symbol, prev_ids, current_snapshot, list(new_warned))
+                        print(f"[Plan Summary] {symbol}: AI สวนทางกับ {len(conflicting)} แผนใน batch "
+                              f"เดิม -> ส่งข้อความที่ 4 (คำเตือน)")
+                        return [format_exit_warning_message(symbol, conflicting, ai_opinion)]
+
                     print(f"[Plan Summary] {symbol}: batch เดิม ({len(batch_orders)} แผน) ยังไม่มี"
                           f" อะไรเปลี่ยน ไม่ส่งซ้ำ (ids={prev_ids})")
                     return []
@@ -182,7 +273,7 @@ def run_plan_summary_cycle(bucket, symbol, config):
         _save_batch(bucket, symbol, current_ids, status_snapshot)
         print(f"[Plan Summary] {symbol}: เจอชุดใหม่ {len(ranked)} แผน "
               f"({[o.get('plan') for o in ranked]}) -> ส่งข้อความที่ 1")
-        return [format_plan_list_message(symbol, ranked)]
+        return [format_plan_list_message(symbol, ranked, ai_opinion)]
 
     except Exception as e:
         print(f"[Plan Summary Error] {symbol}: {e}")
