@@ -84,6 +84,24 @@ def _top_n(orders, n=TOP_N):
     return sorted(orders, key=lambda o: o.get("score") or 0, reverse=True)[:n]
 
 
+def preview_current_plans(bucket, symbol, config):
+    """โหมด "ดูอย่างเดียว" สำหรับ /test — คืนข้อความตัวอย่างกล่องที่ 1 (แผนที่แนะนำ) จากข้อมูลจริง
+    ณ ตอนนี้เลย ไม่ต้องรอ cron แต่ **ไม่แตะ/ไม่บันทึกอะไรลง batch tracking ของ run_plan_summary_cycle
+    เด็ดขาด** (อ่านอย่างเดียวจริงๆ) กันไปรบกวนสถานะที่ cron จริงกำลังติดตามอยู่โดยไม่ตั้งใจ
+
+    คืน None ถ้าไม่มีแผน active เลยตอนนี้ (ไม่ใช่ error แค่ไม่มีอะไรให้โชว์)"""
+    try:
+        active = _active_orders(bucket, symbol)
+        if not active:
+            return None
+        ranked = _top_n(active)
+        ai_opinion = _get_ai_opinion(config, symbol)
+        return format_plan_list_message(symbol, ranked, ai_opinion)
+    except Exception as e:
+        print(f"[Plan Summary Preview Error] {symbol}: {e}")
+        return None
+
+
 def _batch_key(symbol):
     return f"plan_summary_batch_{symbol}"
 

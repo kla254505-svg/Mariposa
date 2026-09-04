@@ -874,9 +874,25 @@ def _cmd_test(ctx):
         ok_sheets, sheets_msg = sheets_log.test_sheets_connection()
         lines.append(f"   {'✅' if ok_sheets else '❌'} {sheets_msg}")
         lines.append("")
+        lines.append("5️⃣ ทดสอบ Plan Summary (ข้อมูลจริง อ่านอย่างเดียว)...")
+        plan_summary_preview = plan_summary.preview_current_plans(
+            config["kvdb_bucket"], symbol, config
+        )
+        # หมายเหตุ: ถึง live check ด้านบนจะไม่เจอแผน active เลย ก็อาจยังมี pending order เก่าจาก
+        # รอบก่อนหน้าค้างอยู่ใน kvdb ได้ (plan_summary อ่านจาก orders.py คนละแหล่งกับ live check
+        # นี้) เลยเช็คแยกไว้เผื่อไว้ ไม่ได้ implied จาก active ว่างด้านบนเสมอไป
+        if plan_summary_preview:
+            lines.append("   ✅ มีแผน active ค้างอยู่จริง (จากรอบก่อนหน้า) — ตัวอย่างอยู่ในข้อความถัดไป")
+        else:
+            lines.append("   📭 ไม่มีแผน active เลยตอนนี้เช่นกัน")
+        lines.append("")
         lines.append("🎉 <b>สรุป: ระบบพร้อมใช้งาน ไม่พัง</b>" if (ok_ai and ok_sheets)
                      else "⚠️ <b>สรุป: มีบางส่วนใช้งานไม่ได้ (ดูรายละเอียดด้านบน)</b>")
-        return "\n".join(lines)
+        messages = ["\n".join(lines)]
+        if plan_summary_preview:
+            messages.append("🧪 <b>[ตัวอย่างจากข้อมูลจริง ไม่ใช่ batch ที่ cron ส่งจริง]</b>\n\n"
+                             + plan_summary_preview)
+        return messages
 
     # --- มีแผน active: บังคับเรียก AI วิเคราะห์จริงเต็มรูปแบบ ---
     # เรียก analyze_market_state() ตรงๆ (ไม่ผ่าน run_central_ai_cycle) เพื่อข้าม Event Detection/
@@ -919,9 +935,25 @@ def _cmd_test(ctx):
         err = (ai_payload or {}).get("error") if ai_payload else "ไม่มีเหตุผลที่ชัดเจน (ไม่ควรเกิดขึ้นเมื่อ force=True — แจ้งทีมพัฒนาถ้าเจอ)"
         lines.append(f"   ❌ AI ไม่ได้วิเคราะห์: {err}")
 
+    # --- ขั้นที่ 4: Plan Summary (แผนที่แนะนำ) ด้วยข้อมูลจริง ณ ตอนนี้ — โหมดดูอย่างเดียว ---
+    # เรียก plan_summary.preview_current_plans() ซึ่งไม่แตะ/ไม่บันทึกอะไรลง batch tracking ของ
+    # run_plan_summary_cycle เลย (อ่านอย่างเดียวจริงๆ) กันไปรบกวนสถานะที่ cron จริงติดตามอยู่
+    lines.append("")
+    lines.append("4️⃣ ทดสอบ Plan Summary (ข้อมูลจริง อ่านอย่างเดียว ไม่กระทบ batch จริงของ cron)...")
+    plan_summary_preview = plan_summary.preview_current_plans(
+        config["kvdb_bucket"], symbol, config
+    )
+    if plan_summary_preview:
+        lines.append("   ✅ มีแผน active จริง — ตัวอย่างข้อความที่ 1 อยู่ในข้อความถัดไป")
+    else:
+        lines.append("   📭 ไม่มีแผน active จริงตอนนี้เลย (ไม่มีอะไรให้โชว์)")
+
     messages = ["\n".join(lines)]
     if ai_ok:
         messages.extend(ai_layer.format_ai_telegram_messages(symbol, ai_payload))
+    if plan_summary_preview:
+        messages.append("🧪 <b>[ตัวอย่างจากข้อมูลจริง ไม่ใช่ batch ที่ cron ส่งจริง]</b>\n\n"
+                         + plan_summary_preview)
     return messages
 
 # หมายเหตุ: /order1-8 และ /confirm1-4 ถูกรวมเป็น /order เดียวแล้ว (เช็คทั้ง 8 แผนพร้อมกันในรอบเดียว
