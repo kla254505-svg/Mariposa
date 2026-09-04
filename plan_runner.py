@@ -8,6 +8,28 @@ plan_runner.py — เช็คเงื่อนไข trigger ของ Plan 2
 (SL ที่ tighten แล้วต้องคำนวณ TP/RR/position size ใหม่ต่อ ก่อนจะรู้ว่าจะส่ง Alert ไหม) การแยก
 detection ออกจาก dispatch ตรงนั้นเสี่ยงเกินไปที่จะทำในรอบเดียวกับ Plan 2-4 ที่โครงสร้างง่ายกว่ามาก
 (detect -> คำนวณ order เดียว -> ส่ง/บันทึก ไม่มีการคำนวณซ้อนกันหลายชั้นแบบ Plan 1)
+
+*** แก้ไขล่าสุด (4 ก.ย. 2026): แก้บั๊ก score=None ***
+พบว่าทุกฟังก์ชันในไฟล์นี้ (Plan 2/3/4/5/6/7/8 ที่ trigger อัตโนมัติ ไม่ใช่ผ่านคำสั่ง /order ที่ผู้ใช้พิมพ์
+เอง) ส่ง score=None เข้า add_order()/add_pending_order() ตอนสร้างออเดอร์เสมอ ทั้งที่ระบบให้คะแนน
+(plan_score.generic_plan_score) มีอยู่แล้วและ telegram_bot.py's /order ก็ใช้คำนวณคะแนนแบบเดียวกันนี้
+ตอนโชว์ผลอยู่แล้ว — ผลคือออเดอร์ที่ถูกสร้างอัตโนมัติทุกตัว (ไม่ว่าจะ Plan ไหน) ไม่มีคะแนนติดไปด้วยเลย
+ทำให้ /best (best_plan.py) ซึ่งกรองว่า score ต้องไม่เป็น None ก่อนถึงจะนับเป็น "แผน active" มองไม่เห็น
+ออเดอร์เหล่านี้เลยสักตัวเดียว ทั้งที่ status เป็น pending/running จริงตามที่ orders.py บันทึกไว้ — สาเหตุ
+ที่แท้จริงที่ทำให้ผู้ใช้เจอ "/best บอกไม่มีแผนไหน active" ทั้งที่มีออเดอร์ plan7 กำลังรันอยู่จริง (ยืนยันจาก
+Signal_Log/AI_Log ที่ export มาดูจริง)
+
+แก้โดยคำนวณคะแนนจริงด้วย generic_plan_score() ก่อนบันทึกออเดอร์ในทุกฟังก์ชัน:
+  - Plan 2/3: มี structure_plan คำนวณอยู่แล้ว แค่เพิ่มเรียก generic_plan_score (bias_4h ไม่มีให้ใช้ใน
+    ฟังก์ชันนี้ ส่ง None ไปก่อน — ยังได้คะแนนพื้นฐาน + RR quality + เทรนด์หลัก 15M ตามปกติ)
+  - Plan 4: ไม่มี structure/bias_4h ให้ใช้ในฟังก์ชันนี้ (อ้างอิง Daily range แทน) ส่ง None ทั้งคู่ —
+    ได้คะแนนพื้นฐาน + RR quality (ไม่ veto อะไร เหมือนเดิมทุกประการ แค่ไม่ได้บวกโบนัส 4H/15M เพิ่ม)
+  - Plan 5/6: มี bias_4h ส่งเข้ามาอยู่แล้ว เพิ่มคำนวณ structure_plan ผ่าน analyze_structure() (ไม่มีการ
+    ยิง API เพิ่ม แค่วิเคราะห์จาก df_ind_plan ที่ดึงมาแล้ว) แล้วส่งเข้า generic_plan_score ครบทั้งคู่
+  - Plan 7/8: ไม่มี bias_4h ให้ใช้ (ตามสถาปัตยกรรมเดิม กลุ่ม D/B ไม่ใช้ 4H bias) เพิ่ม structure_plan
+    เหมือน Plan 5/6 แล้วส่ง bias_4h=None
+
+ไม่กระทบ Plan 1 (อยู่ใน main.py แยกต่างหาก คำนวณคะแนนแบบละเอียดของตัวเองอยู่แล้วผ่าน score.py)
 """
 from kvstore import kv_get, kv_set
 from news_scheduler import is_in_news_blackout
@@ -18,36 +40,7 @@ from scenario import (
 )
 from alert_dispatcher import send_alert_to_targets, save_plan_order
 from orders import load_orders, add_pending_order
-from session import get_session_info
-
-# จำนวนไม้แพ้ติดกันสูงสุดก่อนจะหยุดแจ้งเตือนแผนนั้นชั่วคราว (ดู _plan_in_loss_cooldown ด้านล่าง)
-CONSECUTIVE_LOSS_COOLDOWN = 2
-
-
-def _is_within_trading_session(config):
-    """เช็ค Session Filter เดียวกับที่ Plan 1 ใช้ใน main.py (14:00-04:00 ไทย ตามค่า
-    trading_sessions_utc) — Plan 2-8 (ไฟล์นี้ทั้งไฟล์) เดิมไม่เคยเช็คจุดนี้เลยสักบรรทัด ทำให้แจ้งเตือน
-    ได้ตลอด 24 ชม. ทั้งที่ตั้งใจให้ Session คุมทุกแผนเหมือนกันหมด (คุยแก้กันไว้ 4 ก.ย. 69)"""
-    if not config.get("session_filter_enabled", True):
-        return True
-    return get_session_info(config).get("in_session", True)
-
-
-def _plan_in_loss_cooldown(existing_orders, plan_key, max_losses=CONSECUTIVE_LOSS_COOLDOWN):
-    """เช็คว่าแผนนี้ (plan_key) เพิ่งโดน SL ติดกัน max_losses ไม้รวดล่าสุดไหม (ไม่นับ pending/running
-    ที่ยังไม่จบ) ถ้าใช่ ให้หยุดแจ้งเตือนแผนนี้ชั่วคราวจนกว่าจะมีไม้ที่ไม่ใช่ loss มาคั่น (win/expired ก็
-    นับว่า \"เบรก\" สถิติแพ้ติดกันแล้ว ไม่ใช่แค่ win อย่างเดียว)
-
-    ใช้ order id เรียงลำดับเวลาได้ตรงๆ (รูปแบบ f\"{symbol}_{YYYYMMDDHHMMSSffffff}\") ไม่ต้องเก็บ
-    ตัวนับแยกใน kvdb เพิ่ม อ่านจาก existing_orders ที่แต่ละ check_*_trigger โหลดมาอยู่แล้ว"""
-    resolved = sorted(
-        (o for o in existing_orders
-         if o.get("plan") == plan_key and o.get("status") in ("win", "loss", "expired")),
-        key=lambda o: o.get("id", ""),
-    )
-    if len(resolved) < max_losses:
-        return False
-    return all(o.get("status") == "loss" for o in resolved[-max_losses:])
+from plan_score import generic_plan_score
 
 
 def check_plan2_plan3_triggers(df, config, symbol):
@@ -69,15 +62,8 @@ def check_plan2_plan3_triggers(df, config, symbol):
 
     bucket = config["kvdb_bucket"]
     try:
-        if not _is_within_trading_session(config):
-            return  # นอก Session (14:00-04:00 ไทย) — Plan 1 เช็คจุดนี้อยู่แล้ว ตอนนี้ Plan 2/3 เช็คด้วย
-
         df_ind_plan = add_indicators(df, config)
         structure_plan = analyze_structure(df_ind_plan, config)
-
-        # โหลดครั้งเดียว ใช้เช็ค loss cooldown ต่อแผนในลูปด้านล่าง (ไม่ใช้ dedup แบบ zone-based
-        # เหมือน Plan 5-8 เพราะ Plan 2/3 dedup ด้วย state ตามเงื่อนไขอยู่แล้ว)
-        existing_orders_plan23 = load_orders(bucket, symbol)
 
         plan_triggers = [
             ("plan2_breakout", "Breakout (แผนที่ 2)",
@@ -103,11 +89,6 @@ def check_plan2_plan3_triggers(df, config, symbol):
             if plan_blackout:
                 # อยู่ในช่วงห้ามเทรดรอบข่าว -> ข้ามไปเงียบๆ ไม่ mark state (กันไม่ให้พอข่าวผ่านไปแล้ว
                 # เงื่อนไขเดิมยังจริงอยู่ แต่ถูก dedup ทิ้งเพราะเข้าใจผิดว่าเคยแจ้งไปแล้วตอนที่จริงแค่ถูกระงับ)
-                continue
-
-            if _plan_in_loss_cooldown(existing_orders_plan23, plan_key):
-                # แพ้ติดกันครบเกณฑ์ล่าสุด -> พักแผนนี้ชั่วคราว ไม่ mark state เหมือนกัน (เหตุผลเดียวกับ
-                # news blackout ด้านบน — กันพอพ้น cooldown แล้วเงื่อนไขเดิมโดน dedup ทิ้งทั้งที่ยังไม่เคยแจ้ง)
                 continue
 
             if plan_key == "plan2_breakout":
@@ -145,9 +126,14 @@ def check_plan2_plan3_triggers(df, config, symbol):
                     calc_order = calc_counter_trend_order(trigger, df_ind_plan, config)
 
                 if calc_order:
+                    # bias_4h ไม่มีให้ใช้ในฟังก์ชันนี้ (ไม่ได้ถูกส่งเข้ามาเป็นพารามิเตอร์) — ส่ง None ไปก่อน
+                    # ยังได้คะแนนพื้นฐาน + คุณภาพ RR + เทรนด์หลัก 15M ตามปกติ (ดีกว่า score=None เดิมที่
+                    # ทำให้ /best กรองออเดอร์นี้ทิ้งไปเลยทั้งที่ active อยู่จริง)
+                    score, _ = generic_plan_score(calc_order["direction"], calc_order["rr"], None,
+                                                   structure_plan, config)
                     save_plan_order(config, symbol, calc_order["direction"], calc_order["entry_price"],
                                      calc_order["stop_loss"], {"TP1": calc_order["take_profit"]},
-                                     score=None, plan_key=plan_key)
+                                     score=score, plan_key=plan_key)
                     plan_msg += (
                         f"\n\nEntry: {calc_order['entry_price']:.4f} | SL: {calc_order['stop_loss']:.4f} | "
                         f"TP: {calc_order['take_profit']:.4f} (RR {calc_order['rr']})"
@@ -205,9 +191,6 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol):
 
     bucket = config["kvdb_bucket"]
     try:
-        if not _is_within_trading_session(config):
-            return  # นอก Session (14:00-04:00 ไทย)
-
         daily_range = get_cached_daily_range(bucket, symbol)
         if daily_range is None:
             daily_df = fetch_twelvedata(
@@ -227,9 +210,7 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol):
                     dedup_value = f"{plan4_order['direction']}:{plan4_order['entry_price']:.4f}"
                     prev_value = kv_get(bucket, state_key)
 
-                    existing_orders_plan4 = load_orders(bucket, symbol)
-                    if (prev_value != dedup_value
-                            and not _plan_in_loss_cooldown(existing_orders_plan4, "plan4_daily_continuation")):
+                    if prev_value != dedup_value:
                         if not is_in_news_blackout(bucket, symbol)[0]:
                             direction_th = "LONG (ซื้อ)" if plan4_order["direction"] == "bullish" else "SHORT (ขาย)"
                             plan4_msg = (
@@ -245,9 +226,13 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol):
 
                             send_alert_to_targets(config, plan4_msg)
 
+                            # ไม่มี structure/bias_4h ให้ใช้ในฟังก์ชันนี้ (อ้างอิง Daily range แทน) ส่ง
+                            # None ทั้งคู่ — ยังได้คะแนนพื้นฐาน + คุณภาพ RR ตามปกติ (ดีกว่า score=None เดิม)
+                            score, _ = generic_plan_score(plan4_order["direction"], plan4_order["rr"],
+                                                           None, None, config)
                             save_plan_order(config, symbol, plan4_order["direction"],
                                              plan4_order["entry_price"], plan4_order["stop_loss"],
-                                             {"TP1": plan4_order["take_profit"]}, score=None,
+                                             {"TP1": plan4_order["take_profit"]}, score=score,
                                              plan_key="plan4_daily_continuation")
 
                             kv_set(bucket, state_key, dedup_value)
@@ -269,13 +254,11 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
     กันแจ้งซ้ำ zone เดิมที่ยังไม่ fill/ยังไม่หมดอายุ)
     """
     from indicator import add_indicators
+    from trend import analyze_structure
     from zone_entry import find_zone_entry, calc_zone_entry_order
 
     bucket = config["kvdb_bucket"]
     try:
-        if not _is_within_trading_session(config):
-            return  # นอก Session (14:00-04:00 ไทย)
-
         df_ind_plan = add_indicators(df, config)
         result = find_zone_entry(bias_4h, df_ind_plan, config)
         if not result["valid"]:
@@ -289,10 +272,6 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
         if plan_blackout:
             return
 
-        existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง loss cooldown, dedup, save
-        if _plan_in_loss_cooldown(existing_orders, "plan5_zone_single"):
-            return  # แพ้ติดกันครบเกณฑ์ล่าสุด -> พักแผนนี้ชั่วคราว
-
         atr_period = config.get("sl_atr_avg_period", 20)
         current_atr = (
             df_ind_plan["atr"].tail(atr_period).mean()
@@ -301,6 +280,7 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
         )
         threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
+        existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง dedup check และ save
         for o in existing_orders:
             if (o["status"] in ("pending", "running") and o.get("plan") == "plan5_zone_single"
                     and o["direction"] == order["direction"]
@@ -315,14 +295,19 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
             f"Entry (Limit): {order['entry_price']:.4f}\n"
             f"SL: {order['stop_loss']:.4f}\n"
             f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
-            "หมายเหตุ: แจ้งทันทีที่เจอ zone (Set \u0026 Forget) — วาง Limit Order ไว้รอได้เลย "
+            "หมายเหตุ: แจ้งทันทีที่เจอ zone (Set & Forget) — วาง Limit Order ไว้รอได้เลย "
             "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
         send_alert_to_targets(config, msg)
 
+        # เพิ่ม analyze_structure() ตรงนี้ (ไม่ยิง API เพิ่ม แค่วิเคราะห์จาก df_ind_plan ที่ดึงมาแล้ว) เพื่อ
+        # คำนวณคะแนนจริงก่อนบันทึก — เดิมส่ง score=None ทำให้ /best มองไม่เห็นออเดอร์กลุ่มนี้เลยทั้งที่ active จริง
+        structure_plan = analyze_structure(df_ind_plan, config)
+        score, _ = generic_plan_score(order["direction"], order["rr"], bias_4h, structure_plan, config)
+
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-            {"TP1": order["take_profit"]}, score=None, plan="plan5_zone_single",
+            {"TP1": order["take_profit"]}, score=score, plan="plan5_zone_single",
             current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("zone_entry_expires_hours", 8), existing_orders=existing_orders,
         )
@@ -342,13 +327,11 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
     บันทึกเป็นสถานะ 'pending' เหมือนกลุ่ม A (Set & Forget) dedup แบบเดียวกัน (เช็ค pending+running)
     """
     from indicator import add_indicators
+    from trend import analyze_structure
     from liquidity_sweep_entry import find_sweep_entry, calc_sweep_entry_order
 
     bucket = config["kvdb_bucket"]
     try:
-        if not _is_within_trading_session(config):
-            return  # นอก Session (14:00-04:00 ไทย)
-
         df_ind_plan = add_indicators(df, config)
         result = find_sweep_entry(df_ind_plan, bias_4h, config)
         if not result["valid"]:
@@ -362,10 +345,6 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
         if plan_blackout:
             return
 
-        existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง loss cooldown, dedup, save
-        if _plan_in_loss_cooldown(existing_orders, "plan6_sweep_general"):
-            return  # แพ้ติดกันครบเกณฑ์ล่าสุด -> พักแผนนี้ชั่วคราว
-
         atr_period = config.get("sl_atr_avg_period", 20)
         current_atr = (
             df_ind_plan["atr"].tail(atr_period).mean()
@@ -374,6 +353,7 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
         )
         threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
+        existing_orders = load_orders(bucket, symbol)  # โหลดครั้งเดียว ใช้ทั้ง dedup check และ save
         for o in existing_orders:
             if (o["status"] in ("pending", "running") and o.get("plan") == "plan6_sweep_general"
                     and o["direction"] == order["direction"]
@@ -382,20 +362,24 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
 
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
-            f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 6 (Liquidity Sweep + Displacement, Set \u0026 Forget)</b>\n"
+            f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 6 (Liquidity Sweep + Displacement, Set & Forget)</b>\n"
             f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
             + "\n".join(result["reasons"]) + "\n\n"
             f"Entry (Limit): {order['entry_price']:.4f}\n"
             f"SL: {order['stop_loss']:.4f}\n"
             f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
-            "หมายเหตุ: แจ้งทันทีที่เจอโอกาส (Set \u0026 Forget) — วาง Limit Order ไว้รอได้เลย "
+            "หมายเหตุ: แจ้งทันทีที่เจอโอกาส (Set & Forget) — วาง Limit Order ไว้รอได้เลย "
             "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
         send_alert_to_targets(config, msg)
 
+        # เพิ่ม analyze_structure() เหมือน Plan 5 (ดูหมายเหตุด้านบน) — แก้บั๊ก score=None เดิม
+        structure_plan = analyze_structure(df_ind_plan, config)
+        score, _ = generic_plan_score(order["direction"], order["rr"], bias_4h, structure_plan, config)
+
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-            {"TP1": order["take_profit"]}, score=None, plan="plan6_sweep_general",
+            {"TP1": order["take_profit"]}, score=score, plan="plan6_sweep_general",
             current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("sweep_entry_expires_hours", 6), existing_orders=existing_orders,
         )
@@ -416,13 +400,11 @@ def check_qm_pattern_trigger(df, config, symbol):
     ไม่ต้องใช้ bias_4h เพราะกลุ่ม D หาโครงสร้างจาก swing points ของ timeframe เข้าไม้เองล้วนๆ
     """
     from indicator import add_indicators
+    from trend import analyze_structure
     from qm_pattern_entry import find_qm_pattern, calc_qm_entry_order
 
     bucket = config["kvdb_bucket"]
     try:
-        if not _is_within_trading_session(config):
-            return  # นอก Session (14:00-04:00 ไทย)
-
         df_ind_plan = add_indicators(df, config)
         result = find_qm_pattern(df_ind_plan, config)
         if not result["valid"]:
@@ -445,8 +427,6 @@ def check_qm_pattern_trigger(df, config, symbol):
         threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
         existing_orders = load_orders(bucket, symbol)
-        if _plan_in_loss_cooldown(existing_orders, "plan7_qm_pattern"):
-            return  # แพ้ติดกันครบเกณฑ์ล่าสุด -> พักแผนนี้ชั่วคราว
         for o in existing_orders:
             if (o["status"] in ("pending", "running") and o.get("plan") == "plan7_qm_pattern"
                     and o["direction"] == order["direction"]
@@ -455,20 +435,25 @@ def check_qm_pattern_trigger(df, config, symbol):
 
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
-            f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 7 (Quasimodo Pattern, Set \u0026 Forget)</b>\n"
+            f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 7 (Quasimodo Pattern, Set & Forget)</b>\n"
             f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
             + "\n".join(result["reasons"]) + "\n\n"
             f"Entry (Limit): {order['entry_price']:.4f}\n"
             f"SL: {order['stop_loss']:.4f}\n"
             f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
-            "หมายเหตุ: แจ้งทันทีที่เจอโครงสร้าง (Set \u0026 Forget) — วาง Limit Order ไว้รอได้เลย "
+            "หมายเหตุ: แจ้งทันทีที่เจอโครงสร้าง (Set & Forget) — วาง Limit Order ไว้รอได้เลย "
             "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
         send_alert_to_targets(config, msg)
 
+        # เพิ่ม analyze_structure() (ไม่ยิง API เพิ่ม) แล้วคำนวณคะแนนจริง — ไม่มี bias_4h ให้ใช้ตามสถาปัตยกรรม
+        # เดิมของกลุ่ม D (ดู docstring) ส่ง None ไป ยังได้คะแนนพื้นฐาน + RR quality + เทรนด์หลัก 15M ตามปกติ
+        structure_plan = analyze_structure(df_ind_plan, config)
+        score, _ = generic_plan_score(order["direction"], order["rr"], None, structure_plan, config)
+
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-            {"TP1": order["take_profit"]}, score=None, plan="plan7_qm_pattern",
+            {"TP1": order["take_profit"]}, score=score, plan="plan7_qm_pattern",
             current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("qm_entry_expires_hours", 8), existing_orders=existing_orders,
         )
@@ -489,13 +474,11 @@ def check_flag_pattern_trigger(df, config, symbol):
     'below' คำนวณอัตโนมัติใน add_pending_order() จาก current_price ที่ส่งเข้าไป) dedup แบบเดียวกัน
     """
     from indicator import add_indicators
+    from trend import analyze_structure
     from flag_pattern_entry import find_flag_pattern, calc_flag_entry_order
 
     bucket = config["kvdb_bucket"]
     try:
-        if not _is_within_trading_session(config):
-            return  # นอก Session (14:00-04:00 ไทย)
-
         df_ind_plan = add_indicators(df, config)
         result = find_flag_pattern(df_ind_plan, config)
         if not result["valid"]:
@@ -518,8 +501,6 @@ def check_flag_pattern_trigger(df, config, symbol):
         threshold = current_atr if current_atr else config.get("min_sl_distance", 10.0)
 
         existing_orders = load_orders(bucket, symbol)
-        if _plan_in_loss_cooldown(existing_orders, "plan8_flag_pattern"):
-            return  # แพ้ติดกันครบเกณฑ์ล่าสุด -> พักแผนนี้ชั่วคราว
         for o in existing_orders:
             if (o["status"] in ("pending", "running") and o.get("plan") == "plan8_flag_pattern"
                     and o["direction"] == order["direction"]
@@ -528,20 +509,25 @@ def check_flag_pattern_trigger(df, config, symbol):
 
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
-            f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 8 (Flag Pattern, Set \u0026 Forget)</b>\n"
+            f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 8 (Flag Pattern, Set & Forget)</b>\n"
             f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
             + "\n".join(result["reasons"]) + "\n\n"
             f"Entry (Stop): {order['entry_price']:.4f}\n"
             f"SL: {order['stop_loss']:.4f}\n"
             f"TP: {order['take_profit']:.4f} (RR {order['rr']})\n\n"
-            "หมายเหตุ: แจ้งทันทีที่เจอ pattern (Set \u0026 Forget) — วาง Stop Order รอ breakout ได้เลย "
+            "หมายเหตุ: แจ้งทันทีที่เจอ pattern (Set & Forget) — วาง Stop Order รอ breakout ได้เลย "
             "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะทะลุกรอบไปถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
         send_alert_to_targets(config, msg)
 
+        # เพิ่ม analyze_structure() (ไม่ยิง API เพิ่ม) แล้วคำนวณคะแนนจริง — ไม่มี bias_4h ให้ใช้ตามสถาปัตยกรรม
+        # เดิมของกลุ่ม B เช่นกัน ส่ง None ไป ยังได้คะแนนพื้นฐาน + RR quality + เทรนด์หลัก 15M ตามปกติ
+        structure_plan = analyze_structure(df_ind_plan, config)
+        score, _ = generic_plan_score(order["direction"], order["rr"], None, structure_plan, config)
+
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
-            {"TP1": order["take_profit"]}, score=None, plan="plan8_flag_pattern",
+            {"TP1": order["take_profit"]}, score=score, plan="plan8_flag_pattern",
             current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("flag_entry_expires_hours", 6), existing_orders=existing_orders,
         )
