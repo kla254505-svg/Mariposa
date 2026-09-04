@@ -770,6 +770,19 @@ def _cmd_sheetscheck(ctx):
     return "\n".join(lines)
 
 
+def _cmd_best(ctx):
+    """คำสั่ง /best (ใหม่) — สรุปเป็นข้อความเดียวว่า "แผนไหนน่าเข้าที่สุดตอนนี้" ต้องผ่าน 2 เกณฑ์พร้อม
+    กัน: (1) คะแนน (Score) สูงสุดในบรรดาแผนที่ active อยู่ตอนนี้ (2) ความเห็นล่าสุดของ Central AI Layer
+    ต้องเป็น VALID เท่านั้น — พร้อมเช็คสถานะ "มาช้าไม่ควรเข้าแล้ว" (ราคาวิ่งเลย Entry ไปเกิน 20% ของ
+    ระยะ Entry-to-SL) ให้ด้วย ดูรายละเอียดเกณฑ์/ข้อจำกัด (โดยเฉพาะเรื่อง AI ประเมินภาพรวมไม่ได้แยก
+    รายแผน) ที่ docstring หัวไฟล์ best_plan.py"""
+    import best_plan
+    current_price = float(ctx["df_ind"]["close"].iloc[-1])
+    return best_plan.format_best_plan_message(
+        ctx["config"], ctx["symbol"], current_price, symbol_label=_symbol_label(ctx["symbol"])
+    )
+
+
 
 
 def _cmd_testbox(ctx):
@@ -970,6 +983,7 @@ COMMAND_HANDLERS = {
     "sheetscheck": _cmd_sheetscheck,
     "test": _cmd_test,
     "testbox": _cmd_testbox,
+    "best": _cmd_best,
 }
 
 
