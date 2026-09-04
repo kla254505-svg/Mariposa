@@ -45,6 +45,8 @@ from plan_score import generic_plan_score, determine_master_trend
 from config import get_symbol_config
 import ai_layer
 import sheets_log
+import plan_summary
+from alert_dispatcher import send_alert_to_targets
 
 TREND_LABEL = {"bullish": "ขาขึ้น", "bearish": "ขาลง", "sideway": "Sideway"}
 STRENGTH_LABEL = {"strong": "(Strong)", "weak": "(Weak — กำลังก่อตัว)", "none": ""}
@@ -770,6 +772,53 @@ def _cmd_sheetscheck(ctx):
 
 
 
+def _cmd_testbox(ctx):
+    """คำสั่ง /testbox — ยิงตัวอย่างข้อความทั้ง 3 กล่องของฟีเจอร์ "แผนที่แนะนำ" (plan_summary.py)
+    ออกมาให้ดูทันที ไม่ต้องรอสัญญาณจริง ใช้ข้อมูลปลอม (mock) ล้วนๆ ไม่ยุ่งกับ orders.py/kvdb จริง
+    เลยไม่กระทบสถิติ/การติดตาม batch จริงของระบบแต่อย่างใด
+
+    ไม่เรียก Claude API เลย (plan_summary.py เป็นแค่ Python จัดข้อความ ไม่ใช้ AI) — กดกี่ครั้งก็ไม่เสีย
+    token เพิ่ม ต่างจาก /test ที่เรียก Claude API จริงทุกครั้ง"""
+    config = ctx["config"]
+    symbol = ctx["symbol"]
+
+    mock_pending = [
+        {"id": "MOCK-1", "plan": "plan5_zone_single", "direction": "bearish",
+         "entry_price": 4493.574, "stop_loss": 4503.574,
+         "take_profits": {"TP1": 4283.206}, "score": 40, "status": "pending"},
+        {"id": "MOCK-2", "plan": "plan4_daily_continuation", "direction": "bearish",
+         "entry_price": 4491.285, "stop_loss": 4494.18,
+         "take_profits": {"TP1": 4283.206}, "score": 35, "status": "pending"},
+    ]
+    mock_partial_fill = [
+        {**mock_pending[0], "status": "running"},
+        mock_pending[1],
+    ]
+    mock_result = [
+        {**mock_pending[0], "status": "win"},
+        {**mock_pending[1], "status": "loss"},
+    ]
+
+    box1 = plan_summary.format_plan_list_message(symbol, mock_pending)
+    box2 = plan_summary.format_status_message(symbol, mock_partial_fill)
+    box3 = plan_summary.format_result_message(symbol, mock_result)
+
+    for box in (box1, box2, box3):
+        send_alert_to_targets(config, "🧪 <b>[TESTBOX ตัวอย่าง — ไม่ใช่สัญญาณจริง]</b>\n\n" + box,
+                               log_prefix="[Testbox]")
+
+    return (
+        "🧪 <b>ส่งตัวอย่างครบ 3 กล่องแล้วครับ</b> (เลื่อนดูข้อความถัดไปในแชท)\n\n"
+        "📊 <b>กล่องที่ 1 — แผนที่แนะนำ</b>\n"
+        "ส่งตอนมีชุดแผนอันดับ 1-3 ใหม่เกิดขึ้น (คะแนนสูงสุด 3 อันดับที่ active อยู่)\n\n"
+        "🎯 <b>กล่องที่ 2 — อัปเดตสถานะ</b>\n"
+        "ส่งตอนมีแผนในชุดเดิมราคาวิ่งเข้าไม้จริง (ยังไม่ถึง TP/SL)\n\n"
+        "🏁 <b>กล่องที่ 3 — สรุปผล</b>\n"
+        "ส่งตอนมีแผนไหนถึง TP/SL/หมดอายุ — โชว์สถานะทุกแผนในชุดพร้อมกันเสมอ\n\n"
+        "⚠️ ข้อมูลด้านบนเป็นของปลอมทั้งหมด (mock) ไม่กระทบสถิติ/ออเดอร์จริงในระบบครับ"
+    )
+
+
 def _cmd_test(ctx):
     """คำสั่ง /test — End-to-End Test ของทั้งระบบในคำสั่งเดียว
 
@@ -888,6 +937,7 @@ COMMAND_HANDLERS = {
     "aicheck": _cmd_aicheck,
     "sheetscheck": _cmd_sheetscheck,
     "test": _cmd_test,
+    "testbox": _cmd_testbox,
 }
 
 
