@@ -15,10 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - run: pip install -r requirements.txt
+
       - run: python main.py
         env:
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
@@ -27,18 +30,28 @@ jobs:
           HEALTHCHECKS_URL: ${{ secrets.HEALTHCHECKS_URL }}
           KVDB_BUCKET: ${{ secrets.KVDB_BUCKET }}
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
-          # --- 2 ตัวนี้คือตัวที่หายไป ทำให้บันทึกออเดอร์ลง kvdb ไม่สำเร็จทุกครั้ง (เห็นใน log:
-          # "[kvstore] ยังไม่ได้ตั้งค่า UPSTASH_REDIS_REST_URL/TOKEN ครบ") ส่งผลให้ AI Layer หา Event
-          # ไม่เจอ -> ไม่เรียก AI -> ไม่เขียน Google Sheets -> ไม่มีข้อความ AI เข้า Telegram ---
+
+          # --- Upstash Redis / KVDB ---
+          # 2 ตัวนี้คือตัวที่หายไป ทำให้บันทึกออเดอร์ลง kvdb ไม่สำเร็จทุกครั้ง
+          # เห็นใน log:
+          # "[kvstore] ยังไม่ได้ตั้งค่า UPSTASH_REDIS_REST_URL/TOKEN ครบ"
+          # ส่งผลให้ AI Layer หา Event ไม่เจอ -> ไม่เรียก AI
+          # -> ไม่เขียน Google Sheets -> ไม่มีข้อความ AI เข้า Telegram ---
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+
           # --- Central AI Layer (ai_layer.py) ---
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AI_MODEL: ${{ secrets.AI_MODEL }}
+
           # --- Google Sheets Logging (sheets_log.py) ---
           GOOGLE_SHEETS_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SHEETS_CREDENTIALS_JSON }}
-          # แก้บั๊ก: เดิมเขียน secrets.GOOGLE_SHEET_ID (ไม่มี S) แต่ secret จริงที่ตั้งไว้ใน GitHub
-          # ชื่อ GOOGLE_SHEETS_ID (มี S) — ชื่อไม่ตรงกัน ทำให้ค่าที่ได้ว่างเปล่าเงียบๆ ทุกรอบ cron
-          # (Render ไม่โดนกระทบเพราะตั้ง Environment Variable แยกต่างหาก คนละที่กับ GitHub Secrets)
-          # ผลคือ main.py (ตัวจริงที่วิเคราะห์+บันทึกออเดอร์) เขียนลง Google Sheets ไม่ได้เลยตั้งแต่ต้น
+
+          # แก้บั๊ก: เดิมเขียน secrets.GOOGLE_SHEET_ID (ไม่มี S)
+          # แต่ secret จริงที่ตั้งไว้ใน GitHub ชื่อ GOOGLE_SHEETS_ID (มี S)
+          # ชื่อไม่ตรงกัน ทำให้ค่าที่ได้ว่างเปล่าเงียบๆ ทุกรอบ cron
+          # (Render ไม่โดนกระทบเพราะตั้ง Environment Variable แยกต่างหาก
+          # คนละที่กับ GitHub Secrets)
+          # ผลคือ main.py (ตัวจริงที่วิเคราะห์+บันทึกออเดอร์)
+          # เขียนลง Google Sheets ไม่ได้เลยตั้งแต่ต้น
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
