@@ -22,10 +22,8 @@ from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
-from orders import add_order, update_orders_status, update_pending_orders, build_orders_dashboard
-from alert_dispatcher import send_alert_to_targets
+from orders import add_order, add_pending_order, load_orders, update_orders_status, update_pending_orders, build_orders_dashboard
 import plan_runner
-import plan_summary
 import ai_layer
 from news_scheduler import (
     refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning,
@@ -342,6 +340,39 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
 
                             kv_set(config["kvdb_bucket"], pending_key,
                                    json.dumps({"entry_price": entry_signal["entry_price"]}))
+
+                            # --- บันทึกเป็น pending order "plan1_pullback_early" ด้วย (ทำเสมอ ไม่ว่าจะปิด push หรือไม่) ---
+                            # เดิมทีถ้า 5M Trigger ไม่เคยยืนยัน setup นี้จะไม่ถูกบันทึกลง Signal_Log เลยสักที
+                            # (add_order() ของแผน 1 อยู่หลัง 5M Trigger confirm เท่านั้น) ทำให้ไม่มีข้อมูลวัดผล
+                            # ตอนนี้บันทึกเป็นสถานะ pending แยกชื่อแผน "plan1_pullback_early" เข้าวงจร
+                            # pending -> running -> win/loss/expired เหมือนแผน 5-8 (ดู orders.py) โดยใช้
+                            # SL/TP ที่คำนวณจากโซน 15M เดิม (ยังไม่ tighten ตามจุดกลับตัว 5M เพราะยังไม่ confirm)
+                            # แยกชื่อแผนออกจาก "plan1_pullback" (ผ่าน 5M ยืนยันแล้วเท่านั้น) เพื่อให้เทียบกันได้
+                            # ทีหลังว่าการรอ 5M Trigger ก่อนเข้าจริงช่วยเพิ่ม win rate จริงหรือไม่ (ดู
+                            # build_stats_message ใน orders.py ที่เตรียมข้อความเปรียบเทียบนี้ไว้อยู่แล้ว)
+                            try:
+                                existing_orders_early = load_orders(config["kvdb_bucket"], symbol)
+                                has_similar_early = any(
+                                    o["status"] in ("pending", "running")
+                                    and o.get("plan") == "plan1_pullback_early"
+                                    and o["direction"] == entry_signal["direction"]
+                                    and abs(o["entry_price"] - entry_signal["entry_price"]) < stale_threshold_pending
+                                    for o in existing_orders_early
+                                )
+                                if not has_similar_early:
+                                    saved_early = add_pending_order(
+                                        config["kvdb_bucket"], symbol, entry_signal["direction"],
+                                        entry_signal["entry_price"], stop_loss, take_profits,
+                                        score=confidence["score"], plan="plan1_pullback_early",
+                                        current_price=df["close"].iloc[-1],
+                                        expires_in_hours=config.get("plan1_early_expires_hours", 6),
+                                        existing_orders=existing_orders_early,
+                                    )
+                                    if saved_early is None:
+                                        print(f"[Order Tracking Error] บันทึก pending order "
+                                              f"plan1_pullback_early ({symbol}) ลง kvdb ไม่สำเร็จ")
+                            except Exception as e:
+                                print(f"[Plan 1 Early Order Tracking Error] {symbol}: {e}")
                     except Exception as e:
                         print(f"[Pending Order Notice Error] {e}")
             else:
@@ -518,16 +549,6 @@ if __name__ == "__main__":
             # --- กลุ่ม B (Flag Pattern — เดิมต้องพิมพ์ /order8 เองเท่านั้น) ---
             plan_runner.check_flag_pattern_trigger(df, CONFIG, display_symbol)
 
-            # --- Ranked Plan Summary (แผนหลัก/แผนที่ 2/แผนที่ 3 เรียงตามคะแนน) ---
-            # ฟีเจอร์เสริมแยกจาก Order Alert ปกติทั้งหมดด้านบน (ตกลงออกแบบกับผู้ใช้ไว้ 3 ก.ย. 69)
-            # อ่านอย่างเดียวจาก orders.py (เหมือน Central AI Layer ด้านล่าง) ไม่แตะ Plan 1-8 เลย
-            # เช็คหลัง update_pending_orders/update_orders_status ด้านบนเสมอ ให้เห็นสถานะสดล่าสุด
-            try:
-                for msg in plan_summary.run_plan_summary_cycle(CONFIG["kvdb_bucket"], display_symbol, CONFIG):
-                    send_alert_to_targets(CONFIG, msg, log_prefix="[Plan Summary]")
-            except Exception as e:
-                print(f"[Plan Summary Error] {display_symbol}: {e}")
-
             # --- Central AI Second Opinion Layer (Choice B, Event-Driven) ---
             # เช็คหลังแผน 1-8 ครบแล้วเท่านั้น (จุดเดียว ไม่แตะ Plan 1-8 หรือ orders.py เลย)
             # ai_layer.run_central_ai_cycle() เป็นจุดตัดสินใจ+เรียก Claude API จุดเดียวในทั้งระบบ —
@@ -686,10 +707,3 @@ if __name__ == "__main__":
         # ping บอก Healthchecks.io เสมอ ไม่ว่าข้างบนจะสำเร็จหรือมี error ก็ตาม
         # (นี่คือหน้าที่จริงของ Dead Man's Switch — ต้องรู้ว่าบอทยังไม่ตายแม้ตอน API ล่ม)
         ping_healthcheck(CONFIG["healthchecks_url"])
-        # เช่นเดียวกัน บันทึก heartbeat ของรอบนี้ไว้ให้หน้า Dashboard เห็นว่า cron-job.org →
-        # GitHub Actions → main.py ยังวิ่งมาถึงจุดนี้อยู่ (ห้าม throw ออกไปเด็ดขาด)
-        try:
-            from status_tracker import heartbeat
-            heartbeat("main_cycle")
-        except Exception:
-            pass
