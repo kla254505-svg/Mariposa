@@ -30,6 +30,19 @@ Signal_Log/AI_Log ที่ export มาดูจริง)
     เหมือน Plan 5/6 แล้วส่ง bias_4h=None
 
 ไม่กระทบ Plan 1 (อยู่ใน main.py แยกต่างหาก คำนวณคะแนนแบบละเอียดของตัวเองอยู่แล้วผ่าน score.py)
+
+*** แก้ไขล่าสุด (7 ก.ย. 2026): เพิ่มเช็ค "โซนฝั่งตรงข้ามขวางทาง" ให้แผนที่ 2/4 ***
+ผู้ใช้สังเกตเห็นเคสจริง: แผนที่ 5 (ดูโซนอยู่แล้ว) โดน SL แล้วแผนที่ 2 (Breakout) ยิงตามมาติดๆ ก็โดน SL
+เหมือนกัน — ตรวจโค้ดแล้วพบว่าแผนที่ 2/4 อิงแค่ "ราคาทะลุ swing point ไปแรงๆ" ไม่เคยเช็คเลยว่าทางที่จะ
+เดินไปเป้าหมาย (TP) มีกำแพงอุปสงค์/อุปทานจริง (Order Block/FVG ฝั่งตรงข้าม หรือ Liquidity Pool ฝั่ง
+ตรงข้าม) ขวางอยู่หรือเปล่า ต่างจากแผนที่ 1/5/6 ที่ใช้โซนพวกนี้เป็นส่วนหนึ่งของการหา entry อยู่แล้ว
+
+เพิ่ม find_opposing_zone_in_path() (ใน zones.py) มาเช็คตรงนี้: คำนวณ Entry/SL/TP ของแผน 2/4 ตามเดิม
+ทุกอย่างก่อน แล้วค่อยเช็คว่าระหว่าง Entry กับ TP มีกำแพงฝั่งตรงข้ามขวางไหม ถ้ามี — ข้ามสัญญาณนี้ไปเลย
+(ไม่ส่ง Alert ไม่บันทึกออเดอร์) โดย "ไม่" mark dedup state ไว้ เพราะถ้ากำแพงนั้นถูกแตะ/mitigate ไปทีหลัง
+(เช่นราคาทะลุมันไปได้จริงในรอบถัดๆ ไป) ก็ควรให้สัญญาณเดิมผ่านได้ตามปกติ ไม่ใช่ถูกบล็อกค้างตลอดไป
+ไม่กระทบแผนที่ 3 (สวนเทรนด์) เพราะ TP ของแผนนี้เป็น Equilibrium ของ Premium/Discount ไม่ใช่ measured
+move แบบแผน 2 ผู้ใช้เลือกให้ทำแค่แผน 2/4 ก่อน (ดูผลจริงก่อนจะขยายไปแผนอื่น)
 """
 from kvstore import kv_get, kv_set
 from news_scheduler import is_in_news_blackout
@@ -38,6 +51,7 @@ from scenario import (
     calc_breakout_order, calc_counter_trend_order,
     get_daily_bias_and_range, detect_plan4_signal, calc_plan4_order,
 )
+from zones import find_opposing_zone_in_path
 from alert_dispatcher import send_alert_to_targets, save_plan_order
 from orders import load_orders, add_pending_order
 from plan_score import generic_plan_score
@@ -103,6 +117,39 @@ def check_plan2_plan3_triggers(df, config, symbol):
             if prev_value == dedup_value:
                 continue  # เงื่อนไขเดิมที่เคยแจ้งไปแล้ว ไม่แจ้งซ้ำ
 
+            # --- คำนวณ SL/TP ของแผนนี้ก่อนตัดสินใจส่งอะไรทั้งสิ้น (ใช้เช็คโซนฝั่งตรงข้ามด้านล่างด้วย) ---
+            # ใช้ calc_breakout_order/calc_counter_trend_order จาก scenario.py จุดเดียวกับที่
+            # telegram_bot.py ใช้แสดงผลใน /order — ถ้าคำนวณไม่สำเร็จ (หา swing/ATR ไม่ได้) จะยัง
+            # ส่ง Telegram alert ตามปกติ (ไม่ให้ alert หายเพราะแค่บันทึกสถิติพลาด) แค่ไม่มี Entry/SL/TP แนบ
+            calc_order = None
+            try:
+                if plan_key == "plan2_breakout":
+                    calc_order = calc_breakout_order(trigger, structure_plan, df_ind_plan, config)
+                else:
+                    calc_order = calc_counter_trend_order(trigger, df_ind_plan, config)
+            except Exception as e:
+                print(f"[Plan {plan_key} Order Tracking Error] {e}")
+
+            # --- แผนที่ 2 (Breakout) เท่านั้น: เช็คว่าทางไป TP มีโซนฝั่งตรงข้ามขวางอยู่ไหมก่อนยิงจริง ---
+            # แผนนี้อิงแค่ "ทะลุ swing point" ไม่เคยดูเลยว่าทางไปเป้าหมายมีกำแพงอุปสงค์/อุปทานจริงขวาง
+            # อยู่หรือเปล่า (ต่างจากแผน 1/5/6 ที่ใช้ OB/FVG/Liquidity หา entry อยู่แล้ว) — เจอเคสจริงที่
+            # ราคาทะลุแนวเดิมไปแรงๆ ตามเงื่อนไขเดิม แต่วิ่งไปชนโซนใหญ่ที่ไม่เคยถูกตรวจสอบแล้วสวนกลับ SL
+            # ทันที ไม่ mark dedup state ตอน skip — ถ้ากำแพงนั้นถูกแตะ/mitigate ไปทีหลัง ให้สัญญาณเดิม
+            # ผ่านได้ในรอบถัดไปตามปกติ ไม่ใช่ถูกบล็อกค้างตลอดไป
+            if plan_key == "plan2_breakout" and calc_order:
+                blocker = find_opposing_zone_in_path(
+                    df_ind_plan, config, calc_order["direction"],
+                    calc_order["entry_price"], calc_order["take_profit"],
+                )
+                if blocker:
+                    print(
+                        f"[Plan 2 Breakout Skipped] {symbol}: มีโซนฝั่งตรงข้าม ({blocker['kind']} "
+                        f"{blocker['bottom']:.4f}-{blocker['top']:.4f}, พบทั้งหมด {blocker['count']} จุด) "
+                        f"ขวางทางไป TP ({calc_order['take_profit']:.4f}) — ข้ามสัญญาณนี้ กันไล่ราคาเข้าไป"
+                        f"ชนกำแพงจริงแล้วสวนกลับ SL"
+                    )
+                    continue
+
             direction_th = "LONG (ซื้อ)" if trigger["direction"] == "bullish" else "SHORT (ขาย)"
             detail = detail_template.format(**trigger) if "{" in detail_template else detail_template
             plan_msg = (
@@ -114,32 +161,20 @@ def check_plan2_plan3_triggers(df, config, symbol):
                 "ควรพิจารณาความเสี่ยงเพิ่มเติมเอง หรือลดขนาดไม้ก่อนเข้า"
             )
 
-            # --- คำนวณ SL/TP ของแผนนี้แล้วบันทึกลง Order Dashboard (เก็บสถิติไว้วัดผลย้อนหลังได้) ---
-            # ใช้ calc_breakout_order/calc_counter_trend_order จาก scenario.py จุดเดียวกับที่
-            # telegram_bot.py ใช้แสดงผลใน /order — ถ้าคำนวณไม่สำเร็จ (หา swing/ATR ไม่ได้) จะข้าม
-            # การบันทึกออเดอร์ไปเงียบๆ แต่ยังคงส่ง Telegram alert ตามปกติ (ไม่ให้ alert หายเพราะ
-            # แค่บันทึกสถิติพลาด)
-            try:
-                if plan_key == "plan2_breakout":
-                    calc_order = calc_breakout_order(trigger, structure_plan, df_ind_plan, config)
-                else:
-                    calc_order = calc_counter_trend_order(trigger, df_ind_plan, config)
-
-                if calc_order:
-                    # bias_4h ไม่มีให้ใช้ในฟังก์ชันนี้ (ไม่ได้ถูกส่งเข้ามาเป็นพารามิเตอร์) — ส่ง None ไปก่อน
-                    # ยังได้คะแนนพื้นฐาน + คุณภาพ RR + เทรนด์หลัก 15M ตามปกติ (ดีกว่า score=None เดิมที่
-                    # ทำให้ /best กรองออเดอร์นี้ทิ้งไปเลยทั้งที่ active อยู่จริง)
-                    score, _ = generic_plan_score(calc_order["direction"], calc_order["rr"], None,
-                                                   structure_plan, config)
-                    save_plan_order(config, symbol, calc_order["direction"], calc_order["entry_price"],
-                                     calc_order["stop_loss"], {"TP1": calc_order["take_profit"]},
-                                     score=score, plan_key=plan_key)
-                    plan_msg += (
-                        f"\n\nEntry: {calc_order['entry_price']:.4f} | SL: {calc_order['stop_loss']:.4f} | "
-                        f"TP: {calc_order['take_profit']:.4f} (RR {calc_order['rr']})"
-                    )
-            except Exception as e:
-                print(f"[Plan {plan_key} Order Tracking Error] {e}")
+            # --- บันทึกลง Order Dashboard (เก็บสถิติไว้วัดผลย้อนหลังได้) ---
+            if calc_order:
+                # bias_4h ไม่มีให้ใช้ในฟังก์ชันนี้ (ไม่ได้ถูกส่งเข้ามาเป็นพารามิเตอร์) — ส่ง None ไปก่อน
+                # ยังได้คะแนนพื้นฐาน + คุณภาพ RR + เทรนด์หลัก 15M ตามปกติ (ดีกว่า score=None เดิมที่
+                # ทำให้ /best กรองออเดอร์นี้ทิ้งไปเลยทั้งที่ active อยู่จริง)
+                score, _ = generic_plan_score(calc_order["direction"], calc_order["rr"], None,
+                                               structure_plan, config)
+                save_plan_order(config, symbol, calc_order["direction"], calc_order["entry_price"],
+                                 calc_order["stop_loss"], {"TP1": calc_order["take_profit"]},
+                                 score=score, plan_key=plan_key)
+                plan_msg += (
+                    f"\n\nEntry: {calc_order['entry_price']:.4f} | SL: {calc_order['stop_loss']:.4f} | "
+                    f"TP: {calc_order['take_profit']:.4f} (RR {calc_order['rr']})"
+                )
 
             send_alert_to_targets(config, plan_msg)
 
@@ -180,12 +215,17 @@ def set_cached_daily_range(bucket, symbol, daily_range):
     kv_set(bucket, f"daily_range_{symbol}", payload)
 
 
-def check_plan4_trigger(df_5m, config, symbol, td_symbol):
+def check_plan4_trigger(df_5m, config, symbol, td_symbol, df_15m=None):
     """
     Plan 4 (Daily Continuation): ต่างจากแผน 1-3 ตรงที่อ้างอิง Daily range ไม่ใช่ 15M/5M
     ใช้ df_5m ที่ดึงมาแล้วตอนต้นรอบนี้ (ตัวเดียวกับที่ Plan 1 ใช้หา 5M Trigger) ไม่ต้องดึงซ้ำ
     แต่ต้องดึง Daily เพิ่ม 1 ครั้ง — cache ไว้ทั้งวัน (get/set_cached_daily_range) ประหยัด quota
     dedup แบบเดียวกับ Plan 2/3: บันทึก state ตาม entry/direction กันแจ้งซ้ำขณะเงื่อนไขเดิมยังจริงอยู่
+
+    df_15m (เพิ่มใหม่, optional): ใช้เฉพาะเช็คโซนฝั่งตรงข้ามขวางทาง (ดู find_opposing_zone_in_path)
+    เท่านั้น — ใช้ 15M แทน 5M เพราะเป้าหมายของแผนนี้ (ขอบ Daily range) เป็นระดับกว้างระดับชั่วโมง-วัน
+    โซนจาก 5M จะเล็ก/สัญญาณรบกวนเกินไปสำหรับ scale นี้ ถ้าไม่ส่งเข้ามา (None) จะ fallback ไปใช้ df_5m
+    แทน (พฤติกรรมเดิมของผู้เรียกที่ยังไม่อัปเดต ไม่พัง แค่เช็คหยาบกว่า)
     """
     from fetch_data import fetch_twelvedata
 
@@ -212,6 +252,31 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol):
 
                     if prev_value != dedup_value:
                         if not is_in_news_blackout(bucket, symbol)[0]:
+                            # --- เช็คว่าทางไป TP (ขอบ Daily range) มีโซนฝั่งตรงข้ามขวางอยู่ไหมก่อนยิงจริง ---
+                            # เหตุผลเดียวกับแผนที่ 2 (ดูหมายเหตุหัวไฟล์) — แผนนี้อิงแค่ pattern พักตัว/ทะลุ
+                            # บนกรอบ Daily bias ไม่เคยเช็คเลยว่าทางไป prev_high/prev_low มีกำแพงขวางไหม
+                            # ไม่ mark dedup ตอน skip เหมือนกัน เผื่อกำแพงถูกแตะไปแล้วสัญญาณเดิมควรผ่านได้
+                            # เรียก add_indicators() ให้ก่อน (ไม่ใช่ยิง API เพิ่ม แค่คำนวณ ATR ในหน่วยความจำ)
+                            # เพราะทั้ง df_15m (ดิบจาก main.py) และ df_5m ยังไม่มีคอลัมน์ atr ติดมาด้วย —
+                            # find_order_blocks/find_fvgs/find_liquidity_pools ยังทำงานได้แม้ไม่มี atr
+                            # (มี fallback ในตัว) แต่ผลจะแม่นกว่าถ้ามี atr จริงให้ใช้คำนวณ tolerance/buffer
+                            from indicator import add_indicators as _add_indicators_for_zone_check
+                            zone_check_df = _add_indicators_for_zone_check(
+                                df_15m if df_15m is not None else df_5m, config
+                            )
+                            blocker = find_opposing_zone_in_path(
+                                zone_check_df, config, plan4_order["direction"],
+                                plan4_order["entry_price"], plan4_order["take_profit"],
+                            )
+                            if blocker:
+                                print(
+                                    f"[Plan 4 Daily Continuation Skipped] {symbol}: มีโซนฝั่งตรงข้าม "
+                                    f"({blocker['kind']} {blocker['bottom']:.4f}-{blocker['top']:.4f}, "
+                                    f"พบทั้งหมด {blocker['count']} จุด) ขวางทางไป TP "
+                                    f"({plan4_order['take_profit']:.4f}) — ข้ามสัญญาณนี้"
+                                )
+                                return
+
                             direction_th = "LONG (ซื้อ)" if plan4_order["direction"] == "bullish" else "SHORT (ขาย)"
                             plan4_msg = (
                                 f"🚨 <b>ออเดอร์เข้า — Daily Continuation (แผนที่ 4)</b>\n"

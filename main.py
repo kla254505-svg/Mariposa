@@ -534,7 +534,7 @@ if __name__ == "__main__":
             # ย้าย logic เช็ค trigger + ส่ง Telegram + บันทึก order ไปอยู่ที่ plan_runner.py/
             # alert_dispatcher.py แล้ว (เดิมอยู่ตรงนี้ทั้งก้อน ~160 บรรทัด) main.py เหลือแค่เรียกใช้
             plan_runner.check_plan2_plan3_triggers(df, CONFIG, display_symbol)
-            plan_runner.check_plan4_trigger(df_5m, CONFIG, display_symbol, td_symbol)
+            plan_runner.check_plan4_trigger(df_5m, CONFIG, display_symbol, td_symbol, df_15m=df)
 
             # --- กลุ่ม A (Set & Forget SMC Zone Entry — เดิมต้องพิมพ์ /order5 เองเท่านั้น) ---
             # เช็คอัตโนมัติทุกรอบเหมือน Plan 2-4 แล้ว ไม่ต้องรอผู้ใช้พิมพ์คำสั่งเองอีกต่อไป
