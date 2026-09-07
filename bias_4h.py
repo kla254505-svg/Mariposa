@@ -22,7 +22,17 @@ def analyze_4h_bias(df, config):
       swing_high/low      : ขอบบน-ล่างของ range ที่ใช้คำนวณโซน
       liquidity           : equal highs/lows ใหญ่บน 4H
     """
-    structure = analyze_structure(df, config)
+    # *** ใหม่ (7 ก.ย. 2026): ใช้ swing_lookback แยกเฉพาะของ 4H Bias (bias4h_swing_lookback, ดู
+    # config.py) แทน "swing_lookback" ตัวกลางที่ Strategy ทุกแผนใช้ร่วมกัน (=7 -> ต้องรอ ~28 ชม.
+    # กว่าจะยืนยันสวิงใหม่ ทำให้ 4H trend ค้างสวนทาง 1H/15M นานเกินจริง ดูรายละเอียดเต็มใน config.py)
+    # สร้าง config สำเนาเฉพาะจุดนี้ (ไม่แก้ config เดิมที่ผู้เรียกส่งเข้ามา) แล้วสลับแค่ค่า
+    # "swing_lookback" ก่อนส่งเข้า analyze_structure() เท่านั้น — ฟังก์ชัน/แผนอื่นที่เรียก
+    # analyze_structure(df, config) ตรงๆ ด้วย config เดิมจะไม่ถูกกระทบเลยแม้แต่นิดเดียว
+    trend_config = dict(config)
+    trend_config["swing_lookback"] = config.get(
+        "bias4h_swing_lookback", config.get("swing_lookback", 7)
+    )
+    structure = analyze_structure(df, trend_config)
 
     result = {
         "trend": structure["trend"],
@@ -57,6 +67,10 @@ def analyze_4h_bias(df, config):
             else:
                 result["zone"] = "equilibrium"
 
+    # หมายเหตุ: liquidity pools (equal highs/lows) ยังคงใช้ "config" เดิมตรงๆ (swing_lookback=7 เดิม)
+    # ไม่ใช้ trend_config ที่ปรับใหม่ — เพราะ liquidity pool เป็นคนละแนวคิดกับเทรนด์/โซน (หาโซนที่
+    # ราคาน่าจะถูก "กวาด" ซึ่งควรมองภาพกว้าง/นิ่งกว่า ไม่ใช่ตัวที่ทำให้ AI ประเมิน confidence ต่ำค้าง)
+    # และ Strategy แผนอื่นที่ใช้ bias_4h["liquidity"] ต่อ ควรได้พฤติกรรมเดิมทุกประการ ไม่เปลี่ยนแปลง
     if len(df):
         result["liquidity"] = find_liquidity_pools(df, config)
 
