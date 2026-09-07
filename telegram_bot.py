@@ -767,9 +767,20 @@ def _cmd_aicheck(ctx):
         lines.append("📋 Central AI Layer ยังไม่เคยถูกเรียกจริงเลย (ยังไม่มี Event ที่น่าสนใจเกิดขึ้น "
                       "ในช่วงเวลาที่อนุญาตให้ทำงานมาก่อน)")
 
+    # *** แก้ไขล่าสุด (7 ก.ย. 2026): แก้บั๊ก hardcode ข้อความ "จ-ศ" ***
+    # เดิมพิมพ์ "จ-ศ" ตรงๆ ในข้อความ ไม่ได้อ่านจาก config['ai_time_filter_days'] เลย ทำให้ผู้ใช้ที่แก้
+    # ai_time_filter_days เป็นทุกวัน (0-6) แล้ว ยังเห็นข้อความ "จ-ศ" ค้างอยู่ เข้าใจผิดว่ายังไม่มีผล
+    # ทั้งที่ config จริงเปลี่ยนแล้ว — ตอนนี้อ่านค่าจริงมาแปลงเป็นข้อความให้ตรงกับที่ตั้งไว้จริง
     hours = config.get("ai_time_filter_hours", (10, 22))
+    days = config.get("ai_time_filter_days", {0, 1, 2, 3, 4})
+    day_names = ["จ", "อ", "พ", "พฤ", "ศ", "ส", "อา"]
+    if days == set(range(7)):
+        days_text = "ทุกวัน"
+    else:
+        days_text = ",".join(day_names[d] for d in sorted(days)) if days else "ไม่มีวันที่เปิดเลย"
+    hours_text = "ตลอด 24 ชม." if (hours[0], hours[1]) == (0, 24) else f"{hours[0]}:00-{hours[1]}:00"
     lines.append("")
-    lines.append(f"ช่วงเวลาที่ AI ทำงาน: จ-ศ {hours[0]}:00-{hours[1]}:00 เวลาไทย")
+    lines.append(f"ช่วงเวลาที่ AI ทำงาน: {days_text} {hours_text} เวลาไทย")
     lines.append(f"เปิดใช้งานอยู่: {'ใช่' if config.get('ai_analysis_enabled', True) else 'ปิดอยู่'}")
 
     return "\n".join(lines)

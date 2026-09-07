@@ -75,10 +75,13 @@ CONFIG = {
     "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY", "").strip(),
     "ai_model": os.environ.get("AI_MODEL", "claude-sonnet-5").strip(),
     "ai_analysis_enabled": os.environ.get("AI_ANALYSIS_ENABLED", "true").strip().lower() != "false",
-    # เวลาที่อนุญาตให้เรียก AI เท่านั้น (จ-ศ 10:00-22:00 เวลาไทย) — คุมเฉพาะ AI Layer ไม่เกี่ยวกับ
-    # Strategy (Plan 1-8) ที่ยังทำงาน 24/7 เหมือนเดิมทุกประการ ห้ามเอาไปใช้ gate Strategy เด็ดขาด
-    "ai_time_filter_days": {0, 1, 2, 3, 4},  # Mon=0 ... Sun=6 (ตาม datetime.weekday())
-    "ai_time_filter_hours": (10, 22),
+    # *** แก้ไขล่าสุด (7 ก.ย. 2026): เปิดให้ AI ทำงาน 24/7 ทุกวัน (เดิม จ-ศ 10:00-22:00 เวลาไทย) ***
+    # ค่าสองตัวนี้เป็น literal ใน config.py ตรงๆ ไม่มี env var ให้ override จากภายนอก (ต่างจากตัวแปร
+    # อื่นๆ ในไฟล์นี้ที่อ่านจาก os.environ) เปลี่ยนพฤติกรรมได้ที่นี่จุดเดียวเท่านั้น — คุมเฉพาะการเรียก
+    # AI/ส่ง AI Second Opinion เท่านั้น ไม่เกี่ยวกับ Strategy (Plan 1-8) ที่ทำงาน 24/7 เหมือนเดิมทุก
+    # ประการอยู่แล้วไม่ว่าค่านี้จะเป็นอะไร ห้ามเอาไปใช้ gate Strategy เด็ดขาด
+    "ai_time_filter_days": {0, 1, 2, 3, 4, 5, 6},  # Mon=0 ... Sun=6 (ตาม datetime.weekday()) — ทุกวัน
+    "ai_time_filter_hours": (0, 24),  # ทุกชั่วโมง (start_hour <= now.hour < end_hour ดู ai_layer.py)
     # กันเรียก AI ถี่เกินไปแม้ state จะเปลี่ยนบ่อยผิดปกติ (เช่น เผื่อ cron รันซ้อนกัน) — ตั้งไว้ "สั้น
     # กว่า" ความถี่ cron จริง (5 นาที) เสมอ ไม่งั้นจะไปบล็อกสัญญาณใหม่ที่เกิดขึ้นจริงในรอบถัดไปโดยไม่
     # ตั้งใจ (เจอบั๊กนี้จริงตอนเทส: ตั้งไว้ 10 นาทีแล้ว Plan ใหม่ที่เกิดขึ้นในรอบถัดไป — ห่างจากครั้งก่อน
