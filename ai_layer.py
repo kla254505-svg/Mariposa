@@ -62,12 +62,20 @@ ALLOWED_RISK = {"LOW", "MEDIUM", "HIGH"}
 SYSTEM_PROMPT = """คุณเป็น "Second Opinion" ให้บอทเทรด ไม่ใช่ตัวตัดสินใจหลัก
 
 กติกาที่ห้ามฝ่าฝืนเด็ดขาด:
-1. ห้ามเสนอ Entry, SL, TP, Direction, หรือ RR ใหม่ใดๆ ทั้งสิ้น ค่าพวกนี้ Strategy (แผนการเทรด)
-   ตัดสินใจไปแล้วและเป็นค่าสุดท้าย หน้าที่คุณคือประเมินคุณภาพของสัญญาณที่ Strategy สร้างไว้แล้วเท่านั้น
+1. ห้ามเสนอ Entry, SL, TP, Direction, หรือ RR ใหม่ให้กับแผนของ Strategy ที่ส่งมาให้ประเมินโดยเด็ดขาด
+   ค่าพวกนี้ Strategy (แผนการเทรด) ตัดสินใจไปแล้วและเป็นค่าสุดท้าย หน้าที่คุณต่อแผนเหล่านั้นคือประเมิน
+   คุณภาพของสัญญาณเท่านั้น — ข้อยกเว้นเดียวคือฟิลด์ "ai_plan" ท้าย JSON (ดูข้อ 4) ซึ่งเป็นพื้นที่แยก
+   ต่างหากให้คุณเสนอความเห็น/แผนอิสระของตัวเอง ไม่เกี่ยวกับแผนของ Strategy ด้านบนแต่อย่างใด
 2. ห้ามสร้างข้อมูลตลาดขึ้นมาเอง (ห้ามเดา) ใช้เฉพาะข้อมูลที่ได้รับมาในข้อความเท่านั้น ถ้าข้อมูลไหน
    เป็น null หรือ "not_available" ให้ระบุว่าไม่มีข้อมูลส่วนนั้น อย่าคาดเดาแทน
 3. ต้องตอบเป็น JSON ที่ถูกต้องเท่านั้น ห้ามมีข้อความอื่นนอก JSON ห้ามใส่ ```json หรือ markdown fence ใดๆ
    ห้ามมีคำอธิบายก่อน/หลัง JSON
+4. ฟิลด์ "ai_plan": นี่คือพื้นที่ให้คุณเสนอ "แผนของคุณเอง" ได้ 1 แผน (ไม่ใช่การประเมิน Strategy แต่เป็น
+   ความเห็นอิสระของคุณเองจากข้อมูลชุดเดียวกันที่ได้รับ) — เสนอเฉพาะตอนที่คุณมั่นใจในทิศทาง/จุดเข้าจริงๆ
+   เท่านั้น ถ้าตลาดตอนนี้ไม่มีจุดที่คุณมั่นใจพอ ให้ตอบ "direction": "NONE" และใส่ confidence/entry/sl/tp
+   เป็น null ทั้งหมด ห้ามฝืนเสนอแผนทั้งที่ไม่มั่นใจจริงเด็ดขาด ถ้าเสนอแผน (LONG/SHORT) ราคาทุกตัวต้อง
+   สมเหตุสมผลเทียบกับราคาปัจจุบันที่ได้รับมา และ SL ต้องอยู่คนละฝั่งกับ TP เทียบกับ Entry เสมอ
+   (LONG: SL ต่ำกว่า Entry ต่ำกว่า TP | SHORT: SL สูงกว่า Entry สูงกว่า TP)
 
 รูปแบบ JSON ที่ต้องตอบ (ทุก field บังคับ):
 {
@@ -78,7 +86,14 @@ SYSTEM_PROMPT = """คุณเป็น "Second Opinion" ให้บอทเ�
   "conflict": "<ข้อความสั้นๆ ภาษาไทย อธิบายว่ามีแผนไหนขัดกันไหม หรือ 'ไม่มี' ถ้าไม่มี>",
   "reason": "<เหตุผลสั้นๆ ภาษาไทย 1-3 ประโยค ว่าทำไมประเมินแบบนี้ อ้างอิงข้อมูลที่ได้รับมาเท่านั้น>",
   "key_observation": "<ภาษาไทย สิ่งที่ควรจับตาดูต่อไป เช่น เงื่อนไขที่จะยืนยัน/ยกเลิกสมมติฐานนี้>",
-  "next_event_to_watch": "<ภาษาไทย เหตุการณ์ถัดไปที่ควรรอดู>"
+  "next_event_to_watch": "<ภาษาไทย เหตุการณ์ถัดไปที่ควรรอดู>",
+  "ai_plan": {
+    "direction": "LONG" | "SHORT" | "NONE",
+    "confidence": <จำนวนเต็ม 0-100 ถ้า direction ไม่ใช่ NONE, ไม่งั้นใส่ null>,
+    "entry": <ตัวเลขราคา ถ้า direction ไม่ใช่ NONE, ไม่งั้นใส่ null>,
+    "sl": <ตัวเลขราคา ถ้า direction ไม่ใช่ NONE, ไม่งั้นใส่ null>,
+    "tp": <ตัวเลขราคา ถ้า direction ไม่ใช่ NONE, ไม่งั้นใส่ null>
+  }
 }
 """
 
@@ -167,12 +182,49 @@ def _strip_json_fence(text):
     return t.strip()
 
 
+ALLOWED_AI_PLAN_DIRECTION = {"LONG", "SHORT", "NONE"}
+
+
+def _validate_ai_plan(ai_plan):
+    """เช็คโครงสร้าง/ค่าของฟิลด์ ai_plan (แผนอิสระที่ AI เสนอเอง แยกจากแผนของ Strategy) — เข้มงวด
+    เป็นพิเศษเพราะเป็นตัวเลขราคาที่ AI คิดขึ้นเอง (ต่างจากแผนของ Strategy ที่มาจากสูตรคำนวณตรงๆ):
+      - direction ต้องเป็น LONG/SHORT/NONE เท่านั้น
+      - ตอน NONE (AI ไม่มั่นใจ) ต้องไม่มีตัวเลขราคาติดมาด้วย กันเคส AI ใส่ราคามาทั้งที่บอกว่าไม่มั่นใจ
+      - ตอน LONG/SHORT ต้องมี confidence/entry/sl/tp ครบเป็นตัวเลขจริง และ SL ต้องอยู่คนละฝั่งกับ TP
+        เทียบกับ Entry เสมอ (LONG: sl < entry < tp, SHORT: sl > entry > tp) กัน AI ใส่ SL/TP สลับข้าง
+        ซึ่งจะทำให้ผู้ใช้เข้าใจผิดเป็นอันตรายได้ตรงๆ"""
+    if not isinstance(ai_plan, dict):
+        return False
+    direction = ai_plan.get("direction")
+    if direction not in ALLOWED_AI_PLAN_DIRECTION:
+        return False
+
+    if direction == "NONE":
+        return all(ai_plan.get(k) is None for k in ("confidence", "entry", "sl", "tp"))
+
+    try:
+        plan_conf = int(ai_plan.get("confidence"))
+        if not (0 <= plan_conf <= 100):
+            return False
+        entry = float(ai_plan.get("entry"))
+        sl = float(ai_plan.get("sl"))
+        tp = float(ai_plan.get("tp"))
+    except (TypeError, ValueError):
+        return False
+
+    if direction == "LONG" and not (sl < entry < tp):
+        return False
+    if direction == "SHORT" and not (sl > entry > tp):
+        return False
+    return True
+
+
 def _validate_ai_response(data):
     """เช็คว่า JSON ที่ Claude ตอบกลับมาครบ field และค่าที่ enum อยู่ในขอบเขตที่กำหนดไว้จริง กัน
     response ที่ parse ผ่านเป็น JSON ได้ แต่โครงสร้าง/ค่าไม่ตรงสเปก (เช่น พิมพ์ 'bullish' ตัวเล็ก
     หรือลืม field) หลุดไปสร้างข้อความ Telegram ที่พังหรือเข้าใจผิดได้"""
     required = {"overall_bias", "signal_assessment", "confidence", "risk_level",
-                "conflict", "reason", "key_observation", "next_event_to_watch"}
+                "conflict", "reason", "key_observation", "next_event_to_watch", "ai_plan"}
     if not required.issubset(data.keys()):
         return False
     if data["overall_bias"] not in ALLOWED_BIAS:
@@ -186,6 +238,8 @@ def _validate_ai_response(data):
         if not (0 <= conf <= 100):
             return False
     except (TypeError, ValueError):
+        return False
+    if not _validate_ai_plan(data["ai_plan"]):
         return False
     return True
 
@@ -348,6 +402,7 @@ def _append_ai_log(memory, symbol, events, ai_result):
     overwrite historical AI analysis' — เก็บแบบ bounded (ล่าสุด AI_LOG_MAX_ENTRIES รายการ) ใน kvdb
     (Runtime Memory) สำหรับ /aicheck อ่านแบบเร็วๆ โดยไม่ต้องยิง Google Sheets API — ประวัติแบบเต็ม/
     ไม่จำกัดจำนวนอยู่ใน Google Sheets AI_Log แทน (ดู _log_ai_to_sheets ด้านล่าง เขียนคู่ขนานกัน)"""
+    ai_plan = ai_result.get("ai_plan") or {}
     log = memory.get("ai_log", [])
     log.append({
         "at": datetime.now(timezone.utc).isoformat(),
@@ -355,6 +410,10 @@ def _append_ai_log(memory, symbol, events, ai_result):
         "overall_bias": ai_result.get("overall_bias"),
         "signal_assessment": ai_result.get("signal_assessment"),
         "confidence": ai_result.get("confidence"),
+        # *** ใหม่ (7 ก.ย. 2026): เก็บสรุปแผนอิสระของ AI ไว้ด้วย (แค่ direction/confidence พอ ไม่เก็บ
+        # ราคาเต็ม) เผื่ออนาคตอยากย้อนดูว่า AI เสนอแผนเองบ่อยแค่ไหน/มั่นใจเฉลี่ยเท่าไหร่ ***
+        "ai_plan_direction": ai_plan.get("direction"),
+        "ai_plan_confidence": ai_plan.get("confidence"),
     })
     memory["ai_log"] = log[-AI_LOG_MAX_ENTRIES:]
 
@@ -617,6 +676,24 @@ def format_ai_telegram_messages(symbol, ai_payload):
         f"{assessment_emoji} คุณภาพสัญญาณ: <b>{ai['signal_assessment']}</b> (มั่นใจ {ai['confidence']}%)\n"
         f"{risk_emoji} ระดับความเสี่ยง: <b>{ai['risk_level']}</b>"
     )
+
+    # *** ใหม่ (7 ก.ย. 2026): "แผนจาก AI" — ความเห็น/แผนอิสระของ AI เอง แยกจากแผนของ Strategy ***
+    # ด้านบนโดยสิ้นเชิง (ดู SYSTEM_PROMPT ข้อ 4 — AI เสนอได้เฉพาะตอนมั่นใจจริงเท่านั้น ไม่งั้น
+    # ai_plan.direction จะเป็น "NONE" ซึ่งกรณีนี้ไม่แสดงส่วนนี้เลย กันข้อความรกตอน AI ไม่มีอะไรจะเสนอ)
+    # ต้องกำกับให้ชัดเจนเสมอว่านี่คือความเห็น AI ไม่ใช่ Strategy — ห้ามให้ผู้ใช้เข้าใจผิดว่าเป็นคำสั่ง
+    # เข้าไม้จริงจากระบบ (ระบบยังไม่มี broker execution และ Strategy ไม่ได้เป็นคนสร้างแผนนี้)
+    ai_plan = ai.get("ai_plan") or {}
+    if ai_plan.get("direction") in ("LONG", "SHORT"):
+        plan_direction_th = "LONG (ซื้อ)" if ai_plan["direction"] == "LONG" else "SHORT (ขาย)"
+        msg1 += (
+            f"\n\n🧠 <b>แผนจาก AI</b> — มั่นใจ {ai_plan['confidence']}%\n"
+            f"{plan_direction_th}\n"
+            f"Entry: {ai_plan['entry']}\n"
+            f"SL: {ai_plan['sl']}\n"
+            f"TP: {ai_plan['tp']}\n"
+            f"<i>⚠️ นี่คือความเห็น/แผนอิสระของ AI เอง ไม่ใช่แผนจาก Strategy (ดูสัญญาณจาก Strategy ใน"
+            f"ข้อความถัดไป) ใช้ประกอบการตัดสินใจเท่านั้น ไม่ใช่คำสั่งเข้าไม้อัตโนมัติ</i>"
+        )
 
     # ข้อความ 2: Order info (Strategy เป็นคนตัดสินใจ — AI แค่แสดงซ้ำให้เห็นในข้อความเดียวกับความเห็น)
     order_lines = [f"📋 <b>สัญญาณจาก Strategy ({symbol})</b>", ""]
