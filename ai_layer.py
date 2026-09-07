@@ -184,6 +184,15 @@ def _strip_json_fence(text):
 
 ALLOWED_AI_PLAN_DIRECTION = {"LONG", "SHORT", "NONE"}
 
+# *** ใหม่ (7 ก.ย. 2026): เกณฑ์ขั้นต่ำที่ต้องผ่านก่อนจะ "แสดง" ai_plan ใน Telegram ***
+# นี่คือชั้นป้องกันสำรอง (safety backstop) เพิ่มจาก System Prompt ข้อ 4 ที่บอก AI ไว้แล้วว่า "เสนอเฉพาะ
+# ตอนมั่นใจจริงๆ เท่านั้น" — เผื่อกรณี AI หลุดกฎเป็นบางครั้ง (LLM ทำตาม instruction ไม่ได้ 100% เสมอไป)
+# แล้วตอบ direction เป็น LONG/SHORT มาทั้งที่ confidence ต่ำ ไม่ควรส่งให้ผู้ใช้เห็นเป็น "แผน" จริงจัง
+# หมายเหตุ: ค่านี้กรองเฉพาะตอน "แสดงผล" ใน Telegram เท่านั้น ไม่กระทบการบันทึก log
+# (_append_ai_log / _log_ai_to_sheets ยังเก็บค่า ai_plan ดิบที่ AI ตอบมาจริงเสมอ ไม่ว่าจะผ่านเกณฑ์นี้
+# หรือไม่ — เพื่อให้ย้อนดูพฤติกรรม AI ได้ครบ ไว้ใช้ปรับเกณฑ์นี้ในอนาคตเมื่อมีข้อมูลสะสมมากพอ)
+AI_PLAN_MIN_CONFIDENCE_TO_SHOW = 55
+
 
 def _validate_ai_plan(ai_plan):
     """เช็คโครงสร้าง/ค่าของฟิลด์ ai_plan (แผนอิสระที่ AI เสนอเอง แยกจากแผนของ Strategy) — เข้มงวด
@@ -682,8 +691,17 @@ def format_ai_telegram_messages(symbol, ai_payload):
     # ai_plan.direction จะเป็น "NONE" ซึ่งกรณีนี้ไม่แสดงส่วนนี้เลย กันข้อความรกตอน AI ไม่มีอะไรจะเสนอ)
     # ต้องกำกับให้ชัดเจนเสมอว่านี่คือความเห็น AI ไม่ใช่ Strategy — ห้ามให้ผู้ใช้เข้าใจผิดว่าเป็นคำสั่ง
     # เข้าไม้จริงจากระบบ (ระบบยังไม่มี broker execution และ Strategy ไม่ได้เป็นคนสร้างแผนนี้)
+    #
+    # *** ใหม่ (7 ก.ย. 2026): เพิ่มเกณฑ์ขั้นต่ำ AI_PLAN_MIN_CONFIDENCE_TO_SHOW (=55) เป็นชั้นกรองสำรอง ***
+    # แม้ AI จะตอบ direction เป็น LONG/SHORT มา ถ้า confidence ต่ำกว่าเกณฑ์นี้ก็จะไม่แสดงในข้อความ
+    # (ปฏิบัติเหมือนกับตอน direction="NONE") กันเคส AI มั่นใจไม่พอจริงๆ แต่ดันไม่ทำตามกฎ 100%
     ai_plan = ai.get("ai_plan") or {}
-    if ai_plan.get("direction") in ("LONG", "SHORT"):
+    plan_conf = ai_plan.get("confidence")
+    if (
+        ai_plan.get("direction") in ("LONG", "SHORT")
+        and plan_conf is not None
+        and plan_conf >= AI_PLAN_MIN_CONFIDENCE_TO_SHOW
+    ):
         plan_direction_th = "LONG (ซื้อ)" if ai_plan["direction"] == "LONG" else "SHORT (ขาย)"
         msg1 += (
             f"\n\n🧠 <b>แผนจาก AI</b> — มั่นใจ {ai_plan['confidence']}%\n"
