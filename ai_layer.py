@@ -568,6 +568,20 @@ def analyze_market_state(symbol, active_plans, market_context, config, events=No
             _append_ai_log(memory, symbol, events, ai_result)
             _save_ai_memory(bucket, symbol, memory)
             _log_ai_to_sheets(active_plans, events, ai_result, config, "SUCCESS", None)
+
+            # *** ใหม่ (7 ก.ย. 2026): heartbeat("claude_ai") ให้หน้า System Status เห็นว่า Claude API ***
+            # ทำงานสำเร็จจริงล่าสุดเมื่อไหร่ — ตั้งใจ "ไม่" เรียกตอน force=True (มาจากคำสั่ง /test หรือ
+            # test_ai_connection ของ /aicheck) เพราะ status_tracker.py ออกแบบให้ heartbeat แทนแค่
+            # "การทำงานจริงของบอทตามปกติ" เท่านั้น ไม่ใช่การเทสมือ — ไม่งั้นกด /test ทีเดียวจะทำให้
+            # Dashboard เข้าใจผิดว่า Central AI Layer เพิ่งวิเคราะห์จริงทั้งที่จริงๆ อาจไม่มี event จริง
+            # เกิดขึ้นมานานแล้วก็ได้
+            if not force:
+                try:
+                    from status_tracker import heartbeat
+                    heartbeat("claude_ai")
+                except Exception:
+                    pass
+
             return {"ai_result": ai_result, "active_plans": active_plans, "ai_state": "ANALYZED"}
 
         _save_ai_memory(bucket, symbol, memory)

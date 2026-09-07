@@ -778,3 +778,14 @@ if __name__ == "__main__":
         # ping บอก Healthchecks.io เสมอ ไม่ว่าข้างบนจะสำเร็จหรือมี error ก็ตาม
         # (นี่คือหน้าที่จริงของ Dead Man's Switch — ต้องรู้ว่าบอทยังไม่ตายแม้ตอน API ล่ม)
         ping_healthcheck(CONFIG["healthchecks_url"])
+
+        # *** ใหม่ (7 ก.ย. 2026): heartbeat("main_cycle") ให้หน้า System Status (status_tracker.py) ***
+        # เห็นว่ารอบ cron หลักนี้ยังรันอยู่จริง — ก่อนหน้านี้ main.py ไม่เคยเรียก heartbeat เลยสักครั้ง
+        # (มีแต่ ping_healthcheck ที่ยิงไป healthchecks.io คนละระบบกัน) ทำให้แถว "รอบวิเคราะห์หลัก"
+        # บน Dashboard ค้างแดงตลอดแม้ cron จะรันสำเร็จทุก 5 นาทีก็ตาม ใส่ไว้ใน finally เหมือน
+        # ping_healthcheck เพื่อนับว่า "รอบนี้ทำงานจบแล้ว" ไม่ว่าข้างในจะมี error บางจุดหรือไม่ก็ตาม
+        try:
+            from status_tracker import heartbeat
+            heartbeat("main_cycle")
+        except Exception:
+            pass  # ห้ามให้การบันทึกสถานะพัง กระทบบอทหลักเด็ดขาด (เหมือน ping_healthcheck ด้านบน)
