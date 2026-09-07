@@ -29,6 +29,16 @@ AI_Status=TIMEOUT ทั้งที่ตั้งแต่แก้ max_tokens
 ai_cooldown_minutes default 2 นาทีอยู่แล้ว) ทำหน้าที่เป็น retry ตามธรรมชาติอยู่แล้ว — ดู
 analyze_market_state(): ai_state="TIMEOUT" จะไม่ถูกบันทึกเป็น last_state_hash (อัปเดตเฉพาะตอน
 ai_state="ANALYZED" เท่านั้น) รอบถัดไปที่ state ยังต่างจากที่เคยวิเคราะห์สำเร็จล่าสุด จะลองเรียกใหม่เอง
+
+*** แก้ไขล่าสุด (7 ก.ย. 2026): เพิ่ม parameter force=False ให้ analyze_market_state() ***
+คำสั่ง /test ใน telegram_bot.py (_cmd_test) เรียกฟังก์ชันนี้ด้วย force=True มาตั้งแต่แรก (ตามที่ตั้งใจ
+ไว้ในดีไซน์ — /test ต้อง "ข้าม Event Detection / state hash / cooldown / time filter ทั้งหมด" เพื่อ
+ยืนยันว่าเรียก Claude API ได้จริงแม้ตอนไม่มี event ใหม่หรือเพิ่งเรียกไปเมื่อครู่ก็ตาม) แต่ฟังก์ชันนี้ไม่เคย
+รับ parameter ชื่อนี้จริง ทำให้ /test พังด้วย TypeError ทุกครั้ง (analyze_market_state() got an
+unexpected keyword argument 'force') แก้โดยเพิ่ม force=False เข้ามาจริง แล้วใช้เป็นตัวข้าม 2 จุดที่เคย
+คืนค่า None ก่อนเรียก AI จริง (SKIPPED จาก state-hash ตรงกับรอบก่อน, และ cooldown) — ไม่กระทบ
+run_central_ai_cycle()/main.py เดิมเลย เพราะไม่ได้ส่ง force เข้ามา (ใช้ default False เหมือนพฤติกรรม
+เดิมทุกประการ) มีผลเฉพาะตอนเรียกผ่าน /test เท่านั้น
 """
 
 import hashlib
@@ -478,17 +488,23 @@ def run_central_ai_cycle(symbol, config, market_context, current_price, manual_r
         return {"error": str(e), "ai_state": "ERROR"}
 
 
-def analyze_market_state(symbol, active_plans, market_context, config, events=None):
+def analyze_market_state(symbol, active_plans, market_context, config, events=None, force=False):
     """จุดเรียกเดียวของ Central AI Layer ทั้งระบบ — เรียกจาก run_central_ai_cycle() ด้านล่างเท่านั้น
-    (ซึ่ง main.py เรียกอีกที) หลังเช็คครบ 8 แผนแล้วเท่านั้น
+    (ซึ่ง main.py เรียกอีกที) หลังเช็คครบ 8 แผนแล้วเท่านั้น หรือเรียกตรงจากคำสั่ง /test (telegram_bot.py)
+    ด้วย force=True
 
     active_plans: list ของ dict {plan, direction, entry, sl, tp, rr, signal_state} — อ่านมาจาก
     orders.py (Strategy เป็นคนสร้างค่าพวกนี้ ฟังก์ชันนี้แค่ "อ่าน" ไม่เคยแก้ไข)
     market_context: dict ข้อมูลตลาดปัจจุบัน (ดู _build_ai_context_text ด้านบนว่าใช้ field ไหนบ้าง)
     events: sorted list ของ event ที่ detect_events ตรวจเจอ (None = เรียกแบบไม่มี event system,
     เก็บไว้เพื่อ backward-compat กับตอนเรียกฟังก์ชันนี้ตรงๆ โดยไม่ผ่าน run_central_ai_cycle)
+    force: True = ข้ามเช็ค "state ไม่เปลี่ยน (SKIPPED)" และ "cooldown" ทั้งคู่ บังคับเรียก Claude API
+    จริงเสมอถ้ามี active_plans อย่างน้อย 1 อัน — ใช้โดยคำสั่ง /test เท่านั้น (ต้องการยืนยันว่าสายทั้งหมด
+    ทำงานได้จริง ไม่ใช่รอ event/cooldown ตามธรรมชาติ) ค่า default False ทำให้พฤติกรรมของผู้เรียกอื่น
+    (run_central_ai_cycle/main.py) เหมือนเดิมทุกประการ ไม่กระทบ
 
-    คืนค่า None ถ้า: ไม่มีแผน active เลย / state ไม่เปลี่ยนจากรอบก่อน (SKIPPED) / อยู่ใน cooldown
+    คืนค่า None ถ้า: ไม่มีแผน active เลย / state ไม่เปลี่ยนจากรอบก่อน (SKIPPED, เว้นแต่ force=True) /
+    อยู่ใน cooldown (เว้นแต่ force=True)
     คืนค่า dict {"ai_result":..., "active_plans":..., "ai_state": "ANALYZED"} ถ้าเรียก AI สำเร็จ
     คืนค่า dict {"error": ..., "ai_state": "ERROR"/"TIMEOUT"} ถ้าเรียก AI แล้วพัง (ผู้เรียกควร log
     ไว้เฉยๆ ไม่ต้องส่ง Telegram ต่อ — Strategy Alert เดิมไม่เกี่ยวข้อง ส่งไปแล้วตามปกติอยู่แล้ว)
@@ -498,7 +514,7 @@ def analyze_market_state(symbol, active_plans, market_context, config, events=No
     bucket = config.get("kvdb_bucket")
 
     if not active_plans:
-        return None  # ไม่มีอะไรให้ AI ดู ไม่เรียก ไม่เสียเงิน
+        return None  # ไม่มีอะไรให้ AI ดู ไม่เรียก ไม่เสียเงิน (แม้ force=True ก็ยังต้องมีแผนให้ดูอยู่ดี)
 
     try:
         memory = _load_ai_memory(bucket, symbol)
@@ -506,21 +522,23 @@ def analyze_market_state(symbol, active_plans, market_context, config, events=No
         normalized = _normalize_market_state(symbol, active_plans, market_context, events=events)
         current_hash = _compute_state_hash(normalized)
 
-        if memory.get("last_state_hash") == current_hash and memory.get("ai_state") == "ANALYZED":
-            return None  # SKIPPED — state เดิมเป๊ะ เคยวิเคราะห์สำเร็จไปแล้ว ไม่เรียกซ้ำ
+        if not force and memory.get("last_state_hash") == current_hash and memory.get("ai_state") == "ANALYZED":
+            return None  # SKIPPED — state เดิมเป๊ะ เคยวิเคราะห์สำเร็จไปแล้ว ไม่เรียกซ้ำ (ข้ามได้ด้วย force=True)
 
         # Cooldown กันเรียก AI ซ้อนกันเฉพาะกรณีผิดปกติ (เช่น cron รันซ้อน/เรียกถี่ผิดจังหวะ) — ต้อง
         # ตั้งค่าไว้ "สั้นกว่า" รอบ cron จริงเสมอ (ดูเหตุผลเต็มใน config.py: ai_cooldown_minutes) ไม่งั้น
         # จะไปกันสัญญาณใหม่ที่เกิดขึ้นจริงในรอบถัดไปด้วยโดยไม่ตั้งใจ — ไม่นับรวมตอน SKIPPED ด้านบน
-        cooldown_minutes = config.get("ai_cooldown_minutes", 2)
-        last_call_iso = memory.get("last_ai_call_iso")
-        if last_call_iso:
-            try:
-                last_call = datetime.fromisoformat(last_call_iso)
-                if datetime.now(timezone.utc) - last_call < timedelta(minutes=cooldown_minutes):
-                    return None  # ยังอยู่ใน cooldown แม้ state จะเปลี่ยนไปแล้วก็ตาม
-            except Exception:
-                pass
+        # (ข้ามได้ด้วย force=True เหมือนกัน — /test ต้องการเรียกจริงแม้เพิ่งเรียกไปเมื่อครู่)
+        if not force:
+            cooldown_minutes = config.get("ai_cooldown_minutes", 2)
+            last_call_iso = memory.get("last_ai_call_iso")
+            if last_call_iso:
+                try:
+                    last_call = datetime.fromisoformat(last_call_iso)
+                    if datetime.now(timezone.utc) - last_call < timedelta(minutes=cooldown_minutes):
+                        return None  # ยังอยู่ใน cooldown แม้ state จะเปลี่ยนไปแล้วก็ตาม
+                except Exception:
+                    pass
 
         context_text = _build_ai_context_text(symbol, active_plans, market_context, events=events)
         ai_result, ai_state, error = _call_claude_api(context_text, config)
