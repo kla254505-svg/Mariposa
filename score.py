@@ -25,6 +25,14 @@ WEIGHTS = {
     "dxy_alignment": 6,        # *** ใหม่ (ยังไม่เปิดใช้งานจริง) ***: DXY สอดคล้องทิศทางที่จะเข้าหรือไม่
 }
 
+# --- Score-based Position Sizing (ดู risk.py's calc_scaled_risk_pct) ---
+# คะแนนเต็มตามจริงของสูตรนี้ (ไม่รวม dxy_alignment เพราะยังไม่เปิดใช้งานจริง — dxy_context เป็น None
+# เสมอในทุกจุดที่เรียกอยู่ตอนนี้ ดู docstring calc_confidence_score ด้านล่าง) คำนวณจาก WEIGHTS
+# อัตโนมัติ แทนที่จะ hardcode เลขลอยตัว (magic number) ที่เสี่ยงไม่ sync กับ WEIGHTS จริงถ้ามีคนแก้
+# น้ำหนักทีหลังแล้วลืมอัปเดตเลขนี้คู่กัน — main.py ใช้ค่านี้เป็น "เพดานคะแนน" ตอน scale เงินเสี่ยง
+# ต่อไม้ของแผนที่ 1 (แผนที่ 2-8 ใช้ plan_score.GENERIC_MAX_SCORE = 100 แทน เพราะคนละสูตรกัน)
+PLAN1_SCORE_CEILING = sum(w for key, w in WEIGHTS.items() if key != "dxy_alignment")
+
 
 def calc_confidence_score(entry_signal, structure, df, config, rr_tp1,
                            bias_4h=None, higher_tf_trend=None, dxy_context=None):

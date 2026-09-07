@@ -8,11 +8,6 @@ def send_telegram_alert(token, chat_id, message):
     try:
         resp = requests.post(url, data=payload, timeout=10)
         resp.raise_for_status()
-        try:
-            from status_tracker import heartbeat
-            heartbeat("telegram_alert")
-        except Exception:
-            pass
         return True
     except Exception as e:
         print(f"[Telegram Error] {e}")
@@ -42,7 +37,15 @@ def send_telegram_photo(token, chat_id, photo_path, caption=""):
 
 def format_alert_message(symbol, timeframe, structure, entry_signal,
                           stop_loss, take_profits, rr, confidence, bias_4h=None,
-                          current_price=None, stale_threshold=None):
+                          current_price=None, stale_threshold=None, position_sizing_line=None):
+    """
+    *** แก้ไขล่าสุด (7 ก.ย. 2026): เพิ่ม parameter position_sizing_line=None ***
+    ก่อนหน้านี้ main.py คำนวณ position size (risk.calc_position_size) ไว้จริง แต่ไม่เคยส่งเข้า
+    Telegram เลยสักครั้ง (แค่ print console บน GitHub Actions ที่ผู้ใช้ไม่ค่อยเปิดดู) — ผู้ใช้เห็นแค่
+    ราคา Entry/SL/TP ไม่เคยเห็นตัวเงินที่ควรเสี่ยงจริงๆ เลย ตอนนี้ผู้เรียก (main.py) สร้างบรรทัดนี้ผ่าน
+    risk.format_position_sizing_line() แล้วส่งเข้ามาแปะท้ายข้อความให้ — ไม่ใส่เข้ามา (None ค่า default)
+    พฤติกรรมเหมือนเดิมทุกประการ (ไม่ breaking change)
+    """
     direction_th = "LONG (ซื้อ)" if entry_signal["direction"] == "bullish" else "SHORT (ขาย)"
     lines = [
         f"🚨 <b>สัญญาณเทรด: {symbol} ({timeframe})</b>",
@@ -68,6 +71,9 @@ def format_alert_message(symbol, timeframe, structure, entry_signal,
     ]
     for name, price in take_profits.items():
         lines.append(f"{name}: {price:.4f} (RR {rr[name]})")
+
+    if position_sizing_line:
+        lines.append(position_sizing_line)
 
     # --- กันเข้าไม้ตามข้อความเก่า: ข้อความนี้เป็นภาพนิ่ง ณ เวลาที่ส่ง ไม่ auto-อัปเดต ---
     if current_price is not None:

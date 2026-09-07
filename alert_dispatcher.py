@@ -9,6 +9,17 @@ alert_dispatcher.py — รวม logic "ส่ง Telegram Alert ไปทุ�
      กันไม่ให้ alert หายไปเฉยๆ) — ข้ามการส่งทั้งหมดถ้าปิด push_notifications_enabled ไว้
   3. บันทึกออเดอร์ลง Order Dashboard ผ่าน add_order() — ทำเสมอไม่ว่าจะปิด push ไว้หรือไม่ (เก็บสถิติไว้
      ใช้ในสรุปผลประจำวันอัตโนมัติ/Data Layer ในอนาคต) ถ้าบันทึกไม่สำเร็จแค่ log ไว้ ไม่ทำให้ alert หลักพังตาม
+
+*** แก้ไขล่าสุด (7 ก.ย. 2026): เพิ่มเช็ค Portfolio Risk Guard ก่อนส่ง Alert ***
+เพิ่มพารามิเตอร์ symbol (optional) — ถ้าผู้เรียกส่งเข้ามา จะเช็ค risk_guard.can_open_new_trade()
+ก่อนส่งเสมอ (ขาดทุนหนักวันนี้ไปแล้ว/เสียติดกันหลายไม้/มีไม้ running พร้อมกันเยอะเกินไป) ถ้าถูกระงับ
+จะข้ามการส่งเงียบๆ (แค่ print log ไว้ ไม่ส่งข้อความซ้ำ — การแจ้งเตือนผู้ใช้ว่า Risk Guard active
+ทำครั้งเดียวตอนเปลี่ยนสถานะผ่าน risk_guard.check_and_notify() ที่ main.py เรียกแยกต่างหากอยู่แล้ว)
+เป็นจุดเดียวที่ครอบคลุม Plan 2/3/4/5/6/7/8 ทั้งหมด (ทุกแผนเรียกฟังก์ชันนี้อยู่แล้ว) ส่วน Plan 1
+(อยู่ใน main.py, ไม่ผ่านฟังก์ชันนี้) เช็คแยกต่างหากที่ main.py เอง (ดู risk_guard_allowed parameter
+ของ run_pipeline() ใน main.py)
+ไม่ส่ง symbol เข้ามา (เช่น risk_guard.check_and_notify() เองที่เรียกฟังก์ชันนี้เพื่อส่งข้อความแจ้งเตือน
+สถานะ Risk Guard) จะข้ามการเช็คนี้ไปเลย (กันเรียกซ้อนตัวเอง/infinite loop)
 """
 
 
@@ -20,18 +31,30 @@ def get_alert_targets(config):
     return targets
 
 
-def send_alert_to_targets(config, message, chart_path=None, log_prefix=None):
+def send_alert_to_targets(config, message, chart_path=None, log_prefix=None, symbol=None):
     """
     ส่งข้อความ Alert ไปทุกปลายทาง (แชทเดิม + กลุ่ม) — ข้ามทั้งหมดถ้าปิด push_notifications_enabled ไว้
     ถ้ามี chart_path จะลองแนบรูปก่อน ถ้าส่งรูปไม่ผ่านจะ fallback ไปส่งข้อความล้วนแทนอัตโนมัติ
     log_prefix (ไม่บังคับ) : ถ้าใส่ไว้จะ print ผลส่งแต่ละปลายทาง เช่น "[Telegram -> {chat_id}] ส่งแจ้งเตือนสำเร็จ"
     (พฤติกรรมเดิมของ Plan 1 เท่านั้น — Plan 2/3/4 เดิมไม่ print log แบบนี้ เลยปล่อย None ไว้ตามเดิม)
-    คืน list ของ (chat_id, sent_bool) ต่อปลายทาง
+    symbol (ไม่บังคับ, ใหม่): ถ้าใส่ไว้จะเช็ค Portfolio Risk Guard ก่อนส่งเสมอ — ดูหมายเหตุหัวไฟล์
+    คืน list ของ (chat_id, sent_bool) ต่อปลายทาง (คืน [] ถ้าไม่ได้ส่งอะไรเลย ไม่ว่าจะเพราะปิด push
+    หรือเพราะ Risk Guard ระงับไว้)
     """
     from notify import send_telegram_alert, send_telegram_photo
 
     if not config.get("push_notifications_enabled", True):
         return []
+
+    if symbol:
+        try:
+            from risk_guard import can_open_new_trade
+            allowed, reason = can_open_new_trade(config["kvdb_bucket"], symbol, config)
+            if not allowed:
+                print(f"[Risk Guard] {symbol}: ระงับ Alert นี้ไว้ก่อน — {reason}")
+                return []
+        except Exception as e:
+            print(f"[Risk Guard Error] เช็คไม่สำเร็จ ({symbol}) — ปล่อยผ่านไปก่อน ไม่ให้บล็อก Alert หลัก: {e}")
 
     results = []
     for target_chat_id in get_alert_targets(config):

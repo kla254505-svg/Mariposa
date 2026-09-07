@@ -64,16 +64,9 @@ CONFIG = {
     # ปิด/เปิดการแจ้งเตือนอัตโนมัติ (Push) ทั้งหมด — ถ้า False บอทจะเงียบสนิท ไม่ส่งอะไรเองเลย
     # ต้องพิมพ์คำสั่ง /order /trend /news /status /aicheck เอาเองถึงจะได้คำตอบ (Pull-only mode)
     # ตั้งเป็น True เมื่อไหร่ก็ได้ถ้าอยากได้ Push กลับมาเหมือนเดิม ไม่ต้องแก้โค้ดที่อื่นเลย
-    # เจอสาเหตุจริงว่าทำไม Plan 2-8 เอง + plan_summary.py (แผนที่แนะนำ/อัปเดตสถานะ/สรุปผล) ไม่เคยส่ง
-    # เข้า Telegram เลยสักครั้ง (4 ก.ย. 69) — flag นี้เคยถูกปิดไว้ (False) ซึ่งไปตัดการส่งของ
-    # send_alert_to_targets() ทั้งหมดเงียบๆ ไม่มี error โผล่ที่ไหนเลย (คืนแค่ [] เฉยๆ)
-    # AI Second Opinion ยังทำงานได้ปกติตลอดมาเพราะส่งผ่าน send_telegram_alert() ตรงๆ คนละทาง
-    # ไม่ผ่าน flag นี้เลย ทำให้ดูเหมือนระบบส่งข้อความได้ปกติทั้งที่จริงๆ อีกครึ่งระบบเงียบสนิทมาตลอด
-    "push_notifications_enabled": True,
+    "push_notifications_enabled": False,
     # ตัวนี้คุมว่าจะยิง Telegram Alert จริงหรือไม่ (ต่างจาก min_score_console_watchlist ด้านบนที่แค่ print console)
-    # ปรับจาก 45 -> 55 (3 ก.ย. 69) ทดสอบว่าคะแนนสูงขึ้นช่วยลดอัตราโดน SL ไหม (ของเดิม 45/120 ≈ 37.5%
-    # ผ่านง่ายไป โดน SL บ่อยตามที่สังเกตจริง) ถ้าลองแล้วยังไม่ดีขึ้นค่อยปรับใหม่ได้ ไม่ตายตัว
-    "min_score_to_alert": 55,
+    "min_score_to_alert": 45,
     "twelvedata_api_key": os.environ.get("TWELVEDATA_API_KEY", ""),
     "healthchecks_url": os.environ.get("HEALTHCHECKS_URL", ""),
     "kvdb_bucket": os.environ.get("KVDB_BUCKET", ""),
@@ -85,10 +78,7 @@ CONFIG = {
     # เวลาที่อนุญาตให้เรียก AI เท่านั้น (จ-ศ 10:00-22:00 เวลาไทย) — คุมเฉพาะ AI Layer ไม่เกี่ยวกับ
     # Strategy (Plan 1-8) ที่ยังทำงาน 24/7 เหมือนเดิมทุกประการ ห้ามเอาไปใช้ gate Strategy เด็ดขาด
     "ai_time_filter_days": {0, 1, 2, 3, 4},  # Mon=0 ... Sun=6 (ตาม datetime.weekday())
-    "ai_time_filter_hours": (0, 24),  # เปิดเต็ม 24 ชม. (เดิม 10:00-22:00) — ไม่กระทบ session filter
-    # ที่คุมการยิง Order Alert (ยังเป็น 14:00-04:00 ไทยเหมือนเดิม) นี่แค่ขยายช่วงที่ Central AI Layer
-    # (Second Opinion) พร้อมทำงานให้กว้างขึ้นเฉยๆ ตามที่ตกลงกันไว้ — AI จะยังไม่ได้เห็นสัญญาณนอก
-    # session อยู่ดี เพราะ session filter ตัดสัญญาณทิ้งไปก่อนถึงขั้น AI แล้ว (ดูรายละเอียดที่คุยกัน)
+    "ai_time_filter_hours": (10, 22),
     # กันเรียก AI ถี่เกินไปแม้ state จะเปลี่ยนบ่อยผิดปกติ (เช่น เผื่อ cron รันซ้อนกัน) — ตั้งไว้ "สั้น
     # กว่า" ความถี่ cron จริง (5 นาที) เสมอ ไม่งั้นจะไปบล็อกสัญญาณใหม่ที่เกิดขึ้นจริงในรอบถัดไปโดยไม่
     # ตั้งใจ (เจอบั๊กนี้จริงตอนเทส: ตั้งไว้ 10 นาทีแล้ว Plan ใหม่ที่เกิดขึ้นในรอบถัดไป — ห่างจากครั้งก่อน
@@ -98,6 +88,35 @@ CONFIG = {
     # "PRICE_APPROACH_ENTRY" (ให้ Central AI Layer วิเคราะห์เพิ่มได้ แม้ยังไม่ถึง entry จริงก็ตาม)
     "ai_price_approach_atr_mult": 0.5,
 
+    # --- Portfolio Risk Guard (ใหม่) — ดู risk_guard.py สำหรับ logic เต็ม ---
+    # เบรกระดับพอร์ตรวม (ไม่ใช่กรองต่อไม้แบบ score.py) ระงับ Telegram Alert ของไม้ "ใหม่" ชั่วคราวถ้า
+    # ขาดทุนหนักเกินไป/เสียติดกันหลายไม้/มีไม้ running พร้อมกันเยอะเกินไป — ไม่แตะไม้ที่ running อยู่แล้ว
+    "risk_guard_enabled": True,
+    "risk_guard_max_daily_loss_r": 3.0,          # ขาดทุนรวมวันนี้เกิน 3R -> ระงับ Alert จนข้ามวัน
+    "risk_guard_max_consecutive_losses": 4,       # เสียติดกันเกิน 4 ไม้ -> ระงับ Alert จนกว่าจะมี Win คั่น
+    "risk_guard_max_concurrent_positions": 3,     # มีไม้ running พร้อมกันเกิน 3 ไม้ -> ระงับ Alert ไม้ใหม่
+
+    # --- Post-Entry Trade Management (ใหม่, Advisory เท่านั้น) — ดู trade_management.py ---
+    # ระบบยังไม่เชื่อมต่อ Broker จริง จึงแค่ "แนะนำ" ผ่าน Telegram ไม่ได้แก้ SL/ปิดไม้ให้อัตโนมัติ
+    "trade_mgmt_breakeven_at_r": 1.0,   # กำไรถึง 1R -> แนะนำขยับ SL ไป Breakeven
+    "trade_mgmt_partial_at_r": 1.5,     # กำไรถึง 1.5R -> แนะนำปิดกำไรบางส่วน
+    "trade_mgmt_warning_r": -0.5,       # ติดลบ 0.5R + โครงสร้างกลับทิศ -> เตือนพิจารณาตัดขาดทุนเร็ว
+
+    # --- Score-based Position Sizing (ใหม่) — ดู risk.py's calc_scaled_risk_pct ---
+    # เดิม risk_per_trade_pct ด้านบนใช้คงที่ทุกไม้เท่ากันหมด ไม่ว่า Score จะ 46 หรือ 118 — ตอนนี้ scale
+    # เชิงเส้นระหว่าง risk_sizing_min_pct (ที่คะแนนเฉียดเกณฑ์ min_score_to_alert) ถึง risk_sizing_max_pct
+    # (ที่คะแนนเต็มของสูตรนั้นๆ) ปิดได้ด้วย risk_sizing_by_score_enabled=False (กลับไปใช้
+    # risk_per_trade_pct คงที่เดิมทันที)
+    "risk_sizing_by_score_enabled": True,
+    "risk_sizing_min_pct": 0.5,
+    "risk_sizing_max_pct": 1.5,
+
+    # --- Plan Coordination / Conflict Detection (ใหม่) — ดู plan_coordination.py ---
+    # 8 แผนทำงานอิสระจากกัน ไม่รู้จักกันเอง อาจยิงสัญญาณสวนทางกันพร้อมกันได้ (เช่น Plan 5 มี Zone LONG
+    # pending อยู่ ขณะที่ Plan 2 ยิง SHORT ออกมา) — เปิดไว้จะแนบคำเตือน "Portfolio Conflict" ต่อท้าย
+    # Telegram Alert ทุกแผน (1-8) ถ้ามีออเดอร์แผนอื่นทิศทางตรงข้ามเปิดอยู่ (pending/running) ไม่ block
+    # การส่ง Alert หรือบันทึกออเดอร์ใดๆ ทั้งสิ้น (แค่แจ้งเตือนเพิ่ม ตัดสินใจสุดท้ายอยู่ที่ผู้ใช้)
+    "plan_conflict_warning_enabled": True,
 
 }
 

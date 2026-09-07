@@ -10,9 +10,9 @@ from config import CONFIG
 from indicator import add_indicators, is_atr_contracting
 from trend import analyze_structure
 from entry import evaluate_entry, get_entry_zone_bounds
-from risk import calc_stop_loss, calc_position_size
+from risk import calc_stop_loss, calc_position_size, calc_scaled_risk_pct, format_position_sizing_line
 from tp import calc_take_profits, calc_risk_reward
-from score import calc_confidence_score
+from score import calc_confidence_score, PLAN1_SCORE_CEILING
 from report import print_report
 from notify import send_telegram_alert, format_alert_message, send_or_edit_message, send_telegram_photo
 from chart import build_entry_chart
@@ -25,6 +25,10 @@ from kvstore import kv_get, kv_set
 from orders import add_order, add_pending_order, load_orders, update_orders_status, update_pending_orders, build_orders_dashboard
 import plan_runner
 import ai_layer
+import account
+import risk_guard
+from trade_management import check_trade_management
+from plan_coordination import find_direction_conflicts, format_conflict_warning
 from news_scheduler import (
     refresh_daily_calendar, build_daily_summary_message, check_and_send_pre_news_warning,
     check_and_send_post_news_result, is_in_news_blackout,
@@ -149,7 +153,8 @@ def generate_synthetic_data(n=400, seed=42):
 
 
 def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, config=CONFIG,
-                  higher_tf_trend=None, session_info=None, bias_4h=None, df_5m=None):
+                  higher_tf_trend=None, session_info=None, bias_4h=None, df_5m=None,
+                  risk_guard_allowed=True):
     df = add_indicators(df, config)
     structure = analyze_structure(df, config)
     entry_signal = evaluate_entry(df, structure, config)
@@ -227,9 +232,14 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                                           entry_signal["direction"], config)
         rr = {name: calc_risk_reward(entry_signal["entry_price"], stop_loss, price)
               for name, price in take_profits.items()}
-        position = calc_position_size(account_balance, entry_signal["entry_price"], stop_loss, config)
+        # --- คำนวณคะแนนก่อน position size (สลับลำดับจากเดิม): ต้องรู้ Score ก่อนถึงจะ scale
+        # เงินเสี่ยงต่อไม้ตาม Score ได้ (ดู risk.calc_scaled_risk_pct) — ไม่กระทบผลลัพธ์อื่นเลย
+        # เพราะ calc_confidence_score ไม่ได้พึ่งพา position ที่มาจากไหนทั้งสิ้น
         confidence = calc_confidence_score(entry_signal, structure, df, config, rr["TP1"],
                                             bias_4h=bias_4h, higher_tf_trend=higher_tf_trend)
+        risk_pct = calc_scaled_risk_pct(confidence["score"], config, score_ceiling=PLAN1_SCORE_CEILING)
+        position = calc_position_size(account_balance, entry_signal["entry_price"], stop_loss, config,
+                                       risk_pct_override=risk_pct)
 
         if rr["TP1"] < config["min_rr"]:
             entry_signal["reasons"].append(
@@ -289,8 +299,11 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                         )
                         rr = {name: calc_risk_reward(entry_signal["entry_price"], stop_loss, price)
                               for name, price in take_profits.items()}
+                        # risk_pct คำนวณไว้แล้วด้านบนจาก Score เดิม (SL tighten ไม่เปลี่ยน Score —
+                        # ไม่ได้รันคะแนนใหม่) ใช้ตัวเดิมซ้ำได้เลย ไม่ต้องคำนวณใหม่
                         position = calc_position_size(
-                            account_balance, entry_signal["entry_price"], stop_loss, config
+                            account_balance, entry_signal["entry_price"], stop_loss, config,
+                            risk_pct_override=risk_pct
                         )
                         entry_signal["reasons"].append(
                             f"SL ถูกปรับให้แคบลงตามจุดกลับตัวจริงบน 5M ({stop_loss:.4f})"
@@ -396,14 +409,35 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
             entry_signal["alert_ready"] = False
 
     # --- ส่ง Telegram Alert เมื่อ signal ผ่านเกณฑ์กฎหลัก "และ" ผ่านเกณฑ์คะแนนขั้นต่ำ ---
+    # risk_guard_allowed: มาจาก risk_guard.check_and_notify() ที่ __main__ เรียกครั้งเดียวต่อรอบ —
+    # Plan 1 อยู่นอก alert_dispatcher.py (ไม่ผ่าน send_alert_to_targets ที่เช็ค Risk Guard ให้เองอยู่
+    # แล้วสำหรับ Plan 2-8) เลยต้องเช็คตรงนี้แยกต่างหาก ไม่กระทบการบันทึกออเดอร์ด้านล่าง (ทำเสมอ
+    # เหมือน push_notifications_enabled — สถิติยังวัดผลได้ต่อเนื่องแม้ Risk Guard active อยู่)
     if entry_signal.get("alert_ready"):
-        if config.get("push_notifications_enabled", True):
+        if not risk_guard_allowed:
+            print(f"[Risk Guard] {symbol}: ระงับ Alert Plan 1 ไม้ใหม่ไว้ก่อน (เงื่อนไข Risk Guard active)")
+        if config.get("push_notifications_enabled", True) and risk_guard_allowed:
             # threshold ไว้บอกว่า "ห่างจาก Entry เท่าไหร่ถึงถือว่าสัญญาณหมดอายุ" ใช้ 2x ATR เฉลี่ย
             # (ตัวเดียวกับที่ใช้คำนวณ SL) หรือ fallback เป็น min_sl_distance ถ้า ATR ใช้ไม่ได้
             stale_threshold = (2 * current_atr) if current_atr else config.get("min_sl_distance", 10.0)
+            position_sizing_line = format_position_sizing_line(
+                config["kvdb_bucket"], entry_signal["entry_price"], stop_loss,
+                confidence["score"], config, score_ceiling=PLAN1_SCORE_CEILING
+            )
             msg = format_alert_message(symbol, timeframe, structure, entry_signal,
                                         stop_loss, take_profits, rr, confidence, bias_4h=bias_4h,
-                                        current_price=df["close"].iloc[-1], stale_threshold=stale_threshold)
+                                        current_price=df["close"].iloc[-1], stale_threshold=stale_threshold,
+                                        position_sizing_line=position_sizing_line)
+
+            # *** ใหม่ (7 ก.ย. 2026): Plan Coordination — เตือนถ้าแผนอื่น (2-8) มีออเดอร์ทิศทางตรงข้าม
+            # เปิดอยู่ (pending/running) ตอนนี้ — ไม่ block การส่ง Alert หรือการบันทึกออเดอร์ Plan 1
+            # ด้านล่างแต่อย่างใด (ระบบไม่มี broker execution จะไปยกเลิกไม้ให้จริงไม่ได้) แค่แจ้งเพิ่ม
+            # ให้ผู้ใช้เห็นภาพรวม Portfolio ก่อนตัดสินใจเข้าไม้ใหม่ทับ ปิดได้ผ่าน
+            # config['plan_conflict_warning_enabled']=False
+            conflicts = find_direction_conflicts(
+                config["kvdb_bucket"], symbol, entry_signal["direction"], config
+            )
+            msg += format_conflict_warning(conflicts)
 
             # ปลายทางที่จะส่ง Alert: แชทเดิมเสมอ + กลุ่ม (ถ้าตั้งค่า telegram_group_chat_id ไว้)
             alert_targets = [config["telegram_chat_id"]]
@@ -513,13 +547,29 @@ if __name__ == "__main__":
                 print(f"[Data Error] {display_symbol}: {e}")
                 continue  # ข้ามคู่เงินนี้ไป แต่คู่อื่น/ping ยังทำงานต่อได้
 
+            # --- Portfolio Risk Guard: เช็คครั้งเดียวต่อรอบ ก่อนเช็คแผนไหนทั้งสิ้น (ดู risk_guard.py) ---
+            # แจ้งเตือนผู้ใช้ผ่าน Telegram เองถ้าเพิ่ง "เปลี่ยนสถานะ" (ปกติ<->ถูกระงับ) เท่านั้น — ผลลัพธ์
+            # (allowed) ใช้กำหนดว่า Plan 1 (ด้านล่าง) จะยอมส่ง Alert รอบนี้ไหม ส่วน Plan 2-8 (plan_runner.py)
+            # เช็คกันเองอีกชั้นผ่าน alert_dispatcher.send_alert_to_targets(symbol=...) อยู่แล้ว
+            try:
+                risk_guard_allowed, _risk_guard_reason = risk_guard.check_and_notify(CONFIG, display_symbol)
+            except Exception as e:
+                print(f"[Risk Guard Error] {display_symbol}: {e}")
+                risk_guard_allowed = True
+
+            # --- ทุนเทรด: อ่านจากที่ผู้ใช้ตั้งผ่าน Telegram (/setbalance) แทนตัวเลข hardcode เดิม ---
+            # ถ้ายังไม่เคยตั้งเลย จะได้ค่า default (account.DEFAULT_ACCOUNT_BALANCE = 1000) เหมือนพฤติกรรม
+            # เดิมทุกประการ (ไม่ breaking change สำหรับคนที่ยังไม่เคยพิมพ์ /setbalance)
+            account_balance = account.get_account_balance(CONFIG["kvdb_bucket"])
+
             # รัน pipeline ทุกรอบ (ทุก 5 นาที) — ถ้าเจอจังหวะเข้าไม้ที่ผ่านเกณฑ์ จะยิง Telegram Alert ทันที
             # ส่วน Dashboard จะถูก edit ทับข้อความเดิมเสมอ ไม่สร้างข้อความใหม่ ไม่สแปมแชท
-            run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=1000,
+            run_pipeline(df, symbol=display_symbol, timeframe="15m", account_balance=account_balance,
                          higher_tf_trend=higher_tf_trend, session_info=session_info,
-                         bias_4h=bias_4h, df_5m=df_5m)
+                         bias_4h=bias_4h, df_5m=df_5m, risk_guard_allowed=risk_guard_allowed)
 
             # --- เช็คราคาปัจจุบันเทียบ SL/TP1 ของออเดอร์ที่ยัง 'running' ทุกรอบ (ให้สรุปผลประจำวันข้อมูลสด) ---
+            current_price = None
             try:
                 current_price = df["close"].iloc[-1]
                 # เช็ค pending -> running/expired ก่อนเสมอ (แผน Set & Forget อย่าง Plan 5) ให้ auto-alert
@@ -529,6 +579,27 @@ if __name__ == "__main__":
                 update_orders_status(CONFIG["kvdb_bucket"], display_symbol, current_price)
             except Exception as e:
                 print(f"[Order Status Update Error] {display_symbol}: {e}")
+
+            # --- Post-Entry Trade Management (ใหม่, Advisory) — เช็คไม้ 'running' ทุกตัว แนะนำ ---
+            # Breakeven/Partial TP/เตือนโมเมนตัมเสีย ผ่าน Telegram (ดู trade_management.py) ระบบยังไม่
+            # เชื่อมต่อ Broker จริง จึงเป็นแค่คำแนะนำ ไม่ได้แก้ SL/ปิดไม้ให้อัตโนมัติ — ข้ามถ้าดึงราคา
+            # ปัจจุบันไม่สำเร็จด้านบน (current_price เป็น None)
+            try:
+                if current_price is not None:
+                    df_ind_mgmt = add_indicators(df, CONFIG)
+                    structure_mgmt = analyze_structure(df_ind_mgmt, CONFIG)
+                    mgmt_messages = check_trade_management(
+                        CONFIG["kvdb_bucket"], display_symbol, current_price, structure_mgmt, CONFIG
+                    )
+                    if mgmt_messages and CONFIG.get("push_notifications_enabled", True):
+                        mgmt_targets = [CONFIG["telegram_chat_id"]]
+                        if CONFIG.get("telegram_group_chat_id"):
+                            mgmt_targets.append(CONFIG["telegram_group_chat_id"])
+                        for mgmt_msg in mgmt_messages:
+                            for target_chat_id in mgmt_targets:
+                                send_telegram_alert(CONFIG["telegram_token"], target_chat_id, mgmt_msg)
+            except Exception as e:
+                print(f"[Trade Management Error] {display_symbol}: {e}")
 
             # --- Plan 2/3 จาก Hourly Briefing (Breakout / สวนเทรนด์) และ Plan 4 (Daily Continuation) ---
             # ย้าย logic เช็ค trigger + ส่ง Telegram + บันทึก order ไปอยู่ที่ plan_runner.py/

@@ -43,6 +43,12 @@ Signal_Log/AI_Log ที่ export มาดูจริง)
 (เช่นราคาทะลุมันไปได้จริงในรอบถัดๆ ไป) ก็ควรให้สัญญาณเดิมผ่านได้ตามปกติ ไม่ใช่ถูกบล็อกค้างตลอดไป
 ไม่กระทบแผนที่ 3 (สวนเทรนด์) เพราะ TP ของแผนนี้เป็น Equilibrium ของ Premium/Discount ไม่ใช่ measured
 move แบบแผน 2 ผู้ใช้เลือกให้ทำแค่แผน 2/4 ก่อน (ดูผลจริงก่อนจะขยายไปแผนอื่น)
+
+*** แก้ไขล่าสุด (7 ก.ย. 2026 รอบ 2): ส่ง symbol เข้า send_alert_to_targets() ทุกจุด ***
+alert_dispatcher.send_alert_to_targets() รองรับพารามิเตอร์ symbol (ใหม่) เพื่อเช็ค Portfolio Risk
+Guard ก่อนส่งทุกครั้ง (ดู risk_guard.py) — ทุกจุดในไฟล์นี้ที่เรียก send_alert_to_targets() ต้องส่ง
+symbol เข้าไปด้วยเสมอ ไม่งั้น Risk Guard จะไม่ครอบคลุมแผน 2/4/5/6/7/8 เลย (เช็คแค่ Plan 1 ที่ main.py
+เท่านั้น ซึ่งไม่พอ เพราะ 7 ใน 8 แผนอยู่ในไฟล์นี้)
 """
 from kvstore import kv_get, kv_set
 from news_scheduler import is_in_news_blackout
@@ -54,7 +60,9 @@ from scenario import (
 from zones import find_opposing_zone_in_path
 from alert_dispatcher import send_alert_to_targets, save_plan_order
 from orders import load_orders, add_pending_order
-from plan_score import generic_plan_score
+from plan_score import generic_plan_score, GENERIC_MAX_SCORE
+from risk import format_position_sizing_line
+from plan_coordination import find_direction_conflicts, format_conflict_warning
 
 
 def check_plan2_plan3_triggers(df, config, symbol):
@@ -161,6 +169,11 @@ def check_plan2_plan3_triggers(df, config, symbol):
                 "ควรพิจารณาความเสี่ยงเพิ่มเติมเอง หรือลดขนาดไม้ก่อนเข้า"
             )
 
+            # *** ใหม่ (7 ก.ย. 2026): Plan Coordination — เตือนถ้าแผนอื่นมีออเดอร์ทิศทางตรงข้ามเปิดอยู่ ***
+            # ใช้ trigger["direction"] (มีเสมอไม่ว่า calc_order จะสำเร็จหรือไม่) ไม่ block การส่ง แค่แจ้งเพิ่ม
+            conflicts = find_direction_conflicts(bucket, symbol, trigger["direction"], config)
+            plan_msg += format_conflict_warning(conflicts)
+
             # --- บันทึกลง Order Dashboard (เก็บสถิติไว้วัดผลย้อนหลังได้) ---
             if calc_order:
                 # bias_4h ไม่มีให้ใช้ในฟังก์ชันนี้ (ไม่ได้ถูกส่งเข้ามาเป็นพารามิเตอร์) — ส่ง None ไปก่อน
@@ -175,8 +188,13 @@ def check_plan2_plan3_triggers(df, config, symbol):
                     f"\n\nEntry: {calc_order['entry_price']:.4f} | SL: {calc_order['stop_loss']:.4f} | "
                     f"TP: {calc_order['take_profit']:.4f} (RR {calc_order['rr']})"
                 )
+                # *** ใหม่ (7 ก.ย. 2026): แนบ Position Sizing (คะแนน->%ความเสี่ยง->ตัวเงินจริง) ***
+                plan_msg += format_position_sizing_line(
+                    bucket, calc_order["entry_price"], calc_order["stop_loss"], score, config,
+                    score_ceiling=GENERIC_MAX_SCORE,
+                )
 
-            send_alert_to_targets(config, plan_msg)
+            send_alert_to_targets(config, plan_msg, symbol=symbol)
 
             kv_set(bucket, state_key, dedup_value)
     except Exception as e:
@@ -277,6 +295,14 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol, df_15m=None):
                                 )
                                 return
 
+                            # *** ใหม่ (7 ก.ย. 2026): ย้ายคำนวณ score มาก่อนสร้างข้อความ/ส่ง ***
+                            # เดิมคำนวณ score หลัง send_alert_to_targets() ไปแล้ว ทำให้แนบ Position
+                            # Sizing (ต้องใช้ score) เข้าไปในข้อความที่ส่งจริงไม่ได้ — ไม่มี structure/
+                            # bias_4h ให้ใช้ในฟังก์ชันนี้ (อ้างอิง Daily range แทน) ส่ง None ทั้งคู่ —
+                            # ยังได้คะแนนพื้นฐาน + คุณภาพ RR ตามปกติ (ดีกว่า score=None เดิม)
+                            score, _ = generic_plan_score(plan4_order["direction"], plan4_order["rr"],
+                                                           None, None, config)
+
                             direction_th = "LONG (ซื้อ)" if plan4_order["direction"] == "bullish" else "SHORT (ขาย)"
                             plan4_msg = (
                                 f"🚨 <b>ออเดอร์เข้า — Daily Continuation (แผนที่ 4)</b>\n"
@@ -288,13 +314,18 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol, df_15m=None):
                                 "day-trade แบบแผน 1-3 ไม่มี partial TP ปล่อยไหลจนถึงเป้าเดียวนี้เท่านั้น "
                                 "ยังไม่เคยผ่านการ backtest มาก่อน ควรพิจารณาความเสี่ยงเพิ่มเติมเอง"
                             )
+                            # *** ใหม่ (7 ก.ย. 2026): Plan Coordination — เตือนถ้าแผนอื่นทิศทางตรงข้ามเปิดอยู่ ***
+                            conflicts = find_direction_conflicts(
+                                bucket, symbol, plan4_order["direction"], config
+                            )
+                            plan4_msg += format_conflict_warning(conflicts)
+                            plan4_msg += format_position_sizing_line(
+                                bucket, plan4_order["entry_price"], plan4_order["stop_loss"], score,
+                                config, score_ceiling=GENERIC_MAX_SCORE,
+                            )
 
-                            send_alert_to_targets(config, plan4_msg)
+                            send_alert_to_targets(config, plan4_msg, symbol=symbol)
 
-                            # ไม่มี structure/bias_4h ให้ใช้ในฟังก์ชันนี้ (อ้างอิง Daily range แทน) ส่ง
-                            # None ทั้งคู่ — ยังได้คะแนนพื้นฐาน + คุณภาพ RR ตามปกติ (ดีกว่า score=None เดิม)
-                            score, _ = generic_plan_score(plan4_order["direction"], plan4_order["rr"],
-                                                           None, None, config)
                             save_plan_order(config, symbol, plan4_order["direction"],
                                              plan4_order["entry_price"], plan4_order["stop_loss"],
                                              {"TP1": plan4_order["take_profit"]}, score=score,
@@ -352,6 +383,13 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
                     and abs(o["entry_price"] - order["entry_price"]) < threshold):
                 return  # มี zone ลักษณะเดียวกันแจ้งไปแล้ว (ยัง pending หรือ fill ไปแล้ว) ไม่แจ้งซ้ำ
 
+        # *** ใหม่ (7 ก.ย. 2026): ย้าย analyze_structure()/คำนวณ score มาก่อนสร้างข้อความ/ส่ง ***
+        # เดิมคำนวณหลัง send_alert_to_targets() ไปแล้ว ทำให้แนบ Position Sizing (ต้องใช้ score) เข้าไป
+        # ในข้อความที่ส่งจริงไม่ได้ — analyze_structure() ไม่ยิง API เพิ่ม แค่วิเคราะห์จาก df_ind_plan
+        # ที่ดึงมาแล้ว
+        structure_plan = analyze_structure(df_ind_plan, config)
+        score, _ = generic_plan_score(order["direction"], order["rr"], bias_4h, structure_plan, config)
+
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
             f"🚨 <b>เจอ Zone ใหม่ — แผนที่ 5 (SMC Zone Entry, Set & Forget)</b>\n"
@@ -363,12 +401,15 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
             "หมายเหตุ: แจ้งทันทีที่เจอ zone (Set & Forget) — วาง Limit Order ไว้รอได้เลย "
             "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
-        send_alert_to_targets(config, msg)
-
-        # เพิ่ม analyze_structure() ตรงนี้ (ไม่ยิง API เพิ่ม แค่วิเคราะห์จาก df_ind_plan ที่ดึงมาแล้ว) เพื่อ
-        # คำนวณคะแนนจริงก่อนบันทึก — เดิมส่ง score=None ทำให้ /best มองไม่เห็นออเดอร์กลุ่มนี้เลยทั้งที่ active จริง
-        structure_plan = analyze_structure(df_ind_plan, config)
-        score, _ = generic_plan_score(order["direction"], order["rr"], bias_4h, structure_plan, config)
+        # *** ใหม่ (7 ก.ย. 2026): Plan Coordination — ใช้ existing_orders ที่โหลดไปแล้วด้านบน (ไม่โหลดซ้ำ) ***
+        conflicts = find_direction_conflicts(bucket, symbol, order["direction"], config,
+                                              existing_orders=existing_orders)
+        msg += format_conflict_warning(conflicts)
+        msg += format_position_sizing_line(
+            bucket, order["entry_price"], order["stop_loss"], score, config,
+            score_ceiling=GENERIC_MAX_SCORE,
+        )
+        send_alert_to_targets(config, msg, symbol=symbol)
 
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
@@ -425,6 +466,11 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
                     and abs(o["entry_price"] - order["entry_price"]) < threshold):
                 return  # มีโอกาสลักษณะเดียวกันแจ้งไปแล้ว ไม่แจ้งซ้ำ
 
+        # เพิ่ม analyze_structure() เหมือน Plan 5 (ดูหมายเหตุด้านบน) — แก้บั๊ก score=None เดิม และย้ายมา
+        # ก่อนสร้างข้อความ/ส่ง เพื่อให้แนบ Position Sizing (ต้องใช้ score) เข้าไปในข้อความที่ส่งจริงได้
+        structure_plan = analyze_structure(df_ind_plan, config)
+        score, _ = generic_plan_score(order["direction"], order["rr"], bias_4h, structure_plan, config)
+
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
             f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 6 (Liquidity Sweep + Displacement, Set & Forget)</b>\n"
@@ -436,11 +482,14 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
             "หมายเหตุ: แจ้งทันทีที่เจอโอกาส (Set & Forget) — วาง Limit Order ไว้รอได้เลย "
             "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
-        send_alert_to_targets(config, msg)
-
-        # เพิ่ม analyze_structure() เหมือน Plan 5 (ดูหมายเหตุด้านบน) — แก้บั๊ก score=None เดิม
-        structure_plan = analyze_structure(df_ind_plan, config)
-        score, _ = generic_plan_score(order["direction"], order["rr"], bias_4h, structure_plan, config)
+        conflicts = find_direction_conflicts(bucket, symbol, order["direction"], config,
+                                              existing_orders=existing_orders)
+        msg += format_conflict_warning(conflicts)
+        msg += format_position_sizing_line(
+            bucket, order["entry_price"], order["stop_loss"], score, config,
+            score_ceiling=GENERIC_MAX_SCORE,
+        )
+        send_alert_to_targets(config, msg, symbol=symbol)
 
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
@@ -498,6 +547,12 @@ def check_qm_pattern_trigger(df, config, symbol):
                     and abs(o["entry_price"] - order["entry_price"]) < threshold):
                 return  # มีโอกาสลักษณะเดียวกันแจ้งไปแล้ว ไม่แจ้งซ้ำ
 
+        # เพิ่ม analyze_structure() (ไม่ยิง API เพิ่ม) แล้วคำนวณคะแนนจริง — ไม่มี bias_4h ให้ใช้ตามสถาปัตยกรรม
+        # เดิมของกลุ่ม D (ดู docstring) ส่ง None ไป ยังได้คะแนนพื้นฐาน + RR quality + เทรนด์หลัก 15M ตามปกติ
+        # ย้ายมาก่อนสร้างข้อความ/ส่ง เพื่อให้แนบ Position Sizing (ต้องใช้ score) เข้าไปในข้อความที่ส่งจริงได้
+        structure_plan = analyze_structure(df_ind_plan, config)
+        score, _ = generic_plan_score(order["direction"], order["rr"], None, structure_plan, config)
+
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
             f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 7 (Quasimodo Pattern, Set & Forget)</b>\n"
@@ -509,12 +564,14 @@ def check_qm_pattern_trigger(df, config, symbol):
             "หมายเหตุ: แจ้งทันทีที่เจอโครงสร้าง (Set & Forget) — วาง Limit Order ไว้รอได้เลย "
             "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะเดินทางมาถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
-        send_alert_to_targets(config, msg)
-
-        # เพิ่ม analyze_structure() (ไม่ยิง API เพิ่ม) แล้วคำนวณคะแนนจริง — ไม่มี bias_4h ให้ใช้ตามสถาปัตยกรรม
-        # เดิมของกลุ่ม D (ดู docstring) ส่ง None ไป ยังได้คะแนนพื้นฐาน + RR quality + เทรนด์หลัก 15M ตามปกติ
-        structure_plan = analyze_structure(df_ind_plan, config)
-        score, _ = generic_plan_score(order["direction"], order["rr"], None, structure_plan, config)
+        conflicts = find_direction_conflicts(bucket, symbol, order["direction"], config,
+                                              existing_orders=existing_orders)
+        msg += format_conflict_warning(conflicts)
+        msg += format_position_sizing_line(
+            bucket, order["entry_price"], order["stop_loss"], score, config,
+            score_ceiling=GENERIC_MAX_SCORE,
+        )
+        send_alert_to_targets(config, msg, symbol=symbol)
 
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],
@@ -572,6 +629,12 @@ def check_flag_pattern_trigger(df, config, symbol):
                     and abs(o["entry_price"] - order["entry_price"]) < threshold):
                 return  # มีโอกาสลักษณะเดียวกันแจ้งไปแล้ว ไม่แจ้งซ้ำ
 
+        # เพิ่ม analyze_structure() (ไม่ยิง API เพิ่ม) แล้วคำนวณคะแนนจริง — ไม่มี bias_4h ให้ใช้ตามสถาปัตยกรรม
+        # เดิมของกลุ่ม B เช่นกัน ส่ง None ไป ยังได้คะแนนพื้นฐาน + RR quality + เทรนด์หลัก 15M ตามปกติ
+        # ย้ายมาก่อนสร้างข้อความ/ส่ง เพื่อให้แนบ Position Sizing (ต้องใช้ score) เข้าไปในข้อความที่ส่งจริงได้
+        structure_plan = analyze_structure(df_ind_plan, config)
+        score, _ = generic_plan_score(order["direction"], order["rr"], None, structure_plan, config)
+
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
             f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 8 (Flag Pattern, Set & Forget)</b>\n"
@@ -583,12 +646,14 @@ def check_flag_pattern_trigger(df, config, symbol):
             "หมายเหตุ: แจ้งทันทีที่เจอ pattern (Set & Forget) — วาง Stop Order รอ breakout ได้เลย "
             "ยังไม่นับเป็นออเดอร์จริงจนกว่าราคาจะทะลุกรอบไปถึง Entry (จะเห็นความคืบหน้าในสรุปผลประจำวันอัตโนมัติ)"
         )
-        send_alert_to_targets(config, msg)
-
-        # เพิ่ม analyze_structure() (ไม่ยิง API เพิ่ม) แล้วคำนวณคะแนนจริง — ไม่มี bias_4h ให้ใช้ตามสถาปัตยกรรม
-        # เดิมของกลุ่ม B เช่นกัน ส่ง None ไป ยังได้คะแนนพื้นฐาน + RR quality + เทรนด์หลัก 15M ตามปกติ
-        structure_plan = analyze_structure(df_ind_plan, config)
-        score, _ = generic_plan_score(order["direction"], order["rr"], None, structure_plan, config)
+        conflicts = find_direction_conflicts(bucket, symbol, order["direction"], config,
+                                              existing_orders=existing_orders)
+        msg += format_conflict_warning(conflicts)
+        msg += format_position_sizing_line(
+            bucket, order["entry_price"], order["stop_loss"], score, config,
+            score_ceiling=GENERIC_MAX_SCORE,
+        )
+        send_alert_to_targets(config, msg, symbol=symbol)
 
         saved = add_pending_order(
             bucket, symbol, order["direction"], order["entry_price"], order["stop_loss"],

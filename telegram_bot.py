@@ -1,7 +1,7 @@
 """
 telegram_bot.py
 ระบบรับคำสั่งจาก Telegram (Interactive Commands) เพิ่มเติมจากที่บอทส่งแจ้งเตือนอัตโนมัติอยู่แล้ว
-รองรับ: /order /trend /news /status /aicheck
+รองรับ: /order /trend /news /status /aicheck /setbalance
 
 /order รวมทั้ง 8 แผนไว้คำสั่งเดียว: เช็คเงื่อนไขของแผนที่ 1-8 พร้อมกันในรอบเดียว แล้วสรุปผลรวมเป็น
 ข้อความเดียว (ยาว อาจถูกแบ่งส่งหลายข้อความถ้าเกินลิมิตของ Telegram — ดู _reply/_split_message)
@@ -10,6 +10,10 @@ telegram_bot.py
 /order แสดงผลตามสภาพจริงล้วนๆ (detect-and-display) — การบันทึกข้อมูลออเดอร์ ผู้ใช้แยกไปทำเองข้างนอก
 แล้ว ทุกแผนคำนวณ "คะแนน" (Score) ของตัวเองเทียบกันเสมอ (ดู plan_score.py) เรียงจากมากไปน้อย พร้อม
 ไฮไลต์แผนที่ทิศทางตรงกับเทรนด์หลัก (4H Bias หรือ 15M Structure) ให้เห็นชัดเวลาสัญญาณสวนทางกัน
+
+/setbalance <จำนวนเงิน> — ตั้ง/ดูทุนเทรดปัจจุบัน (ดู account.py) ระบบใช้ตัวเลขนี้คำนวณ Position Size
+ของทุกแผนตั้งแต่รอบ cron ถัดไปทันที (สูงสุด 5 นาที) ไม่ต้องแก้โค้ด/deploy ใหม่ (เดิม hardcode
+account_balance=1000 ตรงๆ ใน main.py)
 
 ข้อจำกัดสำคัญที่ควรรู้ก่อนใช้: บอทนี้รันบน GitHub Actions แบบ cron (ไม่ใช่ server ที่ฟังตลอดเวลา)
 คำสั่งที่พิมพ์จะถูกประมวลผล "ตอนที่บอทรันรอบถัดไป" เท่านั้น ไม่ใช่ตอบทันที ถ้า cron ตั้งไว้ทุก 5 นาที
@@ -43,6 +47,7 @@ from qm_pattern_entry import find_qm_pattern, calc_qm_entry_order
 from flag_pattern_entry import find_flag_pattern, calc_flag_entry_order
 from plan_score import generic_plan_score, determine_master_trend
 from config import get_symbol_config
+from account import get_account_balance, set_account_balance
 import ai_layer
 import sheets_log
 import plan_summary
@@ -87,6 +92,11 @@ DISABLED_SYMBOLS = {"ETHUSDT"}
 # "/ordereth" "/trendgold") ส่วนคำสั่งอื่น (/news /status) ยังผูกกับคู่เงินหลักของ instance เหมือนเดิม
 # ไม่รับ argument — เพิ่มคำสั่งใหม่เข้าชุดนี้ได้เลยถ้าอยากให้เลือกคู่เงินได้ด้วย
 SYMBOL_AWARE_COMMANDS = {"order", "trend"}
+
+# --- คำสั่งที่รับ argument แบบอื่น (ไม่ใช่คู่เงิน) แล้วไม่ต้องใช้ ctx (ข้อมูลตลาด) เลย — handler ของ
+# กลุ่มนี้รับ (config, command_args) ตรงๆ แทนที่จะเป็น (ctx) เหมือนคำสั่งทั่วไป กันไม่ต้องดึงข้อมูล
+# ตลาด (TwelveData) แบบไม่จำเป็นสำหรับคำสั่งที่แค่อ่าน/เขียน kvdb (เช่น /setbalance) ---
+ARGS_ONLY_COMMANDS = {"setbalance"}
 
 # --- display symbol -> label สั้นๆ ที่ใช้ขึ้นหัวข้อความตอบกลับ ให้เห็นชัดว่าผลลัพธ์นี้ของคู่เงินไหน
 # (กันสับสนตอนสลับดู /order gold กับ /order eth ถี่ๆ ในแชทเดียวกัน) ---
@@ -711,6 +721,20 @@ def _cmd_status(ctx):
         f"เทรนด์ 15M ตอนนี้: {TREND_LABEL.get(structure.get('trend'), '-')} "
         f"{STRENGTH_LABEL.get(structure.get('trend_strength'), '')}"
     )
+
+    # --- Risk Guard: โชว์สถานะสั้นๆ ให้เห็นในตัวเดียวกับ /status เลย ไม่ต้องมีคำสั่งแยก ---
+    # ห่อ try/except กันเวอร์ชันเก่าที่ยังไม่มี orders สำหรับ symbol นี้ / risk_guard.py ยังไม่ deploy พัง
+    try:
+        from risk_guard import get_daily_stats
+        rg_stats = get_daily_stats(config["kvdb_bucket"], ctx["symbol"])
+        lines.append("")
+        lines.append(
+            f"🛡️ Risk Guard: ขาดทุนวันนี้ {rg_stats['loss_r_today']:.0f}R | "
+            f"เสียติดกัน {rg_stats['consecutive_losses']} ไม้ | กำลังรัน {rg_stats['running_count']} ไม้"
+        )
+    except Exception:
+        pass
+
     lines.append("")
     lines.append("บอทกำลังทำงานปกติ — ข้อความนี้คือหลักฐานว่ารันสำเร็จล่าสุด ✅")
     lines.append("(ตอบคำสั่งผ่าน Render polling loop — เกือบ real-time ไม่ใช่รอ cron 5 นาทีแบบเดิมแล้ว)")
@@ -783,6 +807,51 @@ def _cmd_best(ctx):
     )
 
 
+def _cmd_setbalance(config, args):
+    """คำสั่ง /setbalance <จำนวนเงิน> — ตั้ง/ดูทุนเทรดปัจจุบัน (ดู account.py) ระบบใช้ตัวเลขนี้คำนวณ
+    Position Size (risk.py's calc_position_size) ของทุกแผนตั้งแต่รอบ cron ถัดไปทันที (สูงสุด 5 นาที)
+    ไม่ต้องแก้โค้ด/deploy ใหม่ (เดิม hardcode account_balance=1000 ตรงๆ ใน main.py)
+
+    อยู่ใน ARGS_ONLY_COMMANDS (ดูหัวไฟล์) เพราะไม่ต้องใช้ข้อมูลตลาด (ctx) เลย — รับ (config, args)
+    ตรงๆ แทน ไม่ยิง TwelveData เพิ่มโดยไม่จำเป็นสำหรับคำสั่งที่แค่อ่าน/เขียน kvdb
+
+    ไม่ใส่ argument (พิมพ์ /setbalance เฉยๆ) = แสดงทุนปัจจุบัน + เงินเสี่ยงต่อไม้ตามทุนนั้น
+    ใส่ตัวเลข (เช่น /setbalance 100) = ตั้งทุนใหม่ทันที
+    """
+    bucket = config["kvdb_bucket"]
+    risk_pct = config.get("risk_per_trade_pct", 1.0)
+
+    if not args:
+        current = get_account_balance(bucket)
+        risk_amount = current * risk_pct / 100
+        return (
+            f"💰 <b>ทุนเทรดตอนนี้:</b> ${current:,.2f}\n"
+            f"เสี่ยงต่อไม้ ({risk_pct}%): ${risk_amount:,.2f}\n\n"
+            f"ตั้งทุนใหม่: พิมพ์ /setbalance <จำนวนเงิน> เช่น /setbalance 100"
+        )
+
+    raw_amount = args[0].replace(",", "").replace("$", "")
+    try:
+        amount = float(raw_amount)
+    except ValueError:
+        return f"❌ \"{args[0]}\" ไม่ใช่ตัวเลขที่ใช้ได้ครับ ตัวอย่าง: /setbalance 100"
+
+    if amount <= 0:
+        return "❌ ทุนต้องมากกว่า 0 ครับ"
+
+    ok = set_account_balance(bucket, amount)
+    if not ok:
+        return "❌ บันทึกทุนใหม่ลง kvdb ไม่สำเร็จ (เชื่อมต่อผิดพลาดชั่วคราว) ลองใหม่อีกครั้งครับ"
+
+    risk_amount = amount * risk_pct / 100
+    return (
+        f"✅ ตั้งทุนเทรดเป็น ${amount:,.2f} แล้วครับ\n\n"
+        f"เสี่ยงต่อไม้ ({risk_pct}%): ${risk_amount:,.2f}\n"
+        f"ระบบจะใช้ตัวเลขนี้คำนวณ Position Size ของทุกแผนตั้งแต่รอบ cron ถัดไปทันที (ทุก 5 นาที) "
+        f"ไม่ต้องรอ deploy ใหม่\n\n"
+        f"💡 หมายเหตุ: ทุนเล็กเสี่ยงเจ๊งเร็วกว่าทุนใหญ่ถ้าไม่มีเบรก — ระบบมี Risk Guard (ระงับ Alert "
+        f"ไม้ใหม่อัตโนมัติถ้าขาดทุนหนัก/เสียติดกันหลายไม้เกินไป) เปิดใช้งานอยู่แล้ว เช็คได้ด้วย /status"
+    )
 
 
 def _cmd_testbox(ctx):
@@ -984,6 +1053,7 @@ COMMAND_HANDLERS = {
     "test": _cmd_test,
     "testbox": _cmd_testbox,
     "best": _cmd_best,
+    "setbalance": _cmd_setbalance,
 }
 
 
@@ -1051,12 +1121,15 @@ def handle_telegram_commands(config, ctx):
             try:
                 # /order และ /trend รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/trend eth")
                 # ดู SYMBOL_AWARE_COMMANDS — เหตุผลเดียวกับใน run_polling_loop() ด้านล่าง
+                # /setbalance (ARGS_ONLY_COMMANDS) ไม่ต้องใช้ ctx เลย รับ (config, command_args) ตรงๆ
                 if command in SYMBOL_AWARE_COMMANDS:
                     target_symbol, resolve_err = _resolve_symbol_arg(command_args, ctx["symbol"])
                     if resolve_err:
                         reply_text = resolve_err
                     else:
                         reply_text = handler(_build_command_context(target_symbol, config))
+                elif command in ARGS_ONLY_COMMANDS:
+                    reply_text = handler(config, command_args)
                 else:
                     reply_text = handler(ctx)
             except Exception as e:
@@ -1199,6 +1272,7 @@ def run_polling_loop(config, symbol="XAUUSD"):
                     # /order และ /trend รับ argument เลือกคู่เงินได้ (เช่น "/order gold", "/trend eth")
                     # ดู SYMBOL_AWARE_COMMANDS — คำสั่งอื่น (/news /status /aicheck) ยังผูกกับ
                     # คู่เงินหลักของ instance นี้เหมือนเดิม ไม่รับ argument
+                    # /setbalance (ARGS_ONLY_COMMANDS) ไม่ต้องใช้ ctx เลย รับ (config, command_args) ตรงๆ
                     if command in SYMBOL_AWARE_COMMANDS:
                         target_symbol, resolve_err = _resolve_symbol_arg(command_args, symbol)
                         if resolve_err:
@@ -1206,6 +1280,8 @@ def run_polling_loop(config, symbol="XAUUSD"):
                         else:
                             ctx = _build_command_context(target_symbol, config)
                             reply_text = handler(ctx)
+                    elif command in ARGS_ONLY_COMMANDS:
+                        reply_text = handler(config, command_args)
                     else:
                         ctx = _build_command_context(symbol, config)
                         reply_text = handler(ctx)
