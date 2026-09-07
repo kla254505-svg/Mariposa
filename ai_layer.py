@@ -200,13 +200,16 @@ def _call_claude_api(context_text, config):
 
     payload = {
         "model": config.get("ai_model", "claude-sonnet-5"),
-        # ตั้ง 2000 (เดิม 700 น้อยเกินไป) — เจอปัญหาจริงตอนใช้งาน: โมเดลรุ่นใหม่ใช้ thinking token
-        # ก่อนตอบจริง พอโควตาหมดไปกับการคิด เลยไม่เหลือให้เขียน JSON ออกมาเลย ได้ response ที่ไม่มี
-        # text block (stop_reason=max_tokens) ทำให้ Central AI Layer ใช้งานไม่ได้ทั้งระบบ
+        # *** แก้ไขล่าสุด (7 ก.ย. 2026): เพิ่มจาก 2000 เป็น 4000 ***
+        # เจอจริงจาก log การรันจริงบน GitHub Actions: max_tokens=2000 ยังไม่พอ — รอบนี้ไม่ได้ได้ response
+        # ว่างเปล่าสนิทแบบที่เคยเจอ (เคสเดิมที่ทำให้ขยับ 700->2000) แต่ได้ text ออกมาแค่ ~425 ตัวอักษร
+        # แล้วโดนตัดกลางคัน (stop_reason=max_tokens) กลางทาง JSON string พอดี ทำให้ json.loads() พังด้วย
+        # "Unterminated string" — สาเหตุเดียวกัน (thinking token กินโควตาไปก่อนเขียน JSON จริง) แค่ตัด
+        # ตำแหน่งต่างกันไปในแต่ละครั้งตามความยาวที่โมเดลคิดในรอบนั้นๆ ขยับเพดานขึ้นอีกเผื่อพื้นที่ให้มากพอ
         # JSON ที่ต้องการจริงยาวแค่ ~300-400 token ที่เหลือเผื่อไว้ให้ thinking โดยเฉพาะ
         # หมายเหตุเรื่องต้นทุน: จ่ายตาม token ที่ใช้จริงเท่านั้น ไม่ใช่ตามค่า max_tokens ที่ตั้งไว้
         # การเพิ่มเพดานตรงนี้จึงไม่ได้ทำให้ค่าใช้จ่ายต่อครั้งเพิ่มขึ้นถ้าโมเดลตอบสั้นเท่าเดิม
-        "max_tokens": 2000,
+        "max_tokens": 4000,
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": context_text}],
     }
@@ -243,11 +246,22 @@ def _call_claude_api(context_text, config):
         # ต่อกันตรงๆ ไม่ใส่ "\n" คั่น — ถ้า Claude แบ่ง JSON ก้อนเดียวออกเป็นหลาย text block
         # (เกิดขึ้นได้กับ response ยาว/streaming) การใส่ newline คั่นกลางจะทำให้ JSON พังทันที
         text = "".join(text_parts).strip()
+        stop_reason = body.get("stop_reason")
         if not text:
-            stop_reason = body.get("stop_reason")
             return None, "ERROR", (
                 f"Claude API ตอบกลับมาแต่ไม่มีข้อความ (stop_reason={stop_reason}) — "
                 f"อาจโดนตัดกลางคันเพราะ max_tokens ต่ำไป"
+            )
+        # *** ใหม่ (7 ก.ย. 2026): เช็ค stop_reason=="max_tokens" แม้ text จะไม่ว่างเปล่าก็ตาม ***
+        # เจอจริงจาก log การรันจริง: text ไม่ว่าง (มีเนื้อหาบางส่วนแล้ว) แต่โดนตัดกลางคัน JSON string
+        # พอดี (json.loads พังด้วย "Unterminated string...") เดิมโค้ดเช็คเฉพาะเคส text ว่างเปล่าสนิท
+        # (ไม่เคยอ่าน stop_reason เลยถ้า text ไม่ว่าง) พอเจอเคส "ตัดกลางคันแบบไม่ว่างเปล่า" จะตกไปที่
+        # json.loads() ด้านล่างแล้วได้แค่ JSONDecodeError ทั่วไปที่ไม่บอกสาเหตุจริง (max_tokens ต่ำไป)
+        # ดักไว้ตรงนี้ก่อน ให้ error message ชัดเจนขึ้น ไม่สับสนว่า Claude ตอบ JSON ผิดรูปแบบเฉยๆ
+        if stop_reason == "max_tokens":
+            return None, "ERROR", (
+                f"Claude API ตอบกลับมาไม่ครบ (stop_reason=max_tokens, ได้มา {len(text)} ตัวอักษร) — "
+                f"โดนตัดกลางคัน JSON ก่อนเขียนเสร็จ ต้องเพิ่ม max_tokens อีก"
             )
     except Exception as e:
         return None, "ERROR", f"อ่านโครงสร้างผลลัพธ์จาก Claude API ไม่ได้: {e}"
