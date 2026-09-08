@@ -503,6 +503,13 @@ def detect_events(symbol, config, market_context, current_price, memory=None):
                 "id": oid, "plan": o.get("plan"), "direction": o.get("direction"),
                 "entry": o.get("entry_price"), "sl": o.get("stop_loss"), "tp": tp,
                 "rr": o.get("rr_tp1"), "signal_state": status,
+                # *** ใหม่ (8 ก.ย. 2026): ดึง score (คะแนนของ Strategy เอง จาก score.py/plan_score.py
+                # ตอนสร้างออเดอร์) และ opened_at (เวลาเปิดออเดอร์ HH:MM) มาด้วย — ใช้จัดลำดับ/แสดงผล
+                # ในข้อความ "สัญญาณจาก Strategy" (msg2 ของ format_ai_telegram_messages) เท่านั้น
+                # ไม่กระทบ state hash (_normalize_market_state ดึงแค่ plan/direction/signal_state
+                # เจาะจงอยู่แล้ว) และไม่กระทบ context ที่ส่งให้ AI (_build_ai_context_text ก็ดึงแค่
+                # field เดิมที่เคยมีเหมือนกัน) — เพิ่ม key ใหม่เข้ามาปลอดภัย ไม่กระทบของเดิม
+                "score": o.get("score"), "opened_at": o.get("opened_at"),
             })
 
         if status == "pending" and current_price is not None:
@@ -714,12 +721,32 @@ def format_ai_telegram_messages(symbol, ai_payload):
         )
 
     # ข้อความ 2: Order info (Strategy เป็นคนตัดสินใจ — AI แค่แสดงซ้ำให้เห็นในข้อความเดียวกับความเห็น)
+    #
+    # *** ใหม่ (8 ก.ย. 2026): จัดเรียงใหม่ตาม "score" ของ Strategy เอง (มาก -> น้อย) แทนลำดับเดิมที่
+    # เรียงตามที่ orders.py เก็บไว้ (= ลำดับเวลาที่เปิดออเดอร์ เก่า->ใหม่ ดูไม่ง่ายว่าอันไหนน่าสนใจสุด)
+    # ตัวที่คะแนนสูงสุดจะขึ้นก่อนพร้อมป้าย "🏆 แนะนำที่สุด" — ใช้ "score" ที่ Strategy คำนวณไว้แล้วตอน
+    # สร้างออเดอร์ (score.py/plan_score.py) เป็นตัวจัดอันดับ ไม่ใช่ AI เป็นคนตัดสิน (ยังคงหลักการ
+    # PLAN=DECIDE, AI=REVIEW เดิม) ออเดอร์เก่าที่ไม่มี "score" (None) จะถูกจัดไว้ท้ายสุดเสมอ ไม่ชน
+    # กับตัวที่มีคะแนนจริง (ใช้ -1 แทนตอน sort กันเทียบ None ไม่ได้ใน Python)
+    #
+    # ใส่เวลาที่เปิดแต่ละแผน "opened_at" (HH:MM) ต่อท้ายชื่อแผนทุกบรรทัด ให้เห็นชัดเจนในตัวเองว่า
+    # อันไหนมาก่อน-หลังโดยไม่ต้องนับลำดับเอง (ไม่จำเป็นต้องเรียงตามเวลาแยกอีกชุด — เวลาโชว์ตรงๆ ในแต่ละ
+    # บรรทัดอยู่แล้ว ดูง่ายกว่าจัดสองรอบ)
     order_lines = [f"📋 <b>สัญญาณจาก Strategy ({symbol})</b>", ""]
-    for p in active_plans:
+    sorted_plans = sorted(
+        active_plans,
+        key=lambda p: p["score"] if p.get("score") is not None else -1,
+        reverse=True,
+    )
+    top_has_score = bool(sorted_plans) and sorted_plans[0].get("score") is not None
+    for idx, p in enumerate(sorted_plans):
         dir_th = "LONG" if p.get("direction") == "bullish" else "SHORT"
+        time_tag = f" [{p['opened_at']}]" if p.get("opened_at") else ""
+        score_tag = f" | คะแนน {p['score']}" if p.get("score") is not None else ""
+        prefix = "🏆 <b>แนะนำที่สุด (คะแนนสูงสุด)</b>\n" if (idx == 0 and top_has_score) else ""
         order_lines.append(
-            f"• {p.get('plan')}: {dir_th}\n"
-            f"  Entry {p.get('entry')} | SL {p.get('sl')} | TP {p.get('tp')} | RR {p.get('rr')}"
+            f"{prefix}• {p.get('plan')}: {dir_th}{time_tag}\n"
+            f"  Entry {p.get('entry')} | SL {p.get('sl')} | TP {p.get('tp')} | RR {p.get('rr')}{score_tag}"
         )
     msg2 = "\n".join(order_lines)
 
