@@ -37,9 +37,16 @@ def send_telegram_photo(token, chat_id, photo_path, caption=""):
 
 def format_alert_message(symbol, timeframe, structure, entry_signal,
                           stop_loss, take_profits, rr, confidence, bias_4h=None,
-                          current_price=None, stale_threshold=None, position_sizing_line=None):
+                          current_price=None, stale_threshold=None, position_sizing_line=None,
+                          signal_id=None):
     """
-    *** แก้ไขล่าสุด (7 ก.ย. 2026): เพิ่ม parameter position_sizing_line=None ***
+    *** แก้ไขล่าสุด (8 ก.ย. 2026): เพิ่ม parameter signal_id=None ***
+    ตามข้อเสนอผู้ใช้ข้อ 9 — Signal ID ที่อ่านง่าย (เช่น XAUUSD-0908-P1-00037, สร้างจาก
+    orders.generate_signal_id() ก่อนเรียกฟังก์ชันนี้) ต้องโผล่ในข้อความ Telegram ตั้งแต่แรก เพื่อให้
+    ใช้เป็นตัวอ้างอิงเดียวกันได้ทุกจุด (Telegram -> Redis (order["id"]) -> Google Sheets Signal_ID ->
+    AI Log) — ไม่ใส่มา (None ค่า default) จะไม่แสดงบรรทัดนี้เลย พฤติกรรมเหมือนเดิมทุกประการ
+
+    *** แก้ไขก่อนหน้า (7 ก.ย. 2026): เพิ่ม parameter position_sizing_line=None ***
     ก่อนหน้านี้ main.py คำนวณ position size (risk.calc_position_size) ไว้จริง แต่ไม่เคยส่งเข้า
     Telegram เลยสักครั้ง (แค่ print console บน GitHub Actions ที่ผู้ใช้ไม่ค่อยเปิดดู) — ผู้ใช้เห็นแค่
     ราคา Entry/SL/TP ไม่เคยเห็นตัวเงินที่ควรเสี่ยงจริงๆ เลย ตอนนี้ผู้เรียก (main.py) สร้างบรรทัดนี้ผ่าน
@@ -49,6 +56,10 @@ def format_alert_message(symbol, timeframe, structure, entry_signal,
     direction_th = "LONG (ซื้อ)" if entry_signal["direction"] == "bullish" else "SHORT (ขาย)"
     lines = [
         f"🚨 <b>สัญญาณเทรด: {symbol} ({timeframe})</b>",
+    ]
+    if signal_id:
+        lines.append(f"🆔 {signal_id}")
+    lines += [
         f"ทิศทาง: {direction_th}",
         f"Trend/Event: {structure['trend']} | {structure['event']}",
     ]

@@ -97,10 +97,22 @@ CONFIG = {
     # กว่า" ความถี่ cron จริง (5 นาที) เสมอ ไม่งั้นจะไปบล็อกสัญญาณใหม่ที่เกิดขึ้นจริงในรอบถัดไปโดยไม่
     # ตั้งใจ (เจอบั๊กนี้จริงตอนเทส: ตั้งไว้ 10 นาทีแล้ว Plan ใหม่ที่เกิดขึ้นในรอบถัดไป — ห่างจากครั้งก่อน
     # แค่ 5 นาที — ถูกกันไม่ให้ AI วิเคราะห์ไปด้วย ทั้งที่ state เปลี่ยนจริงและควรแจ้งเตือน)
+    #
+    # หมายเหตุ (8 ก.ย. 2026): เคยลองปรับขึ้นเป็น 20 นาทีชั่วคราวเพื่อประหยัดเครดิต Anthropic API
+    # (เครดิตใกล้หมด ยังไม่มีเงินเติมจนถึงวันที่ 15) แต่ตัดสินใจไม่ใช้ค่านี้ — ปล่อยให้เครดิตหมดไปตามปกติ
+    # ดีกว่า (Strategy หลักไม่กระทบอยู่แล้ว ดู README ด้านบนของไฟล์นี้) คงค่าเดิม (2 นาที) ไว้เหมือนเดิม
     "ai_cooldown_minutes": 2,
     # ราคาปัจจุบันเข้าใกล้ entry ของออเดอร์ที่ยัง pending ภายในกี่เท่าของ ATR ถึงจะถือว่าเป็น event
     # "PRICE_APPROACH_ENTRY" (ให้ Central AI Layer วิเคราะห์เพิ่มได้ แม้ยังไม่ถึง entry จริงก็ตาม)
     "ai_price_approach_atr_mult": 0.5,
+    # *** ใหม่ (8 ก.ย. 2026): AI เป็น "Second Opinion / Warning System" เท่านั้น ไม่ใช่ Gate หลัก ***
+    # ตามข้อเสนอผู้ใช้ข้อ 7 — Strategy -> Risk Engine -> Final Score เป็นตัวตัดสินใจหลักเสมอ AI แค่
+    # เสริม/เตือน อ่านค่านี้จาก best_plan.py: format_best_plan_message() — เดิม /best ใช้
+    # "signal_assessment == VALID" เป็นเงื่อนไข "ต้องผ่านก่อนถึงจะเลือกเป็น Best Plan ได้" (Hard Gate)
+    # ตอนนี้เปลี่ยนเป็นแสดง AI Assessment เป็นข้อมูลประกอบ (Warning ถ้าไม่ VALID) แต่ยังเลือก/แสดง Best
+    # Plan จาก Final Score เป็นหลักเสมอ ไม่ว่า AI จะเห็นด้วยหรือไม่ก็ตาม — ปิดกลับไปใช้ Hard Gate แบบ
+    # เดิมได้ด้วยการตั้งค่านี้เป็น True (ค่า default ใหม่คือ False = ไม่ Gate แล้ว)
+    "ai_hard_gate_on_best_plan": False,
 
     # --- Portfolio Risk Guard (ใหม่) — ดู risk_guard.py สำหรับ logic เต็ม ---
     # เบรกระดับพอร์ตรวม (ไม่ใช่กรองต่อไม้แบบ score.py) ระงับ Telegram Alert ของไม้ "ใหม่" ชั่วคราวถ้า
@@ -124,6 +136,24 @@ CONFIG = {
     "risk_sizing_by_score_enabled": True,
     "risk_sizing_min_pct": 0.5,
     "risk_sizing_max_pct": 1.5,
+    # *** ใหม่ (8 ก.ย. 2026): risk_sizing_mode — เลือกวิธี scale risk % ระหว่าง "linear" (เดิม, scale
+    # ต่อเนื่องตามตำแหน่งคะแนนดิบ) กับ "grade" (ใหม่ ตามข้อเสนอผู้ใช้ข้อ 4 — แบ่งเป็นเกรด A+/A/B/C/D/F
+    # ก่อนแล้วค่อยจับคู่กับ Risk % ตายตัวต่อเกรดจาก risk_pct_by_grade ด้านล่าง) ตั้งเป็น "grade" เพื่อให้
+    # Risk % ที่ใช้จริงตรงกับเกรดที่โชว์บนข้อความ Telegram (TRADE QUALITY) เป๊ะๆ ไม่มีเลขทศนิยมที่
+    # ไม่สัมพันธ์กับเกรดที่เห็น — ดู claude/trade_quality.py
+    "risk_sizing_mode": "grade",
+    # ตารางความเสี่ยงต่อไม้แยกตามเกรด (%) — A+/A/B/C ได้ Risk ตามลำดับ, D/F ไม่แนะนำให้เข้าเลย (0%)
+    # โดยเฉพาะ Plan 3 (สวนเทรนด์) ที่มักได้คะแนนต่ำกว่า Trend-following เพราะสวนทิศ 4H Bias/15M
+    # Structure โดยธรรมชาติของแผน — เกรดที่ได้จึงมักต่ำกว่าและ Risk % ที่แนะนำจะต่ำลงตามไปเองโดย
+    # อัตโนมัติ (ไม่ต้อง hardcode แยกกฎเฉพาะ Plan 3 อีกชั้น เพราะกลไกเกรดจัดการให้แล้ว)
+    "risk_pct_by_grade": {
+        "A+": 1.0,
+        "A": 0.75,
+        "B": 0.5,
+        "C": 0.25,
+        "D": 0.0,
+        "F": 0.0,
+    },
 
     # --- Plan Coordination / Conflict Detection (ใหม่) — ดู plan_coordination.py ---
     # 8 แผนทำงานอิสระจากกัน ไม่รู้จักกันเอง อาจยิงสัญญาณสวนทางกันพร้อมกันได้ (เช่น Plan 5 มี Zone LONG
@@ -132,6 +162,12 @@ CONFIG = {
     # การส่ง Alert หรือบันทึกออเดอร์ใดๆ ทั้งสิ้น (แค่แจ้งเตือนเพิ่ม ตัดสินใจสุดท้ายอยู่ที่ผู้ใช้)
     "plan_conflict_warning_enabled": True,
 
+    # --- Final Trade Score / Trade Quality Grade (ใหม่, 8 ก.ย. 2026) — ดู claude/trade_quality.py ---
+    # เปิด/ปิดการคำนวณ+แสดง TRADE QUALITY (Final Score รวมบริบท Session/News/Opposite Zone + เกรด
+    # A+/A/B/C/D/F) ต่อท้ายข้อความ Telegram Alert ของทุกแผน — ปิดที่นี่จุดเดียวถ้าต้องการกลับไปแสดง
+    # แค่ Strategy Score ดิบแบบเดิม (ไม่กระทบ Risk Sizing — ถ้า risk_sizing_mode="grade" ยังทำงานอยู่
+    # เบื้องหลังเหมือนเดิมแม้ปิดการแสดงผลตรงนี้)
+    "trade_quality_display_enabled": True,
 }
 
 # ══════════════════════════════════════════════════════

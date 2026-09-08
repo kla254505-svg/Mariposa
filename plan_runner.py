@@ -9,7 +9,16 @@ plan_runner.py — เช็คเงื่อนไข trigger ของ Plan 2
 detection ออกจาก dispatch ตรงนั้นเสี่ยงเกินไปที่จะทำในรอบเดียวกับ Plan 2-4 ที่โครงสร้างง่ายกว่ามาก
 (detect -> คำนวณ order เดียว -> ส่ง/บันทึก ไม่มีการคำนวณซ้อนกันหลายชั้นแบบ Plan 1)
 
-*** แก้ไขล่าสุด (4 ก.ย. 2026): แก้บั๊ก score=None ***
+*** แก้ไขล่าสุด (8 ก.ย. 2026): Signal ID + Trade Quality (Final Score/เกรด) ทุกแผน (2-8) ***
+ตามข้อเสนอผู้ใช้ข้อ 2-4/9 — ทุกฟังก์ชันในไฟล์นี้ตอนนี้: (1) สร้าง Signal ID ที่อ่านง่าย (ผ่าน
+orders.generate_signal_id) "ก่อน" ส่งข้อความ Telegram เสมอ แล้วฝังใน msg + ส่งต่อให้
+save_plan_order()/add_pending_order() เก็บเป็น order["id"] ตัวเดียวกัน (2) คำนวณ Final Trade
+Score + เกรด A+/A/B/C/D/F ผ่าน claude/trade_quality.py แล้วแปะท้ายข้อความ (ปิดได้ผ่าน
+config['trade_quality_display_enabled']=False) — ทั้งสองอย่างนี้เป็นการ "แสดงผลเพิ่ม" เท่านั้น
+ไม่เปลี่ยนเงื่อนไข trigger/dedup/hard-block (Opposing Zone ของ Plan 2/4, News Blackout ทุกแผน) ที่มี
+อยู่แล้วแม้แต่นิดเดียว
+
+*** แก้ไขก่อนหน้า (4 ก.ย. 2026): แก้บั๊ก score=None ***
 พบว่าทุกฟังก์ชันในไฟล์นี้ (Plan 2/3/4/5/6/7/8 ที่ trigger อัตโนมัติ ไม่ใช่ผ่านคำสั่ง /order ที่ผู้ใช้พิมพ์
 เอง) ส่ง score=None เข้า add_order()/add_pending_order() ตอนสร้างออเดอร์เสมอ ทั้งที่ระบบให้คะแนน
 (plan_score.generic_plan_score) มีอยู่แล้วและ telegram_bot.py's /order ก็ใช้คำนวณคะแนนแบบเดียวกันนี้
@@ -59,10 +68,11 @@ from scenario import (
 )
 from zones import find_opposing_zone_in_path
 from alert_dispatcher import send_alert_to_targets, save_plan_order
-from orders import load_orders, add_pending_order
+from orders import load_orders, add_pending_order, generate_signal_id
 from plan_score import generic_plan_score, GENERIC_MAX_SCORE
 from risk import format_position_sizing_line
 from plan_coordination import find_direction_conflicts, format_conflict_warning
+from trade_quality import compute_final_score, compute_grade, format_trade_quality_line
 
 
 def check_plan2_plan3_triggers(df, config, symbol):
@@ -181,9 +191,17 @@ def check_plan2_plan3_triggers(df, config, symbol):
                 # ทำให้ /best กรองออเดอร์นี้ทิ้งไปเลยทั้งที่ active อยู่จริง)
                 score, _ = generic_plan_score(calc_order["direction"], calc_order["rr"], None,
                                                structure_plan, config)
+
+                # *** ใหม่ (8 ก.ย. 2026): Signal ID + Trade Quality — ดู docstring หัวไฟล์ ***
+                signal_id = generate_signal_id(bucket, symbol, plan_key)
+                final_score, quality_breakdown = compute_final_score(score, config, score_ceiling=GENERIC_MAX_SCORE)
+                grade = compute_grade(score, config, score_ceiling=GENERIC_MAX_SCORE)
+
                 save_plan_order(config, symbol, calc_order["direction"], calc_order["entry_price"],
                                  calc_order["stop_loss"], {"TP1": calc_order["take_profit"]},
-                                 score=score, plan_key=plan_key)
+                                 score=score, plan_key=plan_key, signal_id=signal_id,
+                                 final_score=final_score, grade=grade)
+                plan_msg = f"🆔 {signal_id}\n" + plan_msg
                 plan_msg += (
                     f"\n\nEntry: {calc_order['entry_price']:.4f} | SL: {calc_order['stop_loss']:.4f} | "
                     f"TP: {calc_order['take_profit']:.4f} (RR {calc_order['rr']})"
@@ -193,6 +211,10 @@ def check_plan2_plan3_triggers(df, config, symbol):
                     bucket, calc_order["entry_price"], calc_order["stop_loss"], score, config,
                     score_ceiling=GENERIC_MAX_SCORE,
                 )
+                if config.get("trade_quality_display_enabled", True):
+                    plan_msg += "\n\n" + format_trade_quality_line(
+                        final_score, GENERIC_MAX_SCORE, quality_breakdown, grade, config
+                    )
 
             send_alert_to_targets(config, plan_msg, symbol=symbol)
 
@@ -303,9 +325,17 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol, df_15m=None):
                             score, _ = generic_plan_score(plan4_order["direction"], plan4_order["rr"],
                                                            None, None, config)
 
+                            # *** ใหม่ (8 ก.ย. 2026): Signal ID + Trade Quality — ดู docstring หัวไฟล์ ***
+                            signal_id = generate_signal_id(bucket, symbol, "plan4_daily_continuation")
+                            final_score, quality_breakdown = compute_final_score(
+                                score, config, score_ceiling=GENERIC_MAX_SCORE
+                            )
+                            grade = compute_grade(score, config, score_ceiling=GENERIC_MAX_SCORE)
+
                             direction_th = "LONG (ซื้อ)" if plan4_order["direction"] == "bullish" else "SHORT (ขาย)"
                             plan4_msg = (
                                 f"🚨 <b>ออเดอร์เข้า — Daily Continuation (แผนที่ 4)</b>\n"
+                                f"🆔 {signal_id}\n"
                                 f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
                                 f"Entry: {plan4_order['entry_price']:.4f} | "
                                 f"SL: {plan4_order['stop_loss']:.4f} | "
@@ -323,13 +353,18 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol, df_15m=None):
                                 bucket, plan4_order["entry_price"], plan4_order["stop_loss"], score,
                                 config, score_ceiling=GENERIC_MAX_SCORE,
                             )
+                            if config.get("trade_quality_display_enabled", True):
+                                plan4_msg += "\n\n" + format_trade_quality_line(
+                                    final_score, GENERIC_MAX_SCORE, quality_breakdown, grade, config
+                                )
 
                             send_alert_to_targets(config, plan4_msg, symbol=symbol)
 
                             save_plan_order(config, symbol, plan4_order["direction"],
                                              plan4_order["entry_price"], plan4_order["stop_loss"],
                                              {"TP1": plan4_order["take_profit"]}, score=score,
-                                             plan_key="plan4_daily_continuation")
+                                             plan_key="plan4_daily_continuation", signal_id=signal_id,
+                                             final_score=final_score, grade=grade)
 
                             kv_set(bucket, state_key, dedup_value)
     except Exception as e:
@@ -390,9 +425,15 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
         structure_plan = analyze_structure(df_ind_plan, config)
         score, _ = generic_plan_score(order["direction"], order["rr"], bias_4h, structure_plan, config)
 
+        # *** ใหม่ (8 ก.ย. 2026): Signal ID + Trade Quality — ดู docstring หัวไฟล์ ***
+        signal_id = generate_signal_id(bucket, symbol, "plan5_zone_single")
+        final_score, quality_breakdown = compute_final_score(score, config, score_ceiling=GENERIC_MAX_SCORE)
+        grade = compute_grade(score, config, score_ceiling=GENERIC_MAX_SCORE)
+
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
             f"🚨 <b>เจอ Zone ใหม่ — แผนที่ 5 (SMC Zone Entry, Set & Forget)</b>\n"
+            f"🆔 {signal_id}\n"
             f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
             + "\n".join(result["reasons"]) + "\n\n"
             f"Entry (Limit): {order['entry_price']:.4f}\n"
@@ -409,6 +450,10 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
             bucket, order["entry_price"], order["stop_loss"], score, config,
             score_ceiling=GENERIC_MAX_SCORE,
         )
+        if config.get("trade_quality_display_enabled", True):
+            msg += "\n\n" + format_trade_quality_line(
+                final_score, GENERIC_MAX_SCORE, quality_breakdown, grade, config
+            )
         send_alert_to_targets(config, msg, symbol=symbol)
 
         saved = add_pending_order(
@@ -416,6 +461,7 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
             {"TP1": order["take_profit"]}, score=score, plan="plan5_zone_single",
             current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("zone_entry_expires_hours", 8), existing_orders=existing_orders,
+            signal_id=signal_id, final_score=final_score, grade=grade,
         )
         if saved is None:
             print(f"[Order Tracking Error] บันทึก pending order plan5_zone_single ({symbol}) "
@@ -471,9 +517,15 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
         structure_plan = analyze_structure(df_ind_plan, config)
         score, _ = generic_plan_score(order["direction"], order["rr"], bias_4h, structure_plan, config)
 
+        # *** ใหม่ (8 ก.ย. 2026): Signal ID + Trade Quality — ดู docstring หัวไฟล์ ***
+        signal_id = generate_signal_id(bucket, symbol, "plan6_sweep_general")
+        final_score, quality_breakdown = compute_final_score(score, config, score_ceiling=GENERIC_MAX_SCORE)
+        grade = compute_grade(score, config, score_ceiling=GENERIC_MAX_SCORE)
+
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
             f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 6 (Liquidity Sweep + Displacement, Set & Forget)</b>\n"
+            f"🆔 {signal_id}\n"
             f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
             + "\n".join(result["reasons"]) + "\n\n"
             f"Entry (Limit): {order['entry_price']:.4f}\n"
@@ -489,6 +541,10 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
             bucket, order["entry_price"], order["stop_loss"], score, config,
             score_ceiling=GENERIC_MAX_SCORE,
         )
+        if config.get("trade_quality_display_enabled", True):
+            msg += "\n\n" + format_trade_quality_line(
+                final_score, GENERIC_MAX_SCORE, quality_breakdown, grade, config
+            )
         send_alert_to_targets(config, msg, symbol=symbol)
 
         saved = add_pending_order(
@@ -496,6 +552,7 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
             {"TP1": order["take_profit"]}, score=score, plan="plan6_sweep_general",
             current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("sweep_entry_expires_hours", 6), existing_orders=existing_orders,
+            signal_id=signal_id, final_score=final_score, grade=grade,
         )
         if saved is None:
             print(f"[Order Tracking Error] บันทึก pending order plan6_sweep_general ({symbol}) "
@@ -553,9 +610,15 @@ def check_qm_pattern_trigger(df, config, symbol):
         structure_plan = analyze_structure(df_ind_plan, config)
         score, _ = generic_plan_score(order["direction"], order["rr"], None, structure_plan, config)
 
+        # *** ใหม่ (8 ก.ย. 2026): Signal ID + Trade Quality — ดู docstring หัวไฟล์ ***
+        signal_id = generate_signal_id(bucket, symbol, "plan7_qm_pattern")
+        final_score, quality_breakdown = compute_final_score(score, config, score_ceiling=GENERIC_MAX_SCORE)
+        grade = compute_grade(score, config, score_ceiling=GENERIC_MAX_SCORE)
+
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
             f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 7 (Quasimodo Pattern, Set & Forget)</b>\n"
+            f"🆔 {signal_id}\n"
             f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
             + "\n".join(result["reasons"]) + "\n\n"
             f"Entry (Limit): {order['entry_price']:.4f}\n"
@@ -571,6 +634,10 @@ def check_qm_pattern_trigger(df, config, symbol):
             bucket, order["entry_price"], order["stop_loss"], score, config,
             score_ceiling=GENERIC_MAX_SCORE,
         )
+        if config.get("trade_quality_display_enabled", True):
+            msg += "\n\n" + format_trade_quality_line(
+                final_score, GENERIC_MAX_SCORE, quality_breakdown, grade, config
+            )
         send_alert_to_targets(config, msg, symbol=symbol)
 
         saved = add_pending_order(
@@ -578,6 +645,7 @@ def check_qm_pattern_trigger(df, config, symbol):
             {"TP1": order["take_profit"]}, score=score, plan="plan7_qm_pattern",
             current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("qm_entry_expires_hours", 8), existing_orders=existing_orders,
+            signal_id=signal_id, final_score=final_score, grade=grade,
         )
         if saved is None:
             print(f"[Order Tracking Error] บันทึก pending order plan7_qm_pattern ({symbol}) "
@@ -635,9 +703,15 @@ def check_flag_pattern_trigger(df, config, symbol):
         structure_plan = analyze_structure(df_ind_plan, config)
         score, _ = generic_plan_score(order["direction"], order["rr"], None, structure_plan, config)
 
+        # *** ใหม่ (8 ก.ย. 2026): Signal ID + Trade Quality — ดู docstring หัวไฟล์ ***
+        signal_id = generate_signal_id(bucket, symbol, "plan8_flag_pattern")
+        final_score, quality_breakdown = compute_final_score(score, config, score_ceiling=GENERIC_MAX_SCORE)
+        grade = compute_grade(score, config, score_ceiling=GENERIC_MAX_SCORE)
+
         direction_th = "LONG (ซื้อ)" if order["direction"] == "bullish" else "SHORT (ขาย)"
         msg = (
             f"🚨 <b>เจอโอกาสใหม่ — แผนที่ 8 (Flag Pattern, Set & Forget)</b>\n"
+            f"🆔 {signal_id}\n"
             f"Symbol: {symbol} | ทิศทาง: {direction_th}\n"
             + "\n".join(result["reasons"]) + "\n\n"
             f"Entry (Stop): {order['entry_price']:.4f}\n"
@@ -653,6 +727,10 @@ def check_flag_pattern_trigger(df, config, symbol):
             bucket, order["entry_price"], order["stop_loss"], score, config,
             score_ceiling=GENERIC_MAX_SCORE,
         )
+        if config.get("trade_quality_display_enabled", True):
+            msg += "\n\n" + format_trade_quality_line(
+                final_score, GENERIC_MAX_SCORE, quality_breakdown, grade, config
+            )
         send_alert_to_targets(config, msg, symbol=symbol)
 
         saved = add_pending_order(
@@ -660,6 +738,7 @@ def check_flag_pattern_trigger(df, config, symbol):
             {"TP1": order["take_profit"]}, score=score, plan="plan8_flag_pattern",
             current_price=df_ind_plan["close"].iloc[-1],
             expires_in_hours=config.get("flag_entry_expires_hours", 6), existing_orders=existing_orders,
+            signal_id=signal_id, final_score=final_score, grade=grade,
         )
         if saved is None:
             print(f"[Order Tracking Error] บันทึก pending order plan8_flag_pattern ({symbol}) "

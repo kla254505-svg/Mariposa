@@ -10,15 +10,28 @@ sheets_log.py — เชื่อม Bot เข้ากับ Google Sheets (Tr
   - ทำงานแบบ "non-blocking" เสมอ — เขียนไม่สำเร็จ (credential ผิด, network, rate limit, ยังไม่ตั้งค่า
     environment variable ฯลฯ) ต้องไม่ทำให้ Strategy/AI/Telegram หยุดทำงานเด็ดขาด ทุกฟังก์ชัน public
     ในไฟล์นี้ห่อด้วย try/except ครบ ไม่โยน exception ออกไปเลย คืนค่า True/False บอกผลแทน
-  - Signal_Log: ใช้ Signal_ID (= order["id"] เดิมจาก orders.py ตรงๆ ไม่สร้าง ID คู่ขนานใหม่) เป็น
-    Primary Key — เจอแล้ว UPDATE, ไม่เจอ INSERT (append แถวใหม่) ห้ามสร้างซ้ำ
+  - Signal_Log: ใช้ Signal_ID (= order["id"] เดิมจาก orders.py ตรงๆ — ตั้งแต่ 8 ก.ย. 2026 เป็น Signal
+    ID ที่อ่านง่าย เช่น XAUUSD-0908-P1-00037 ถ้าผู้เรียกสร้างผ่าน orders.generate_signal_id() ก่อน
+    ไม่สร้าง ID คู่ขนานใหม่) เป็น Primary Key — เจอแล้ว UPDATE, ไม่เจอ INSERT (append แถวใหม่) ห้ามสร้างซ้ำ
   - Signal_Context / AI_Log: APPEND อย่างเดียวเสมอ ห้าม UPDATE (เป็นข้อมูลประวัติศาสตร์ ณ เวลานั้น)
   - ไม่เชื่อมต่อ Google Sheets ใหม่ทุกครั้งที่เรียก (ช้า/เปลือง quota) — cache client ไว้ในหน่วยความจำ
     ของ process เดียว ถ้าเชื่อมพังจะมี cooldown ก่อน retry ครั้งถัดไป ไม่ยิงรัวๆ ทุก signal ที่พลาด
   - ไม่ทำให้ Strategy Logic เปลี่ยนแปลงแม้แต่นิดเดียว — ไฟล์นี้แค่ "อ่าน" ค่าจาก order dict ที่
     Strategy สร้างไว้แล้วส่งไปเขียน Sheets เท่านั้น ไม่เคยคำนวณ Entry/SL/TP ใหม่
 
-*** แก้ไขล่าสุด (4 ก.ย. 2026): auto-migrate คอลัมน์ "Score" ใน Signal_Log จริง ไม่ใช่แค่ในโค้ด ***
+*** แก้ไขล่าสุด (8 ก.ย. 2026): เพิ่มคอลัมน์ Reason_Code / MAE_R / MFE_R / Final_Score / Grade ***
+ตามข้อเสนอผู้ใช้ข้อ 6 (Trade Journal ละเอียดขึ้น) + ข้อ 10 (Reason Code) — คอลัมน์ใหม่ทั้งหมดเพิ่ม
+"ต่อท้าย" SIGNAL_LOG_HEADERS (ไม่แทรกกลาง) เพื่อไม่ต้องเลื่อนคอลัมน์เดิมที่มีอยู่แล้วเลย (safer กว่า
+migration ของคอลัมน์ Score เดิมที่ต้อง insert_cols กลาง — ดูหมายเหตุด้านล่าง) มาพร้อมกับ:
+  - Duration ที่ตอนนี้คำนวณจริงแล้ว (เดิมเป็น None เสมอ) จาก created_at_iso/filled_at_iso ถึง
+    closed_at_iso ที่ orders.py เพิ่มมาให้ครบทุก Plan แล้ว (เดิม Plan 1-4 ไม่มี created_at_iso เลย)
+  - Reason_Code จาก orders.py: _derive_reason_code() (ดูหมายเหตุที่นั่นเรื่องขอบเขต Phase 1/Phase 2)
+  - MAE_R/MFE_R จาก orders.py: update_orders_status() ที่ track ทุกรอบที่ออเดอร์ยัง running
+  - Final_Score/Grade จาก claude/trade_quality.py ถ้าผู้เรียก (main.py/plan_runner.py) คำนวณไว้แล้ว
+    ตอนสร้างข้อความ Telegram แล้วส่งผ่าน add_order()/add_pending_order() เข้ามา — เป็น None ถ้าไม่มี
+    (เช่น Plan ที่ยังไม่ได้แก้ให้ส่งเข้ามา หรือปิด trade_quality_display_enabled ไว้)
+
+*** แก้ไขก่อนหน้า (4 ก.ย. 2026): auto-migrate คอลัมน์ "Score" ใน Signal_Log จริง ไม่ใช่แค่ในโค้ด ***
 ตอนเพิ่มคอลัมน์ "Score" เข้า SIGNAL_LOG_HEADERS ครั้งก่อน (บันทึกไว้ด้านล่าง) โค้ดฝั่งนี้แก้ถูกแล้ว
 (คำนวณตำแหน่งคอลัมน์จาก SIGNAL_LOG_HEADERS เสมอ ผ่าน _col_letter) แต่ "ไม่เคย" ไปอัปเดต Header แถวแรก
 ของ Google Sheet จริงบน production เลย ทำให้ Header แถวแรกยังเป็นเวอร์ชันเก่า (25 คอลัมน์ ไม่มี Score)
@@ -37,12 +50,6 @@ migration นี้รันครั้งแรก (คือแถวที�
 เหล่านั้นเลื่อนคลาดเคลื่อนซ้อนอีกชั้น (เจอจริงแค่ไม่กี่แถวช่วงต้น ก.ย. 2026 ตอนเพิ่งแก้ตอนแรก) เป็น
 trade-off ที่ยอมรับได้เพราะ Sheets เป็น archive อย่างเดียว บอทไม่เคยอ่านกลับมาใช้ตัดสินใจเลย (ดูหมายเหตุ
 บนสุดของไฟล์) แถวที่เพี้ยนไม่กี่แถวนั้นลบทิ้งด้วยมือทีหลังได้ตามสะดวก ไม่กระทบการทำงานของบอทแต่อย่างใด
-
-*** แก้ไขก่อนหน้า: เพิ่มคอลัมน์ "Score" ใน SIGNAL_LOG_HEADERS + log_signal() ***
-ของเดิม order["score"] (คำนวณไว้แล้วใน score.py) ไม่เคยถูกเขียนลง Signal_Log เลย ทำให้ไม่มีทาง
-วิเคราะห์ย้อนหลังได้ว่า "คะแนนที่ระบบให้ สัมพันธ์กับผลจริงไหม" (ดู score_outcome_analysis.py ที่เพิ่ม
-เข้ามาพร้อมกัน) เพิ่มคอลัมน์นี้เพื่อให้วิเคราะห์ได้ ไม่กระทบพฤติกรรมอื่นของไฟล์นี้เลย — สัญญาณเก่าที่
-เคย log ไปแล้วก่อนแก้จะไม่มีค่า Score (ว่างเปล่า ไม่ error)
 """
 
 import os
@@ -55,13 +62,17 @@ _spreadsheet = None
 _last_conn_attempt = 0.0
 _CONN_RETRY_COOLDOWN_SECONDS = 60  # เชื่อมพังรอบนึงแล้ว อย่า retry รัวๆ ทุก signal ที่เข้ามาถัดไป
 _score_column_ensured = False  # ทำ migration (ดูหมายเหตุด้านบน) แค่ครั้งเดียวต่อ process พอ
+_trailing_columns_ensured = False  # เหมือนกัน แต่สำหรับคอลัมน์ใหม่กลุ่มท้าย (ดูหมายเหตุหัวไฟล์)
 
 SIGNAL_LOG_HEADERS = [
     "Signal_ID", "Created_Date", "Created_Time", "Timestamp", "Symbol", "Plan_ID", "Direction",
     "Timeframe", "Entry", "SL", "TP", "RR", "Score", "Signal_Status", "Entry_Status", "Entry_Time",
     "Entry_Price", "Exit_Time", "Exit_Price", "Result", "R_Multiple", "Duration", "Cancel_Reason",
     "Telegram_Message_ID", "Created_By", "Last_Updated",
+    # --- ใหม่ (8 ก.ย. 2026) — ต่อท้ายเสมอ ไม่แทรกกลาง (ดูหมายเหตุหัวไฟล์) ---
+    "Reason_Code", "MAE_R", "MFE_R", "Final_Score", "Grade",
 ]
+TRAILING_COLUMNS = ["Reason_Code", "MAE_R", "MFE_R", "Final_Score", "Grade"]
 SIGNAL_CONTEXT_HEADERS = [
     "Signal_ID", "Snapshot_Time", "Symbol",
     "HTF_Bias",
@@ -159,6 +170,30 @@ def _ensure_score_column(ws):
         print(f"[Sheets Log] ตรวจ/แทรกคอลัมน์ Score ให้ Signal_Log ไม่สำเร็จ (ไม่กระทบการบันทึกสัญญาณหลัก): {e}")
 
 
+def _ensure_trailing_columns(ws):
+    """ต่อคอลัมน์ใหม่กลุ่มท้าย (Reason_Code/MAE_R/MFE_R/Final_Score/Grade — เพิ่มพร้อม Signal ID/
+    Trade Quality/Final Score ระลอก 8 ก.ย. 2026) เข้าไปที่ท้าย Header แถวแรก ถ้ายังไม่มี — ต่างจาก
+    _ensure_score_column() ด้านบนตรงที่ตัวนี้ "ต่อท้าย" เท่านั้น ไม่ต้อง insert_cols กลางที่เสี่ยงเลื่อน
+    ข้อมูลเดิมทั้งหมด เพราะคอลัมน์กลุ่มนี้อยู่ท้าย SIGNAL_LOG_HEADERS อยู่แล้ว ไม่กระทบตำแหน่งคอลัมน์เดิม
+    เลย — ปลอดภัยกว่า ทำครั้งเดียวต่อ process (idempotent) ไม่โยน exception ออกไปเลย"""
+    global _trailing_columns_ensured
+    if _trailing_columns_ensured:
+        return
+    try:
+        header_row = ws.row_values(1)
+        missing = [h for h in TRAILING_COLUMNS if h not in header_row]
+        if not missing:
+            _trailing_columns_ensured = True
+            return
+        start_index = len(header_row) + 1
+        for i, col_name in enumerate(missing):
+            ws.update_cell(1, start_index + i, col_name)
+        print(f"[Sheets Log] เพิ่มคอลัมน์ท้าย Signal_Log อัตโนมัติสำเร็จ: {', '.join(missing)}")
+        _trailing_columns_ensured = True
+    except Exception as e:
+        print(f"[Sheets Log] ตรวจ/เพิ่มคอลัมน์ท้าย Signal_Log ไม่สำเร็จ (ไม่กระทบการบันทึกสัญญาณหลัก): {e}")
+
+
 def _plan_id_short(plan_key):
     """แปลง plan key ภายในของ orders.py (เช่น 'plan3_counter_trend') เป็น 'P3' ตามฟอร์แมตที่ Sheets ใช้
     เผื่อ plan1_pullback_early ก็ยังได้ 'P1' (ตัด suffix ตัวอักษรออก เอาแค่ตัวเลขนำหน้า)"""
@@ -177,6 +212,31 @@ def _direction_label(direction):
     return "LONG" if direction == "bullish" else ("SHORT" if direction == "bearish" else direction)
 
 
+def _format_duration(order):
+    """คำนวณ Duration ที่ถือไม้จริง (จาก entry ถึง close) เป็นข้อความอ่านง่าย เช่น "45 นาที" หรือ
+    "3.2 ชม." — ใช้ filled_at_iso ถ้ามี (จุดที่เริ่ม running จริง, สำหรับ Plan 5-8 ที่เป็น pending
+    มาก่อน) ไม่งั้น fallback ไปใช้ created_at_iso (สำหรับ Plan 1-4 ที่เป็น running ทันทีตั้งแต่แจ้ง
+    เตือน — created_at_iso คือจุดเดียวกับ filled ในกรณีนี้อยู่แล้ว)
+
+    คืน None ถ้าออเดอร์ยังไม่ปิด (ไม่มี closed_at_iso) หรือคำนวณไม่ได้ (ข้อมูลเก่าก่อนแก้จุดนี้ที่ไม่มี
+    created_at_iso เลย — เฉพาะออเดอร์ Plan 1-4 ที่สร้างก่อน 8 ก.ย. 2026)"""
+    closed_iso = order.get("closed_at_iso")
+    started_iso = order.get("filled_at_iso") or order.get("created_at_iso")
+    if not closed_iso or not started_iso:
+        return None
+    try:
+        started = datetime.fromisoformat(started_iso)
+        closed = datetime.fromisoformat(closed_iso)
+        minutes = (closed - started).total_seconds() / 60
+        if minutes < 0:
+            return None
+        if minutes < 60:
+            return f"{int(round(minutes))} นาที"
+        return f"{round(minutes / 60, 1)} ชม."
+    except Exception:
+        return None
+
+
 def log_signal(order, symbol, timeframe="15m"):
     """UPSERT ข้อมูล Signal 1 ตัวลง Signal_Log ตามสถานะปัจจุบันของ order dict — ใช้ order["id"] เป็น
     Signal_ID (Primary Key) เจอแล้ว UPDATE ทั้งแถว (Signal_Log = Current State เสมอ) ไม่เจอ INSERT
@@ -188,6 +248,7 @@ def log_signal(order, symbol, timeframe="15m"):
     try:
         ws = ss.worksheet("Signal_Log")
         _ensure_score_column(ws)  # migration ครั้งแรกของ process (ดูหมายเหตุหัวไฟล์) — no-op ถ้าทำแล้ว
+        _ensure_trailing_columns(ws)  # เหมือนกัน สำหรับคอลัมน์ใหม่กลุ่มท้าย (8 ก.ย. 2026)
         signal_id = order.get("id")
         if not signal_id:
             return False
@@ -232,19 +293,26 @@ def log_signal(order, symbol, timeframe="15m"):
             "Exit_Price": (tp if status == "win" else order.get("stop_loss")) if status in ("win", "loss") else None,
             "Result": STATUS_TO_RESULT.get(status),
             "R_Multiple": r_multiple,
-            "Duration": None,  # ยังไม่ทำ — orders.py ไม่เก็บ timestamp ละเอียดพอจะคำนวณตอนนี้
-            "Cancel_Reason": None,
+            # *** ตอนนี้คำนวณจริงแล้ว (เดิม None เสมอ) — ดู _format_duration ด้านบน + orders.py ที่
+            # ตอนนี้เก็บ created_at_iso ครบทุก Plan แล้ว (เดิม Plan 1-4 ไม่มีเลย) ***
+            "Duration": _format_duration(order),
+            "Cancel_Reason": None,  # เผื่อไว้สำหรับ /cancel ในอนาคต (ยังไม่มีคำสั่งนี้) แยกจาก Reason_Code
             "Telegram_Message_ID": None,  # ยังไม่ได้เชื่อม — notify.py ยังไม่ capture message_id กลับมา
             "Created_By": "BOT",
             "Last_Updated": now_bkk.isoformat(),
+            # --- ใหม่ (8 ก.ย. 2026) ---
+            "Reason_Code": order.get("reason_code"),
+            "MAE_R": order.get("mae_r"),
+            "MFE_R": order.get("mfe_r"),
+            "Final_Score": order.get("final_score"),
+            "Grade": order.get("grade"),
         }
         row_values = [row.get(h) for h in SIGNAL_LOG_HEADERS]
 
         cell = ws.find(str(signal_id), in_column=1)
         if cell:
-            # ช่วง cell คำนวณจากจำนวนคอลัมน์จริงใน SIGNAL_LOG_HEADERS แทนที่จะ hardcode "A...Y" ไว้ตรงๆ
-            # (ของเดิม hardcode Y ซึ่งพอดีกับ 25 คอลัมน์เดิม — พอเพิ่ม Score เป็น 26 คอลัมน์ ถ้ายัง
-            # hardcode Y ไว้ คอลัมน์สุดท้าย (Last_Updated) จะเขียนไม่ถึง กลายเป็นข้อมูลเก่าค้างอยู่)
+            # ช่วง cell คำนวณจากจำนวนคอลัมน์จริงใน SIGNAL_LOG_HEADERS แทนที่จะ hardcode ตัวอักษรตรงๆ
+            # (ปรับตามจำนวนคอลัมน์ปัจจุบันอัตโนมัติเสมอ รวมคอลัมน์ท้ายใหม่ที่เพิ่งเพิ่มด้วย)
             last_col_letter = _col_letter(len(SIGNAL_LOG_HEADERS))
             ws.update(f"A{cell.row}:{last_col_letter}{cell.row}", [row_values], value_input_option="USER_ENTERED")
         else:

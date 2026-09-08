@@ -10,7 +10,13 @@ alert_dispatcher.py — รวม logic "ส่ง Telegram Alert ไปทุ�
   3. บันทึกออเดอร์ลง Order Dashboard ผ่าน add_order() — ทำเสมอไม่ว่าจะปิด push ไว้หรือไม่ (เก็บสถิติไว้
      ใช้ในสรุปผลประจำวันอัตโนมัติ/Data Layer ในอนาคต) ถ้าบันทึกไม่สำเร็จแค่ log ไว้ ไม่ทำให้ alert หลักพังตาม
 
-*** แก้ไขล่าสุด (7 ก.ย. 2026): เพิ่มเช็ค Portfolio Risk Guard ก่อนส่ง Alert ***
+*** แก้ไขล่าสุด (8 ก.ย. 2026): save_plan_order() รับ signal_id/final_score/grade ส่งต่อให้ add_order() ***
+ตามข้อเสนอผู้ใช้ข้อ 2-4/9 — ผู้เรียก (plan_runner.py) คำนวณ Signal ID + Final Trade Score/เกรดไว้แล้ว
+ตอนสร้างข้อความ Telegram (ก่อนเรียกฟังก์ชันนี้) ส่งเข้ามาเก็บพร้อมกันตรงนี้เลย เพื่อให้ order["id"] ที่
+บันทึกจริงตรงกับ Signal ID ที่ผู้ใช้เห็นในข้อความ Telegram เป๊ะๆ (ไม่ส่งมาก็ยัง fallback ไปใช้รูปแบบเดิม
+ผ่าน orders.add_order() เอง — ไม่ breaking change)
+
+*** แก้ไขก่อนหน้า (7 ก.ย. 2026): เพิ่มเช็ค Portfolio Risk Guard ก่อนส่ง Alert ***
 เพิ่มพารามิเตอร์ symbol (optional) — ถ้าผู้เรียกส่งเข้ามา จะเช็ค risk_guard.can_open_new_trade()
 ก่อนส่งเสมอ (ขาดทุนหนักวันนี้ไปแล้ว/เสียติดกันหลายไม้/มีไม้ running พร้อมกันเยอะเกินไป) ถ้าถูกระงับ
 จะข้ามการส่งเงียบๆ (แค่ print log ไว้ ไม่ส่งข้อความซ้ำ — การแจ้งเตือนผู้ใช้ว่า Risk Guard active
@@ -69,16 +75,22 @@ def send_alert_to_targets(config, message, chart_path=None, log_prefix=None, sym
     return results
 
 
-def save_plan_order(config, symbol, direction, entry_price, stop_loss, take_profits, score, plan_key):
+def save_plan_order(config, symbol, direction, entry_price, stop_loss, take_profits, score, plan_key,
+                     signal_id=None, final_score=None, grade=None):
     """
     บันทึกออเดอร์ลง Order Dashboard ผ่าน add_order() — คืน order dict ถ้าสำเร็จ หรือ None ถ้าไม่สำเร็จ
     (แค่ log error ให้ ไม่ raise เพราะไม่อยากให้บันทึกสถิติพลาดแล้วลาก alert หลักพังไปด้วย)
+
+    signal_id/final_score/grade (ใหม่, optional): ส่งต่อให้ orders.add_order() เก็บไว้ในตัว order —
+    ให้ผู้เรียก (plan_runner.py) คำนวณไว้ก่อนสร้างข้อความ Telegram แล้วส่งเข้ามาพร้อมกันตรงนี้ เพื่อให้
+    ค่าที่บันทึกตรงกับที่ผู้ใช้เห็นจริงในข้อความ Telegram เป๊ะๆ ไม่ส่งมาก็ fallback ปกติ (None ทั้งหมด)
     """
     from orders import add_order
 
     try:
         result = add_order(config["kvdb_bucket"], symbol, direction, entry_price, stop_loss,
-                            take_profits, score, plan=plan_key)
+                            take_profits, score, plan=plan_key, signal_id=signal_id,
+                            final_score=final_score, grade=grade)
         if result is None:
             print(f"[Order Tracking Error] บันทึกออเดอร์ {plan_key} ({symbol}) ลง kvdb ไม่สำเร็จ")
         return result

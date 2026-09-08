@@ -22,7 +22,11 @@ from session import get_session_info
 from bias_4h import analyze_4h_bias, is_bias_aligned
 from trigger_5m import find_5m_trigger
 from kvstore import kv_get, kv_set
-from orders import add_order, add_pending_order, load_orders, update_orders_status, update_pending_orders, build_orders_dashboard
+from orders import (
+    add_order, add_pending_order, load_orders, update_orders_status, update_pending_orders,
+    build_orders_dashboard, generate_signal_id,
+)
+from trade_quality import compute_final_score, compute_grade, format_trade_quality_line
 import plan_runner
 import ai_layer
 import account
@@ -414,6 +418,20 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
     # แล้วสำหรับ Plan 2-8) เลยต้องเช็คตรงนี้แยกต่างหาก ไม่กระทบการบันทึกออเดอร์ด้านล่าง (ทำเสมอ
     # เหมือน push_notifications_enabled — สถิติยังวัดผลได้ต่อเนื่องแม้ Risk Guard active อยู่)
     if entry_signal.get("alert_ready"):
+        # *** ใหม่ (8 ก.ย. 2026): Signal ID + Final Trade Score/Grade — คำนวณครั้งเดียวตรงนี้ ก่อน
+        # สร้างข้อความ Telegram (ต้องมี signal_id/grade พร้อมใช้ตอน format ข้อความ) แล้วส่งต่อให้
+        # add_order() ด้านล่างเก็บค่าเดียวกันนี้ไว้ ไม่คำนวณซ้ำ/ไม่เสี่ยงได้ค่าไม่ตรงกัน ***
+        # หมายเหตุ news_blackout: ณ จุดนี้ entry_signal["alert_ready"] เป็น True แปลว่าผ่านการเช็ค
+        # is_in_news_blackout() ด้านบนมาแล้ว (ไม่ True ถึงจะมาถึงตรงนี้ได้) จึงส่ง news_blackout=False
+        # ตรงๆ ได้เลย ไม่ต้องเช็คซ้ำ — Plan 1 ยังไม่มี Opposing Zone hard-check แบบ Plan 2/4 จึงส่ง
+        # opposite_zone_note=None (ยังไม่มีข้อมูลนี้ให้ใช้)
+        signal_id = generate_signal_id(config["kvdb_bucket"], symbol, "plan1_pullback")
+        final_score, quality_breakdown = compute_final_score(
+            confidence["score"], config, session_info=session_info, news_blackout=False,
+            opposite_zone_note=None, score_ceiling=PLAN1_SCORE_CEILING,
+        )
+        grade = compute_grade(confidence["score"], config, score_ceiling=PLAN1_SCORE_CEILING)
+
         if not risk_guard_allowed:
             print(f"[Risk Guard] {symbol}: ระงับ Alert Plan 1 ไม้ใหม่ไว้ก่อน (เงื่อนไข Risk Guard active)")
         if config.get("push_notifications_enabled", True) and risk_guard_allowed:
@@ -427,7 +445,17 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
             msg = format_alert_message(symbol, timeframe, structure, entry_signal,
                                         stop_loss, take_profits, rr, confidence, bias_4h=bias_4h,
                                         current_price=df["close"].iloc[-1], stale_threshold=stale_threshold,
-                                        position_sizing_line=position_sizing_line)
+                                        position_sizing_line=position_sizing_line,
+                                        signal_id=signal_id)
+
+            # *** ใหม่ (8 ก.ย. 2026): TRADE QUALITY (Final Score + เกรด) — ดู claude/trade_quality.py ***
+            # แสดงผลอย่างเดียว ไม่ block การส่ง Alert (ดู docstring ของ trade_quality.py) ปิดได้ผ่าน
+            # config['trade_quality_display_enabled']=False (ยังคำนวณ/บันทึกอยู่เบื้องหลังเหมือนเดิม
+            # เพื่อให้ risk_sizing_mode='grade' ยังทำงานได้ปกติแม้ปิดการแสดงผลตรงนี้)
+            if config.get("trade_quality_display_enabled", True):
+                msg += "\n\n" + format_trade_quality_line(
+                    final_score, PLAN1_SCORE_CEILING, quality_breakdown, grade, config
+                )
 
             # *** ใหม่ (7 ก.ย. 2026): Plan Coordination — เตือนถ้าแผนอื่น (2-8) มีออเดอร์ทิศทางตรงข้าม
             # เปิดอยู่ (pending/running) ตอนนี้ — ไม่ block การส่ง Alert หรือการบันทึกออเดอร์ Plan 1
@@ -463,14 +491,39 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
                 print(f"[Telegram -> {target_chat_id}] ส่งแจ้งเตือนสำเร็จ" if sent else f"[Telegram -> {target_chat_id}] ส่งแจ้งเตือนล้มเหลว")
 
         # --- บันทึกออเดอร์ไว้ให้สรุปผลประจำวันอัตโนมัติเช็คผล TP/SL ย้อนหลังได้ (ทำเสมอ ไม่ว่าจะ push หรือไม่) ---
+        # *** ใหม่ (8 ก.ย. 2026): แก้ Dedup Gap ที่ claude/auto_execute_risk_guard_spec.md ระบุไว้เป็น
+        # เงื่อนไขก่อนเริ่ม Auto-Execute ได้ — เดิม add_order() ของ Plan 1 ไม่เช็ค existing_orders เลย
+        # ต่างจาก Plan 2-8 ทุกแผนที่เช็ค dedup ก่อน save เสมอ (ดู plan_runner.py) ทำให้ถ้า run_pipeline()
+        # ถูกเรียกซ้ำในเงื่อนไขเดิม (เช่น cron รันซ้อนกันเพราะรอบก่อนหน้ายังไม่จบ) จะได้ออเดอร์ Plan 1
+        # ซ้ำซ้อนหลายใบสำหรับสัญญาณเดียวกัน ตอนนี้เช็คแบบเดียวกับ plan1_pullback_early ด้านบน (ทิศทาง
+        # เดียวกัน + entry ใกล้เคียงกันภายใน stale_threshold) ก่อน save ทุกครั้ง ***
         try:
-            result = add_order(config["kvdb_bucket"], symbol, entry_signal["direction"],
-                                entry_signal["entry_price"], stop_loss, take_profits, confidence["score"],
-                                plan="plan1_pullback")
-            if result is None:
-                print(f"[Order Tracking Error] บันทึกออเดอร์ Plan 1 ({symbol}) ลง kvdb ไม่สำเร็จ")
+            existing_orders_p1 = load_orders(config["kvdb_bucket"], symbol)
+            dedup_threshold_p1 = (2 * current_atr) if current_atr else config.get("min_sl_distance", 10.0)
+            has_similar_p1 = any(
+                o.get("status") in ("pending", "running")
+                and o.get("plan") == "plan1_pullback"
+                and o.get("direction") == entry_signal["direction"]
+                and abs(o.get("entry_price", 0) - entry_signal["entry_price"]) < dedup_threshold_p1
+                for o in existing_orders_p1
+            )
         except Exception as e:
-            print(f"[Order Tracking Error] {e}")
+            print(f"[Order Dedup Check Error] {symbol}: {e}")
+            has_similar_p1 = False
+
+        if has_similar_p1:
+            print(f"[Order Tracking] {symbol}: ข้าม add_order Plan 1 — มีออเดอร์ plan1_pullback ทิศทางเดียวกัน "
+                  f"ที่ entry ใกล้เคียงกันเปิดอยู่แล้ว (กันบันทึกซ้ำ — ดู claude/auto_execute_risk_guard_spec.md)")
+        else:
+            try:
+                result = add_order(config["kvdb_bucket"], symbol, entry_signal["direction"],
+                                    entry_signal["entry_price"], stop_loss, take_profits, confidence["score"],
+                                    plan="plan1_pullback", signal_id=signal_id,
+                                    final_score=final_score, grade=grade)
+                if result is None:
+                    print(f"[Order Tracking Error] บันทึกออเดอร์ Plan 1 ({symbol}) ลง kvdb ไม่สำเร็จ")
+            except Exception as e:
+                print(f"[Order Tracking Error] {e}")
 
     # --- Dashboard: ส่งทุกรอบ แบบแก้ทับข้อความเดิม (ไม่สแปมแชท) — ข้ามถ้าปิด push ไว้ (ดูผ่าน /status แทน) ---
     if config.get("push_notifications_enabled", True):

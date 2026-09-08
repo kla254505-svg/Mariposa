@@ -56,22 +56,31 @@ def calc_position_size(account_balance, entry_price, stop_loss, config, risk_pct
 
 def calc_scaled_risk_pct(score, config, score_ceiling=100.0):
     """
-    *** ใหม่ (7 ก.ย. 2026): Score-based Position Sizing ***
-    เดิมทุกไม้ (ไม่ว่าคะแนนจะ 46 หรือ 118) ใช้ risk_per_trade_pct คงที่ตัวเดียวกันเป๊ะ ทั้งที่ความ
-    มั่นใจต่างกันมาก — เทรดเดอร์มืออาชีพจริงมักเสี่ยงมากขึ้นในไม้ที่มั่นใจสูง เสี่ยงน้อยลงในไม้ที่
-    เฉียดเกณฑ์ผ่านแบบบางๆ ฟังก์ชันนี้ scale risk_per_trade_pct เชิงเส้นตาม Score แทนค่าคงที่เดิม
+    Score-based Position Sizing — ลด Risk % ต่อไม้ตามคุณภาพของสัญญาณแทนที่จะใช้ risk_per_trade_pct
+    คงที่ทุกไม้เท่ากันหมด รองรับ 2 โหมด เลือกผ่าน config["risk_sizing_mode"]:
 
-    วิธีคิด: เทียบตำแหน่งของ score ระหว่าง min_score_to_alert (คะแนนต่ำสุดที่ผ่านเกณฑ์แจ้งเตือนได้ —
-    ถือเป็น "จุดเริ่มมั่นใจน้อยที่สุด" เพราะคะแนนต่ำกว่านี้ไม่มีทางถูกแจ้งเตือนออกมาอยู่แล้ว) กับ
-    score_ceiling (คะแนนเต็มตามจริงของสูตรนั้นๆ — แผนที่ 1 ใช้ score.PLAN1_SCORE_CEILING (~120),
-    แผนที่ 2-8 ใช้ plan_score.GENERIC_MAX_SCORE (100)) เป็นสัดส่วน 0-1 แล้ว interpolate เชิงเส้น
-    ระหว่าง risk_sizing_min_pct (ที่คะแนนเฉียดเกณฑ์) กับ risk_sizing_max_pct (ที่คะแนนเต็ม)
+      - "grade" (ใหม่ — 8 ก.ย. 2026, ตามข้อเสนอผู้ใช้): แบ่งเป็นเกรด A+/A/B/C/D/F (ดู
+        claude/trade_quality.py: compute_grade/risk_pct_for_grade) แต่ละเกรดมี Risk % ตายตัวจาก
+        config["risk_pct_by_grade"] เช่น A+=1.0%, A=0.75%, B=0.5%, C=0.25%, D/F=0% — ข้อดีคือ
+        ตัวเลข Risk % ที่ผู้ใช้เห็นตรงกับเกรดที่โชว์ใน TRADE QUALITY บนข้อความ Telegram เป๊ะๆ ไม่มี
+        ตัวเลขทศนิยมแปลกๆ ที่ต้องตีความเพิ่ม (เดิมโหมด linear ได้ risk_pct เป็นทศนิยมต่อเนื่อง เช่น
+        0.83% ซึ่งไม่สอดคล้องกับเกรดที่โชว์คู่กันถ้าเปิดใช้ทั้งสองอย่างพร้อมกัน)
+      - "linear" (ของเดิม, ค่า default ถ้าไม่ตั้ง risk_sizing_mode ไว้): interpolate เชิงเส้นระหว่าง
+        risk_sizing_min_pct กับ risk_sizing_max_pct ตามตำแหน่งคะแนน — พฤติกรรมเดิมทุกประการ ไม่กระทบ
+        ใครที่ยังไม่ได้ตั้ง risk_sizing_mode ใน config.py (ไม่ breaking change)
 
-    ปิดได้ทั้งหมดด้วย config['risk_sizing_by_score_enabled']=False (fallback กลับไปใช้
-    risk_per_trade_pct คงที่เดิมทันที) หรือ score=None (เผื่อผู้เรียกไม่มีคะแนนให้ใช้)
+    ปิดการ scale ทั้งหมดด้วย config['risk_sizing_by_score_enabled']=False (fallback กลับไปใช้
+    risk_per_trade_pct คงที่เดิมทันที ไม่ว่าจะตั้ง risk_sizing_mode เป็นอะไรก็ตาม) หรือ score=None
+    (เผื่อผู้เรียกไม่มีคะแนนให้ใช้)
     """
     if not config.get("risk_sizing_by_score_enabled", True) or score is None:
         return config.get("risk_per_trade_pct", 1.0)
+
+    mode = config.get("risk_sizing_mode", "linear")
+    if mode == "grade":
+        from trade_quality import compute_grade, risk_pct_for_grade
+        grade = compute_grade(score, config, score_ceiling=score_ceiling)
+        return risk_pct_for_grade(grade, config)
 
     floor_score = config.get("min_score_to_alert", 45)
     min_pct = config.get("risk_sizing_min_pct", 0.5)
@@ -89,8 +98,8 @@ def calc_scaled_risk_pct(score, config, score_ceiling=100.0):
 def format_position_sizing_line(bucket, entry_price, stop_loss, score, config, score_ceiling=100.0):
     """
     สร้างข้อความสรุป "เงินเสี่ยงต่อไม้นี้เป็นตัวเงินจริง" ตามทุนที่ผู้ใช้ตั้งไว้ผ่าน /setbalance
-    (account.py) + สเกลตาม Score (calc_scaled_risk_pct ด้านบน) — ใช้แปะท้ายข้อความ Telegram Alert
-    ของทุกแผน (Plan 1-8)
+    (account.py) + สเกลตาม Score (calc_scaled_risk_pct ด้านบน — รองรับทั้งโหมด grade/linear) —
+    ใช้แปะท้ายข้อความ Telegram Alert ของทุกแผน (Plan 1-8)
 
     ก่อนหน้านี้ main.py คำนวณ position size (calc_position_size) ไว้จริง แต่ไม่เคยส่งเข้า Telegram
     เลยสักครั้ง (ใช้แค่ print console บน GitHub Actions ที่ผู้ใช้ไม่ค่อยได้เปิดดู) ทำให้ทั้งที่คำนวณ

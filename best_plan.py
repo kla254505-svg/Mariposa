@@ -1,12 +1,18 @@
 """
 best_plan.py — สนับสนุนคำสั่ง /best: สรุปเป็นข้อความเดียวว่า "แผนไหนน่าเข้าที่สุดตอนนี้"
 
-ต้องผ่านเกณฑ์ 2 ข้อพร้อมกัน (ตามที่ตกลงกันไว้):
-  1. คะแนน (Score) สูงสุดในบรรดาแผนที่ยัง active อยู่ตอนนี้ (pending/running) — Strategy เป็นคน
-     คำนวณคะแนนนี้ไว้อยู่แล้ว (ดู score.py/plan_score.py ผ่าน orders.py) ไฟล์นี้แค่หยิบมาเรียงลำดับ
-     ไม่ได้คำนวณคะแนนเองใหม่แต่อย่างใด
-  2. ความเห็นล่าสุดของ Central AI Layer (ai_layer.py) ต้องเป็น "VALID" เท่านั้น ถ้าเป็น WEAK/NEUTRAL/
-     INVALID หรือยังไม่เคยมีความเห็นเลย จะไม่ฟันธงให้เป็น "แผนที่ดีสุด" แต่จะบอกเหตุผลตรงๆ แทน
+*** แก้ไขสถาปัตยกรรมล่าสุด (8 ก.ย. 2026 — ตามข้อเสนอผู้ใช้ข้อ 7) ***
+เดิมไฟล์นี้ใช้ 2 เกณฑ์ผ่านพร้อมกันเป็น Hard Gate: (1) Score สูงสุด และ (2) AI ต้อง VALID เท่านั้น
+ถ้า AI ไม่ VALID/ยังไม่เคยประเมิน จะไม่ฟันธงเป็นคำแนะนำเลย — ขัดกับหลักการที่วางไว้เองว่า
+"PLAN = ตัดสินใจ, AI = รีวิว" (ดู ai_layer.py หัวไฟล์) เพราะ AI เป็น probabilistic second-opinion
+layer ไม่ควรมีอำนาจ "ยับยั้ง" คำแนะนำที่ Strategy + Final Score ตัดสินใจมาแล้ว
+
+ตอนนี้: Strategy Score (ผ่านเกรด A+/A/B/C/D/F — ดู claude/trade_quality.py) เป็นตัวตัดสินใจหลักเสมอ
+เลือกแผนคะแนนสูงสุดมาแสดงเป็นคำแนะนำได้ทันที ไม่ว่า AI จะเห็นด้วยหรือไม่ก็ตาม — AI แสดงเป็น
+"ความเห็นเสริม/คำเตือน" ต่อท้ายเท่านั้น ไม่ Gate การแสดงผลอีกต่อไป
+
+ตั้ง config['ai_hard_gate_on_best_plan']=True (ดู config.py) เพื่อย้อนกลับไปใช้พฤติกรรมแบบเดิม (AI
+เป็น Hard Gate) ได้ทุกเมื่อโดยไม่ต้องแก้โค้ด — ค่า default คือ False (ไม่ Gate แล้ว)
 
 *** ข้อจำกัดสำคัญที่ต้องเข้าใจก่อนใช้ (สถาปัตยกรรมเดิมของ ai_layer.py เป็นแบบนี้อยู่แล้ว ไม่ใช่บั๊กของ
 ไฟล์นี้) ***
@@ -16,9 +22,8 @@ ai_layer.py วิเคราะห์ "ภาพรวมของทุกแ
 โดยตรง — ถ้ามีหลายแผน active พร้อมกัน ข้อความที่ส่งออกจะบอกจำนวนแผน active ทั้งหมดให้เห็นตรงๆ เสมอ
 เพื่อให้ตีความเองได้ ว่าความเห็น AI นี้อาจไม่ได้ครอบคลุมเฉพาะแผนที่เลือกมาโชว์เพียงแผนเดียว
 
-นอกจากนี้ ai_layer มีช่วงเวลาทำงานจำกัด (จ-ศ 10:00-22:00 เวลาไทย ตาม config) และเป็นแบบ event-driven +
-cooldown — ถ้ายังไม่เคยมี Event ที่น่าสนใจเกิดขึ้นในช่วงเวลานั้นเลย จะยังไม่มีความเห็นให้ใช้ ("ai VALID")
-ก็จะไม่มีวันขึ้นเป็น "แผนที่ดีสุด" ได้เลยจนกว่าจะมีการวิเคราะห์จริงเกิดขึ้นก่อนอย่างน้อย 1 ครั้ง
+นอกจากนี้ ai_layer มีช่วงเวลาทำงานจำกัด (ปกติ 24/7 ตาม config ปัจจุบัน — ดู ai_time_filter_days/hours)
+และเป็นแบบ event-driven + cooldown — ถ้ายังไม่เคยมี Event ที่น่าสนใจเกิดขึ้นเลย จะยังไม่มีความเห็นให้ใช้
 
 เกณฑ์ "มาช้าไม่ควรเข้าแล้ว" (entry_missed): ราคาปัจจุบันวิ่งเลยจุด Entry ไปแล้วในทิศทางเทรด เกิน 20%
 ของระยะ Entry-to-SL (ตั้ง buffer ไว้กันสัญญาณหลอกจากราคาแกว่งผ่านจุดเข้าเบาๆ ซึ่งเป็นเรื่องปกติ — ถ้าไม่
@@ -28,9 +33,29 @@ update_orders_status()/update_pending_orders() แต่เผื่อไว้
 """
 
 from orders import load_orders, PLAN_LABEL
+from trade_quality import compute_grade, risk_pct_for_grade, GRADE_EMOJI
 import ai_layer
 
 LATE_ENTRY_BUFFER_RATIO = 0.20  # 20% ของระยะ Entry-to-SL
+PLAN1_KEYS = {"plan1_pullback", "plan1_pullback_early"}
+
+
+def _score_ceiling_for_plan(plan_key):
+    """คืน score ceiling ที่ถูกต้องของแผนนั้นๆ — แผนที่ 1 ใช้สูตรละเอียดของตัวเอง (score.py,
+    PLAN1_SCORE_CEILING ~120) แผนที่ 2-8 ใช้สูตรทั่วไป (plan_score.py, GENERIC_MAX_SCORE=100) —
+    ต้องใช้ ceiling ที่ถูกต้องตามแผน ไม่งั้นเกรดที่คำนวณได้จะเพี้ยน (คะแนนแผนที่ 1 เต็ม ~120 แต่ถ้าเอา
+    ไปเทียบ ceiling=100 จะได้ ratio เกิน 1 ตลอด กลายเป็น A+ ง่ายเกินจริง)"""
+    if plan_key in PLAN1_KEYS:
+        try:
+            from score import PLAN1_SCORE_CEILING
+            return PLAN1_SCORE_CEILING
+        except Exception:
+            return 100.0
+    try:
+        from plan_score import GENERIC_MAX_SCORE
+        return GENERIC_MAX_SCORE
+    except Exception:
+        return 100.0
 
 
 def _entry_to_sl_distance(order):
@@ -82,10 +107,11 @@ def pick_best_active_plan(bucket, symbol):
 
 
 def format_best_plan_message(config, symbol, current_price, symbol_label=None):
-    """สร้างข้อความเดียวสรุป "แผนที่ดีสุดตอนนี้" — โชว์เป็นคำแนะนำเฉพาะตอนผ่านเกณฑ์ทั้งคู่ (Score สูงสุด
-    + AI VALID) เท่านั้น ไม่ผ่านก็บอกเหตุผลตรงๆ ว่าทำไมยังไม่มีคำแนะนำให้ (ไม่มีแผน active / AI ยังไม่
-    เคยประเมิน / AI ไม่ VALID) ไม่โยน exception ออกจากฟังก์ชันนี้เอง (ผู้เรียกใน telegram_bot.py ยังมี
-    try/except ห่ออยู่ชั้นนอกอีกที เหมือน command handler อื่นๆ ทุกตัว)"""
+    """สร้างข้อความเดียวสรุป "แผนที่ดีสุดตอนนี้" — Strategy Score/เกรดเป็นตัวตัดสินใจหลักเสมอ (ดู
+    docstring หัวไฟล์) AI Second Opinion แสดงเป็นความเห็นเสริม/คำเตือนต่อท้าย ไม่ Gate การแสดงผล
+    (เว้นแต่เปิด config['ai_hard_gate_on_best_plan']=True เพื่อย้อนกลับไปใช้พฤติกรรมเดิม)
+    ไม่โยน exception ออกจากฟังก์ชันนี้เอง (ผู้เรียกใน telegram_bot.py ยังมี try/except ห่ออยู่ชั้นนอก
+    อีกที เหมือน command handler อื่นๆ ทุกตัว)"""
     bucket = config.get("kvdb_bucket")
     label = symbol_label or symbol
     best, active_count = pick_best_active_plan(bucket, symbol)
@@ -98,35 +124,54 @@ def format_best_plan_message(config, symbol, current_price, symbol_label=None):
     ai_memory = ai_layer.get_ai_memory_snapshot(config, symbol) or {}
     last_analysis = ai_memory.get("last_ai_analysis")
     assessment = last_analysis.get("signal_assessment") if last_analysis else None
+    confidence = last_analysis.get("confidence") if last_analysis else None
 
-    plan_label = PLAN_LABEL.get(best.get("plan"), best.get("plan"))
+    plan_key = best.get("plan")
+    plan_label = PLAN_LABEL.get(plan_key, plan_key)
     direction_th = "LONG" if best["direction"] == "bullish" else "SHORT"
 
-    lines = [header, ""]
+    score_ceiling = _score_ceiling_for_plan(plan_key)
+    grade = compute_grade(best.get("score"), config, score_ceiling=score_ceiling)
+    grade_emoji = GRADE_EMOJI.get(grade, "⚪")
+    risk_pct = risk_pct_for_grade(grade, config)
 
-    if assessment != "VALID":
+    # --- Hard Gate เดิม (ปิดไว้เป็น default — ดู docstring หัวไฟล์) เผื่อย้อนกลับได้ทันที ---
+    if config.get("ai_hard_gate_on_best_plan", False) and assessment != "VALID":
+        lines = [header, ""]
         if assessment is None:
-            reason = "ยังไม่เคยมีความเห็นจาก AI เลย (รอ Event ที่น่าสนใจเกิดขึ้นในช่วงเวลาที่ AI ทำงาน จ-ศ 10:00-22:00 เวลาไทยก่อน)"
+            reason = "ยังไม่เคยมีความเห็นจาก AI เลย"
         else:
             reason = f'ความเห็นล่าสุดของ AI คือ "{assessment}" ไม่ใช่ VALID'
-        lines.append(f"⏸️ ยังไม่ผ่านเกณฑ์ที่ตั้งไว้ครับ — {reason}")
+        lines.append(f"⏸️ ยังไม่ผ่านเกณฑ์ที่ตั้งไว้ครับ (โหมด AI Hard Gate เปิดอยู่) — {reason}")
         lines.append("")
         lines.append(
-            f"(แผนที่คะแนนสูงสุดตอนนี้คือ {plan_label} — {direction_th} | คะแนน {best['score']} "
-            f"แต่ยังไม่ผ่านการยืนยันจาก AI จึงยังไม่ฟันธงให้เป็นคำแนะนำ)"
+            f"(แผนที่คะแนนสูงสุดตอนนี้คือ {plan_label} — {direction_th} | Strategy Score {best['score']} "
+            f"เกรด {grade} แต่ยังไม่ผ่านการยืนยันจาก AI จึงยังไม่ฟันธงให้เป็นคำแนะนำ)"
         )
-        if active_count > 1:
-            lines.append("")
-            lines.append(
-                f"หมายเหตุ: ตอนนี้มี {active_count} แผน active พร้อมกัน — ความเห็นของ AI ประเมินภาพรวม"
-                f"ทั้งหมดพร้อมกัน ไม่ได้แยกเจาะจงทีละแผน"
-            )
         return "\n".join(lines)
 
-    lines.append(f"✅ <b>{plan_label}</b> — {direction_th}")
-    lines.append(f"Entry {best['entry_price']} | SL {best['stop_loss']} | คะแนน {best['score']}")
-    confidence = last_analysis.get("confidence", "-")
-    lines.append(f"AI ประเมิน: VALID (มั่นใจ {confidence}%)")
+    lines = [header, "", f"✅ <b>{plan_label}</b> — {direction_th}"]
+    lines.append(f"Entry {best['entry_price']} | SL {best['stop_loss']} | Strategy Score {best['score']}")
+    lines.append(f"{grade_emoji} เกรด: <b>{grade}</b> | แนะนำ Risk ต่อไม้: {risk_pct:.2f}%")
+    lines.append("")
+
+    # --- AI Second Opinion: ความเห็นเสริม/คำเตือน — ไม่ใช่ Gate อีกต่อไป ---
+    if assessment == "VALID":
+        conf_txt = f" (มั่นใจ {confidence}%)" if confidence is not None else ""
+        lines.append(f"🤖 AI Second Opinion: VALID{conf_txt} — สอดคล้องกับสัญญาณนี้")
+    elif assessment is None:
+        lines.append("🤖 AI Second Opinion: ยังไม่เคยประเมิน (รอ Event ที่น่าสนใจก่อน) — ยึด Strategy Score เป็นหลัก")
+    else:
+        conf_txt = f" (มั่นใจ {confidence}%)" if confidence is not None else ""
+        lines.append(
+            f'⚠️ AI พบ: "{assessment}"{conf_txt} — ไม่ตรงกับสัญญาณนี้ทั้งหมด พิจารณาประกอบการตัดสินใจ '
+            f"(ไม่ใช่คำสั่งห้ามเข้า — Entry/SL/TP เดิมไม่เปลี่ยน)"
+        )
+    if active_count > 1:
+        lines.append(
+            f"หมายเหตุ: ตอนนี้มี {active_count} แผน active พร้อมกัน — ความเห็นของ AI ประเมินภาพรวม"
+            f"ทั้งหมดพร้อมกัน ไม่ได้แยกเจาะจงเฉพาะแผนนี้แผนเดียว"
+        )
     lines.append("")
 
     if current_price is not None and best.get("status") == "running" and is_stop_hit(best, current_price):
@@ -140,12 +185,5 @@ def format_best_plan_message(config, symbol, current_price, symbol_label=None):
         lines.append("💸 ราคาถึง Entry แล้ว (สถานะ: กำลังรัน)")
     else:
         lines.append("⏳ ยังไม่ถึง Entry — ยังทันเข้าตามแผนอยู่")
-
-    if active_count > 1:
-        lines.append("")
-        lines.append(
-            f"หมายเหตุ: ตอนนี้มี {active_count} แผน active พร้อมกัน เลือกอันคะแนนสูงสุดมาให้ — ความเห็น "
-            f"AI ข้างต้นเป็นการประเมินภาพรวมทั้งหมด ไม่ได้แยกเจาะจงเฉพาะแผนนี้แผนเดียว"
-        )
 
     return "\n".join(lines)
