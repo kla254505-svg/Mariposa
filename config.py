@@ -84,8 +84,12 @@ CONFIG = {
 
     # --- Central AI Second Opinion Layer (Choice B) — ดู ai_layer.py ---
     "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY", "").strip(),
-    "ai_model": os.environ.get("AI_MODEL", "claude-sonnet-5").strip(),
-    "ai_analysis_enabled": os.environ.get("AI_ANALYSIS_ENABLED", "true").strip().lower() != "false",
+    # ถ้า env AI_MODEL ว่าง (เช่น Secret ยังไม่ตั้ง GitHub ส่งค่าว่างมา) ให้ใช้ค่าเริ่มต้น กัน model="" แล้ว API ตอบ 400
+    "ai_model": (os.environ.get("AI_MODEL") or "claude-sonnet-5-5").strip(),
+    # *** แก้ (19 พ.ย. 2026): ปิด AI Second Opinion อัตโนมัติเป็นค่าเริ่มต้น ***
+    # เดิมรันทุกรอบ cron แล้ว ERROR ถึง 83% (4,109/4,933 ครั้ง) เสียเครดิตเปล่า — ตอนนี้ใช้ AI เฉพาะตอนพิมพ์
+    # /orderai เท่านั้น ถ้าอยากเปิดกลับมาให้ตั้ง env AI_ANALYSIS_ENABLED=true
+    "ai_analysis_enabled": os.environ.get("AI_ANALYSIS_ENABLED", "false").strip().lower() == "true",
     # *** แก้ไขล่าสุด (7 ก.ย. 2026): เปิดให้ AI ทำงาน 24/7 ทุกวัน (เดิม จ-ศ 10:00-22:00 เวลาไทย) ***
     # ค่าสองตัวนี้เป็น literal ใน config.py ตรงๆ ไม่มี env var ให้ override จากภายนอก (ต่างจากตัวแปร
     # อื่นๆ ในไฟล์นี้ที่อ่านจาก os.environ) เปลี่ยนพฤติกรรมได้ที่นี่จุดเดียวเท่านั้น — คุมเฉพาะการเรียก
@@ -141,7 +145,10 @@ CONFIG = {
     # ก่อนแล้วค่อยจับคู่กับ Risk % ตายตัวต่อเกรดจาก risk_pct_by_grade ด้านล่าง) ตั้งเป็น "grade" เพื่อให้
     # Risk % ที่ใช้จริงตรงกับเกรดที่โชว์บนข้อความ Telegram (TRADE QUALITY) เป๊ะๆ ไม่มีเลขทศนิยมที่
     # ไม่สัมพันธ์กับเกรดที่เห็น — ดู claude/trade_quality.py
-    "risk_sizing_mode": "grade",
+    # *** แก้ (19 พ.ย. 2026): เปลี่ยนเป็น "plan" — Risk % ตามแผน (risk_pct_by_plan ด้านล่าง) ***
+    # เหตุผล: จากข้อมูลจริง 323 ไม้ (2 ก.ย.–7 พ.ย.) เกรดไม่ทำนายผล (เกรด B ชนะ 14%, เกรด D ชนะ 43%) และ D=0%
+    # ตัดแผนที่ได้กำไรทิ้ง กลับไปใช้ "grade" ได้ด้วยการตั้งค่านี้เป็น "grade"
+    "risk_sizing_mode": "plan",
     # ตารางความเสี่ยงต่อไม้แยกตามเกรด (%) — A+/A/B/C ได้ Risk ตามลำดับ, D/F ไม่แนะนำให้เข้าเลย (0%)
     # โดยเฉพาะ Plan 3 (สวนเทรนด์) ที่มักได้คะแนนต่ำกว่า Trend-following เพราะสวนทิศ 4H Bias/15M
     # Structure โดยธรรมชาติของแผน — เกรดที่ได้จึงมักต่ำกว่าและ Risk % ที่แนะนำจะต่ำลงตามไปเองโดย
@@ -154,6 +161,27 @@ CONFIG = {
         "D": 0.0,
         "F": 0.0,
     },
+
+    # Risk % ต่อไม้ตามแผน (โหมด "plan") — อิงผลจริง ตัวอย่างน้อย/ยังไม่พิสูจน์ = ต่ำไว้ก่อน ปรับได้เอง
+    "risk_pct_by_plan": {
+        "plan1_pullback": 0.5, "plan1_pullback_early": 0.5,
+        "plan2_breakout": 0.0,            # ปิดแผน (-40R จาก 83 ไม้)
+        "plan3_counter_trend": 0.25,      # ตัวอย่างแค่ 3 ไม้
+        "plan4_daily_continuation": 0.5,  # กำไรกระจุกอยู่ไม่กี่เหตุการณ์ ยังไม่พิสูจน์
+        "plan5_zone_single": 1.0,         # +42R จาก 65 ไม้
+        "plan6_sweep_general": 0.5, "plan7_qm_pattern": 0.5, "plan8_flag_pattern": 0.5,
+    },
+    "risk_pct_by_plan_default": 0.5,
+    # แผนที่ปิดใช้งาน (ไม่สร้างสัญญาณ/ไม่บันทึก/ไม่ถูกเสนอใน /orderai) — เอา key ออกเพื่อเปิดกลับ
+    "plans_disabled": {"plan2_breakout"},
+
+    # --- /orderai (ดู orderai.py) ---
+    "orderai_enabled": True,
+    "orderai_button_ttl_minutes": 15,     # ปุ่ม ✅/❌ หมดอายุกี่นาที
+    "orderai_track_expiry_hours": 6,      # ออเดอร์ที่วางแล้วแต่ยังไม่เข้า ติดตามนานสุดกี่ชม.
+    "orderai_max_tokens": 3000,
+    "orderai_timeout_seconds": 60,
+    "orderai_missed_progress": 0.5,       # ราคาวิ่งไปทาง TP เกินกี่ส่วนของระยะ Entry->TP โดยยังไม่เข้า = ตกรถ
 
     # --- Plan Coordination / Conflict Detection (ใหม่) — ดู plan_coordination.py ---
     # 8 แผนทำงานอิสระจากกัน ไม่รู้จักกันเอง อาจยิงสัญญาณสวนทางกันพร้อมกันได้ (เช่น Plan 5 มี Zone LONG

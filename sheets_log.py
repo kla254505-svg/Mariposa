@@ -95,6 +95,13 @@ AI_LOG_HEADERS = [
     "AI_Status", "Error_Message",
 ]
 
+ORDER_AI_HEADERS = [
+    "Proposal_ID", "Created_Time", "Symbol", "AI_Verdict", "AI_Confidence", "Plan_ID", "Direction",
+    "Entry", "SL", "TP", "RR", "Plan_Score", "Price_At_Proposal", "AI_Model", "AI_Reason", "AI_Error",
+    "Tokens", "Decision", "Decision_Time", "Order_Status", "Fill_Time", "Close_Time", "Result",
+    "R_Multiple", "Cancel_Reason", "Tag",
+]
+
 STATUS_TO_SIGNAL_STATUS = {
     "pending": "WAITING_ENTRY", "running": "OPEN", "win": "TP_HIT",
     "loss": "SL_HIT", "expired": "EXPIRED",
@@ -433,6 +440,41 @@ def log_ai_analysis(signal_ids, events, ai_result, ai_model, ai_status="SUCCESS"
         return True
     except Exception as e:
         print(f"[Sheets Log] บันทึก AI_Log ไม่สำเร็จ: {e}")
+        return False
+
+
+def log_order_ai(row):
+    """UPSERT แถวของ /orderai ลงแท็บ Order_AI (Primary Key = Proposal_ID) — ค่าที่ส่งมาเป็น None จะไม่ทับ
+    ค่าเดิมในชีต (ใช้อัปเดตทีละส่วนตามสถานะ: เสนอ -> วางแล้ว -> เข้า -> ปิด) สร้างแท็บให้เองถ้ายังไม่มี
+    ไม่โยน exception คืน True/False"""
+    ss = _get_spreadsheet()
+    if ss is None:
+        return False
+    try:
+        import gspread
+        try:
+            ws = ss.worksheet("Order_AI")
+        except gspread.exceptions.WorksheetNotFound:
+            ws = ss.add_worksheet(title="Order_AI", rows=1000, cols=len(ORDER_AI_HEADERS))
+            ws.append_row(ORDER_AI_HEADERS)
+        pid = row.get("Proposal_ID")
+        if not pid:
+            return False
+        cell = ws.find(str(pid), in_column=1)
+        if cell:
+            existing = ws.row_values(cell.row)
+            values = []
+            for i, h in enumerate(ORDER_AI_HEADERS):
+                new = row.get(h)
+                old = existing[i] if i < len(existing) else None
+                values.append(new if new is not None else old)
+            ws.update(f"A{cell.row}:{_col_letter(len(ORDER_AI_HEADERS))}{cell.row}", [values],
+                      value_input_option="USER_ENTERED")
+        else:
+            ws.append_row([row.get(h) for h in ORDER_AI_HEADERS], value_input_option="USER_ENTERED")
+        return True
+    except Exception as e:
+        print(f"[Sheets Log] บันทึก Order_AI ไม่สำเร็จ ({row.get('Proposal_ID')}): {e}")
         return False
 
 

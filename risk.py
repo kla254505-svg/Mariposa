@@ -54,7 +54,7 @@ def calc_position_size(account_balance, entry_price, stop_loss, config, risk_pct
     }
 
 
-def calc_scaled_risk_pct(score, config, score_ceiling=100.0):
+def calc_scaled_risk_pct(score, config, score_ceiling=100.0, plan_key=None):
     """
     Score-based Position Sizing — ลด Risk % ต่อไม้ตามคุณภาพของสัญญาณแทนที่จะใช้ risk_per_trade_pct
     คงที่ทุกไม้เท่ากันหมด รองรับ 2 โหมด เลือกผ่าน config["risk_sizing_mode"]:
@@ -77,6 +77,10 @@ def calc_scaled_risk_pct(score, config, score_ceiling=100.0):
         return config.get("risk_per_trade_pct", 1.0)
 
     mode = config.get("risk_sizing_mode", "linear")
+    if mode == "plan":
+        # โหมดใหม่ (19 พ.ย. 2026): Risk % ตามแผน ไม่ผูกกับคะแนน/เกรด (ดู config risk_pct_by_plan)
+        table = config.get("risk_pct_by_plan") or {}
+        return table.get(plan_key, config.get("risk_pct_by_plan_default", 0.5))
     if mode == "grade":
         from trade_quality import compute_grade, risk_pct_for_grade
         grade = compute_grade(score, config, score_ceiling=score_ceiling)
@@ -95,7 +99,7 @@ def calc_scaled_risk_pct(score, config, score_ceiling=100.0):
     return round(min_pct + ratio * (max_pct - min_pct), 3)
 
 
-def format_position_sizing_line(bucket, entry_price, stop_loss, score, config, score_ceiling=100.0):
+def format_position_sizing_line(bucket, entry_price, stop_loss, score, config, score_ceiling=100.0, plan_key=None):
     """
     สร้างข้อความสรุป "เงินเสี่ยงต่อไม้นี้เป็นตัวเงินจริง" ตามทุนที่ผู้ใช้ตั้งไว้ผ่าน /setbalance
     (account.py) + สเกลตาม Score (calc_scaled_risk_pct ด้านบน — รองรับทั้งโหมด grade/linear) —
@@ -119,7 +123,7 @@ def format_position_sizing_line(bucket, entry_price, stop_loss, score, config, s
         from account import get_account_balance
 
         balance = get_account_balance(bucket)
-        risk_pct = calc_scaled_risk_pct(score, config, score_ceiling=score_ceiling)
+        risk_pct = calc_scaled_risk_pct(score, config, score_ceiling=score_ceiling, plan_key=plan_key)
         position = calc_position_size(balance, entry_price, stop_loss, config, risk_pct_override=risk_pct)
         return (
             f"\n💰 ทุนที่ใช้คำนวณ: ${balance:,.2f} | เสี่ยงต่อไม้นี้: {risk_pct:.2f}% = "

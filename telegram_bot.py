@@ -382,8 +382,10 @@ def _current_atr(ctx):
 # ===========================================================================
 
 
-def _plan_result(num, label, active, direction=None, score=None, breakdown=None, lines=None, note=None):
+def _plan_result(num, label, active, direction=None, score=None, breakdown=None, lines=None, note=None, trade=None):
+    # trade (ใหม่ 19 พ.ย. 2026): dict {entry, sl, tp, rr, note} ตัวเลขดิบที่ /orderai ใช้ตรวจ+เสนอออเดอร์
     return {
+        "trade": trade,
         "num": num, "label": label, "active": bool(active), "direction": direction,
         "score": score, "breakdown": breakdown or {}, "lines": lines or [], "note": note,
     }
@@ -433,14 +435,19 @@ def _check_plan1_all(ctx):
         lines.append(f"{name}: {price:.4f} (RR {rr[name]})")
     if not confirmed:
         lines.append("⚠️ ยังไม่ยืนยัน 5M Trigger — ราคาอาจยังไม่กลับตัวจริง เข้าก่อนเวลาอาจโดนสวนได้")
+    first_tp = next(iter(take_profits.values()))
     return _plan_result(1, label, True, direction=direction, score=conf["score"],
-                         breakdown=conf["breakdown"], lines=lines)
+                         breakdown=conf["breakdown"], lines=lines,
+                         trade={"entry": entry_signal["entry_price"], "sl": stop_loss, "tp": first_tp, "rr": rr_tp1,
+                                "note": None if confirmed else "ยังไม่ยืนยัน 5M Trigger — ราคาอาจยังไม่กลับตัวจริง"})
 
 
 def _check_plan2_all(ctx):
     """แผนที่ 2 (Breakout)"""
     label = "แผนที่ 2 (Breakout)"
     df_ind, structure, config = ctx["df_ind"], ctx["structure"], ctx["config"]
+    if "plan2_breakout" in config.get("plans_disabled", ()):
+        return _plan_result(2, label, False, note="ปิดใช้งานแล้ว (ผลจริง -40R จาก 83 ไม้ ชนะ 22%)")
     breakout = detect_breakout_trigger(df_ind, structure, config)
     if not breakout:
         return _plan_result(2, label, False, note="ยังไม่ทะลุระดับ swing ที่มีนัยสำคัญตอนนี้")
@@ -484,7 +491,9 @@ def _check_plan3_all(ctx):
         f"TP (Equilibrium): {order['take_profit']:.4f} (RR {order['rr']})",
         "⚠️ แผนสวนเทรนด์เสี่ยงสูงกว่าแผนอื่น ควรลดขนาดไม้",
     ]
-    return _plan_result(3, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines)
+    return _plan_result(3, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines,
+                         trade={"entry": order["entry_price"], "sl": order["stop_loss"], "tp": order["take_profit"],
+                                "rr": order["rr"], "note": "แผนสวนเทรนด์ เสี่ยงสูงกว่าแผนอื่น"})
 
 
 def _check_plan4_all(ctx):
@@ -514,7 +523,9 @@ def _check_plan4_all(ctx):
         f"TP (ขอบ Daily range ฝั่งตรงข้าม): {order['take_profit']:.4f} (RR {order['rr']})",
         "⚠️ แผนนี้ถือยาวเป็นชั่วโมง-วัน ไม่ใช่ day-trade แบบแผน 1-3",
     ]
-    return _plan_result(4, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines)
+    return _plan_result(4, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines,
+                         trade={"entry": order["entry_price"], "sl": order["stop_loss"], "tp": order["take_profit"],
+                                "rr": order["rr"], "note": "แผนถือยาวเป็นชั่วโมง-วัน"})
 
 
 def _check_zone_style_plan(num, label, find_fn, calc_fn, ctx, entry_tag="Limit", needs_bias=True):
@@ -543,7 +554,9 @@ def _check_zone_style_plan(num, label, find_fn, calc_fn, ctx, entry_tag="Limit",
         f"SL: {order['stop_loss']:.4f}",
         f"TP: {order['take_profit']:.4f} (RR {order['rr']})",
     ]
-    return _plan_result(num, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines)
+    return _plan_result(num, label, True, direction=direction, score=score, breakdown=breakdown, lines=lines,
+                         trade={"entry": order["entry_price"], "sl": order["stop_loss"], "tp": order["take_profit"],
+                                "rr": order["rr"], "note": None})
 
 
 def _find_zone_adapter(bias_4h, df, config):
@@ -1054,6 +1067,52 @@ def _cmd_test(ctx):
 # /summary และ /stats ถูกถอดออกตามที่ขอ (ไม่มีคนใช้ รกโค้ด) — หมายเหตุ: การบันทึกออเดอร์อัตโนมัติของฝั่ง
 # cron (main.py/plan_runner.py) ยังทำงานตามปกติเหมือนเดิมทุกประการ ไม่ได้ตัดออกไปด้วย (คนละส่วนกัน
 # — /summary /stats แค่เป็น "หน้าต่างดูข้อมูลที่บันทึกไว้" ผ่าน Telegram เท่านั้น ไม่ใช่ตัวบันทึกเอง)
+def _handle_orderai(config, token, chat_id, default_symbol, args):
+    """/orderai — ให้ AI ช่วยตัดสินว่าควรเข้าไหม + ปุ่ม ✅ วางแล้ว / ❌ ไม่วาง (ดู orderai.py)
+    ส่งข้อความเองพร้อมปุ่ม (ไม่ผ่าน _reply เพราะต้องแนบ inline keyboard)"""
+    import orderai
+    from risk import format_position_sizing_line
+    if not config.get("orderai_enabled", True):
+        _reply(token, chat_id, "คำสั่ง /orderai ปิดใช้งานอยู่ครับ")
+        return
+    target, err = _resolve_symbol_arg(args, default_symbol)
+    if err:
+        _reply(token, chat_id, err)
+        return
+    _reply(token, chat_id, "⏳ กำลังเช็คทั้ง 8 แผน + ให้ AI ช่วยตัดสิน (ประมาณ 10–40 วินาที)...")
+    try:
+        _CONTEXT_CACHE.pop(target, None)  # ต้องการราคา/ข้อมูลสดสำหรับตัดสินใจเข้าไม้
+        ctx = _build_command_context(target, config)
+        results = _check_all_plans(ctx)
+        master_trend, master_source = determine_master_trend(ctx.get("bias_4h"), ctx["structure"])
+
+        def sizing(pick):
+            return format_position_sizing_line(config["kvdb_bucket"], pick["entry"], pick["sl"], pick["score"],
+                                                ctx["config"], score_ceiling=100.0, plan_key=pick["plan_key"])
+
+        out = orderai.analyze(ctx["config"], ctx, results, master_trend, master_source,
+                               _symbol_label(target), sizing_fn=sizing)
+        orderai.save_proposal(config, out["proposal"])
+        orderai.send_message(token, chat_id, out["text"], out["keyboard"])
+        orderai.log_proposal_row(out["proposal"], "PENDING" if out["keyboard"] else "NO_ENTRY")
+    except Exception as e:
+        _reply(token, chat_id, f"เกิดข้อผิดพลาดตอนประมวลผล /orderai: {e}")
+
+
+def _handle_callback_query(config, token, cq):
+    """กดปุ่ม inline ของ /orderai (✅ วางแล้ว / ❌ ไม่วาง) — เฉพาะเจ้าของบอท (เช็คใน orderai.handle_callback)"""
+    import orderai
+
+    def price_fn(sym):
+        _CONTEXT_CACHE.pop(sym, None)
+        return float(_build_command_context(sym, config)["df_ind"]["close"].iloc[-1])
+
+    try:
+        orderai.handle_callback(config, token, cq, price_fn)
+    except Exception as e:
+        print(f"[Telegram Bot Error] callback orderai ล้มเหลว: {e}")
+
+
 COMMAND_HANDLERS = {
     "order": _cmd_order_all,
     "trend": _cmd_trend,
@@ -1247,6 +1306,11 @@ def run_polling_loop(config, symbol="XAUUSD"):
                     print(f"[Telegram Bot Error] บันทึก offset ({known_offset}) ลง kvdb ไม่สำเร็จ "
                           f"— ใช้ค่าในหน่วยความจำต่อไปก่อน (ไม่กระทบการตอบคำสั่งรอบนี้)")
 
+                # ปุ่ม inline ของ /orderai (✅ วางแล้ว / ❌ ไม่วาง)
+                if update.get("callback_query"):
+                    _handle_callback_query(config, token, update["callback_query"])
+                    continue
+
                 message = update.get("message") or update.get("channel_post")
                 if not message:
                     continue
@@ -1274,6 +1338,11 @@ def run_polling_loop(config, symbol="XAUUSD"):
                 command = text_parts[0].lower()
                 command_args = text_parts[1:]
                 command, command_args = _normalize_order_shorthand(command, command_args)
+                if command == "orderai":
+                    # /orderai ใช้ได้เฉพาะเจ้าของบอท (มีปุ่มบันทึกออเดอร์) คนในกลุ่มพิมพ์จะถูกเมิน
+                    if is_owner:
+                        _handle_orderai(config, token, message["chat"]["id"], symbol, command_args)
+                    continue
                 handler = COMMAND_HANDLERS.get(command)
                 chat_id = message["chat"]["id"]
                 if not handler:

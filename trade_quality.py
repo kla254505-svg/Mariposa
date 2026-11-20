@@ -159,7 +159,10 @@ def format_trade_quality_line(final_score, score_ceiling, breakdown, grade, conf
     if detail_parts:
         lines.append(" | ".join(detail_parts))
 
-    if grade in ("D", "F"):
+    if config.get("risk_sizing_mode") == "plan":
+        # โหมด Risk ตามแผน (19 พ.ย. 2026): เกรดเป็นข้อมูลอ้างอิงเท่านั้น ไม่ใช่ตัวกำหนด Risk (ดูบรรทัด 💰 ด้านบน)
+        lines.append("ℹ️ เกรดเป็นข้อมูลอ้างอิง — Risk % ใช้ตามแผน (เกรดยังไม่พิสูจน์ว่าทำนายผลได้)")
+    elif grade in ("D", "F"):
         lines.append(f"⚠️ เกรดต่ำ — พิจารณาข้ามไม้นี้ หรือลด Risk ให้ต่ำที่สุด (แนะนำ: {risk_pct:.2f}%)")
     else:
         lines.append(f"แนะนำ Risk ต่อไม้นี้ตามเกรด: {risk_pct:.2f}%")

@@ -110,6 +110,9 @@ def check_plan2_plan3_triggers(df, config, symbol):
         plan_blackout, plan_blackout_event = is_in_news_blackout(bucket, symbol)
 
         for plan_key, plan_label, trigger, detail_template in plan_triggers:
+            # แผนที่ปิดใช้งานใน config["plans_disabled"] (เช่น P2 Breakout) ข้ามทั้งหมด ไม่สร้าง/ไม่บันทึกสัญญาณ
+            if plan_key in config.get("plans_disabled", ()):
+                continue
             state_key = f"plan_state_{symbol}_{plan_key}"
 
             if not trigger:
@@ -209,7 +212,7 @@ def check_plan2_plan3_triggers(df, config, symbol):
                 # *** ใหม่ (7 ก.ย. 2026): แนบ Position Sizing (คะแนน->%ความเสี่ยง->ตัวเงินจริง) ***
                 plan_msg += format_position_sizing_line(
                     bucket, calc_order["entry_price"], calc_order["stop_loss"], score, config,
-                    score_ceiling=GENERIC_MAX_SCORE,
+                    score_ceiling=GENERIC_MAX_SCORE, plan_key=plan_key,
                 )
                 if config.get("trade_quality_display_enabled", True):
                     plan_msg += "\n\n" + format_trade_quality_line(
@@ -351,7 +354,7 @@ def check_plan4_trigger(df_5m, config, symbol, td_symbol, df_15m=None):
                             plan4_msg += format_conflict_warning(conflicts)
                             plan4_msg += format_position_sizing_line(
                                 bucket, plan4_order["entry_price"], plan4_order["stop_loss"], score,
-                                config, score_ceiling=GENERIC_MAX_SCORE,
+                                config, score_ceiling=GENERIC_MAX_SCORE, plan_key="plan4_daily_continuation",
                             )
                             if config.get("trade_quality_display_enabled", True):
                                 plan4_msg += "\n\n" + format_trade_quality_line(
@@ -448,7 +451,7 @@ def check_zone_entry_trigger(df, bias_4h, config, symbol):
         msg += format_conflict_warning(conflicts)
         msg += format_position_sizing_line(
             bucket, order["entry_price"], order["stop_loss"], score, config,
-            score_ceiling=GENERIC_MAX_SCORE,
+            score_ceiling=GENERIC_MAX_SCORE, plan_key="plan5_zone_single",
         )
         if config.get("trade_quality_display_enabled", True):
             msg += "\n\n" + format_trade_quality_line(
@@ -539,7 +542,7 @@ def check_sweep_entry_trigger(df, bias_4h, config, symbol):
         msg += format_conflict_warning(conflicts)
         msg += format_position_sizing_line(
             bucket, order["entry_price"], order["stop_loss"], score, config,
-            score_ceiling=GENERIC_MAX_SCORE,
+            score_ceiling=GENERIC_MAX_SCORE, plan_key="plan6_sweep_general",
         )
         if config.get("trade_quality_display_enabled", True):
             msg += "\n\n" + format_trade_quality_line(
@@ -632,7 +635,7 @@ def check_qm_pattern_trigger(df, config, symbol):
         msg += format_conflict_warning(conflicts)
         msg += format_position_sizing_line(
             bucket, order["entry_price"], order["stop_loss"], score, config,
-            score_ceiling=GENERIC_MAX_SCORE,
+            score_ceiling=GENERIC_MAX_SCORE, plan_key="plan7_qm_pattern",
         )
         if config.get("trade_quality_display_enabled", True):
             msg += "\n\n" + format_trade_quality_line(
@@ -725,7 +728,7 @@ def check_flag_pattern_trigger(df, config, symbol):
         msg += format_conflict_warning(conflicts)
         msg += format_position_sizing_line(
             bucket, order["entry_price"], order["stop_loss"], score, config,
-            score_ceiling=GENERIC_MAX_SCORE,
+            score_ceiling=GENERIC_MAX_SCORE, plan_key="plan8_flag_pattern",
         )
         if config.get("trade_quality_display_enabled", True):
             msg += "\n\n" + format_trade_quality_line(

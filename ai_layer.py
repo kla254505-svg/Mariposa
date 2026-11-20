@@ -262,7 +262,7 @@ def _call_claude_api(context_text, config):
         return None, "ERROR", "ยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY"
 
     payload = {
-        "model": config.get("ai_model", "claude-sonnet-5"),
+        "model": config.get("ai_model", "claude-sonnet-5-5"),
         # *** แก้ไขล่าสุด (7 ก.ย. 2026): เพิ่มจาก 2000 เป็น 4000 ***
         # เจอจริงจาก log การรันจริงบน GitHub Actions: max_tokens=2000 ยังไม่พอ — รอบนี้ไม่ได้ได้ response
         # ว่างเปล่าสนิทแบบที่เคยเจอ (เคสเดิมที่ทำให้ขยับ 700->2000) แต่ได้ text ออกมาแค่ ~425 ตัวอักษร
@@ -295,7 +295,7 @@ def _call_claude_api(context_text, config):
     if resp.status_code == 429:
         return None, "ERROR", "Claude API ตอบ 429 (rate limit) — จะลองใหม่รอบถัดไปที่ state เปลี่ยน"
     if resp.status_code != 200:
-        return None, "ERROR", f"Claude API ตอบ HTTP {resp.status_code}: {resp.text[:200]}"
+        return None, "ERROR", f"Claude API ตอบ HTTP {resp.status_code}: {resp.text[:600]}"
 
     try:
         body = resp.json()
@@ -434,7 +434,7 @@ def _log_ai_to_sheets(active_plans, events, ai_result, config, ai_status, error_
         import sheets_log
         signal_ids = [p.get("id") for p in (active_plans or []) if p.get("id")]
         sheets_log.log_ai_analysis(
-            signal_ids, events, ai_result, config.get("ai_model", "claude-sonnet-5"),
+            signal_ids, events, ai_result, config.get("ai_model", "claude-sonnet-5-5"),
             ai_status=ai_status, error_message=error_message,
         )
     except Exception as e:
@@ -775,7 +775,7 @@ def test_ai_connection(config):
         return False, "ยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY บน Render (Environment Variables)"
 
     payload = {
-        "model": config.get("ai_model", "claude-sonnet-5"),
+        "model": config.get("ai_model", "claude-sonnet-5-5"),
         # ตั้ง 100 (เดิม 10 น้อยเกินไป) — เหตุผลเดียวกับใน _call_claude_api: โมเดลรุ่นใหม่ใช้ thinking
         # token ก่อนตอบ ถ้าเพดานต่ำมากอาจไม่เหลือให้ตอบข้อความจริงเลย ทำให้ /aicheck รายงานผลเพี้ยน
         # ได้ทั้งที่ API ใช้งานได้ปกติ (ยังถือว่าประหยัดมาก เพราะจ่ายตาม token ที่ใช้จริงเท่านั้น)
@@ -802,7 +802,7 @@ def test_ai_connection(config):
     if resp.status_code == 429:
         return False, "โดน Rate Limit (HTTP 429) — คีย์ใช้งานได้ แค่ตอนนี้เรียกถี่ไป ลองใหม่อีกสักครู่"
     if resp.status_code != 200:
-        return False, f"Claude API ตอบ HTTP {resp.status_code}: {resp.text[:150]}"
+        return False, f"Claude API ตอบ HTTP {resp.status_code}: {resp.text[:400]}"
 
     try:
         # ไล่หา block ที่เป็น type "text" จริงๆ (เหตุผลเดียวกับใน _call_claude_api — block แรกไม่

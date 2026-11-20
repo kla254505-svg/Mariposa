@@ -241,7 +241,8 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
         # เพราะ calc_confidence_score ไม่ได้พึ่งพา position ที่มาจากไหนทั้งสิ้น
         confidence = calc_confidence_score(entry_signal, structure, df, config, rr["TP1"],
                                             bias_4h=bias_4h, higher_tf_trend=higher_tf_trend)
-        risk_pct = calc_scaled_risk_pct(confidence["score"], config, score_ceiling=PLAN1_SCORE_CEILING)
+        risk_pct = calc_scaled_risk_pct(confidence["score"], config, score_ceiling=PLAN1_SCORE_CEILING,
+                                        plan_key="plan1_pullback")
         position = calc_position_size(account_balance, entry_signal["entry_price"], stop_loss, config,
                                        risk_pct_override=risk_pct)
 
@@ -440,7 +441,8 @@ def run_pipeline(df, symbol="SYMBOL", timeframe="15m", account_balance=1000.0, c
             stale_threshold = (2 * current_atr) if current_atr else config.get("min_sl_distance", 10.0)
             position_sizing_line = format_position_sizing_line(
                 config["kvdb_bucket"], entry_signal["entry_price"], stop_loss,
-                confidence["score"], config, score_ceiling=PLAN1_SCORE_CEILING
+                confidence["score"], config, score_ceiling=PLAN1_SCORE_CEILING,
+                plan_key="plan1_pullback"
             )
             msg = format_alert_message(symbol, timeframe, structure, entry_signal,
                                         stop_loss, take_profits, rr, confidence, bias_4h=bias_4h,
@@ -653,6 +655,18 @@ if __name__ == "__main__":
                                 send_telegram_alert(CONFIG["telegram_token"], target_chat_id, mgmt_msg)
             except Exception as e:
                 print(f"[Trade Management Error] {display_symbol}: {e}")
+
+            # --- ติดตามออเดอร์ที่กด "✅ วางแล้ว" จาก /orderai (เข้า/ปิด/ควรยกเลิก) — กฎล้วน ไม่เรียก AI ---
+            # แจ้งเตือนเสมอ ไม่ขึ้นกับ push_notifications_enabled (เพราะผู้ใช้เลือกติดตามเอง) ดู orderai.py
+            try:
+                if current_price is not None:
+                    import orderai
+                    _st15 = analyze_structure(add_indicators(df, CONFIG), CONFIG)
+                    orderai.track_orders(CONFIG, display_symbol, df, current_price,
+                                         bias_trend=(bias_4h or {}).get("trend"),
+                                         trend_15m=(_st15 or {}).get("trend"))
+            except Exception as e:
+                print(f"[OrderAI Tracking Error] {display_symbol}: {e}")
 
             # --- Plan 2/3 จาก Hourly Briefing (Breakout / สวนเทรนด์) และ Plan 4 (Daily Continuation) ---
             # ย้าย logic เช็ค trigger + ส่ง Telegram + บันทึก order ไปอยู่ที่ plan_runner.py/
