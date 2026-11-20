@@ -135,20 +135,31 @@ def collect_candidates(results, price, config):
 # 2) AI
 # ══════════════════════════════════════════════════════
 SYSTEM_PROMPT = """คุณเป็นผู้ช่วยตัดสินใจเทรดทอง (XAUUSD) ให้เจ้าของบอทที่เทรดมือบนโบรกเอง เขาอ่านภาษาไทยง่ายๆ ไม่ต้องศัพท์เทคนิคเยอะ
-งานของคุณ: ดูข้อมูลตลาดและ "ผู้สมัครออเดอร์" ที่บอทคำนวณมาให้ แล้วตัดสินว่าตอนนี้ควรเข้าไหม
+งานของคุณมี 2 ส่วนแยกจากกัน:
 
-กติกาเหล็ก:
-1. ห้ามคิดราคา Entry/SL/TP เอง ให้เลือกได้เฉพาะ "หมายเลขแผน" ที่ valid=true ในรายการผู้สมัครเท่านั้น
-2. verdict มี 3 ค่า: ENTER (ควรเข้า — ต้องระบุ pick เป็นหมายเลขแผน), WAIT (ยังไม่ควรเข้าตอนนี้แต่ยังมีลุ้น บอกว่ารออะไร), NO (ไม่ควรเข้า)
-3. ถ้าไม่มีผู้สมัคร valid เลย ต้องตอบ WAIT หรือ NO และ pick = null
-4. ตัดสินจากหลักฐาน: ทิศเทียบเทรนด์ 4H/1H/15M, สถิติจริงของแต่ละแผน, ข่าวใกล้ๆ, session, โซน premium/discount, ความขัดแย้งระหว่างแผน
-   แผนที่สถิติแย่หรือกำไรไม่แน่ชัด ให้ระวังและบอกตรงๆ อย่าเชียร์เกินจริง
-5. ห้ามแต่งข้อมูลที่ไม่มีให้ ค่าไหนเป็น not_available ให้บอกว่าไม่มีข้อมูล
-6. ตอบเป็น JSON ก้อนเดียว ไม่มี markdown ไม่มีข้อความอื่น:
+ส่วน ① ตัดสิน "ผู้สมัครออเดอร์จากแผนของบอท": ควรเข้าไหม
+  - ห้ามแก้ราคา เลือกได้เฉพาะ "หมายเลขแผน" ที่ valid=true ในรายการผู้สมัครเท่านั้น
+  - verdict: ENTER (ควรเข้า — ต้องมี pick เป็นเลขแผน), WAIT (ยังไม่ควรเข้าแต่ยังมีลุ้น บอกว่ารออะไร), NO (ไม่ควรเข้า)
+  - ไม่มีผู้สมัคร valid เลย ต้องตอบ WAIT หรือ NO และ pick = null
+
+ส่วน ② "ความเห็นของคุณเอง" แยกจากแผนบอทโดยสิ้นเชิง: ถ้าคุณเห็นจุดเข้าที่ดีในตอนนี้ ให้เสนอ Entry/SL/TP เอง
+  - ใช้ระดับราคาจากหัวข้อ KEY LEVELS (swing, โซน OB/FVG, equilibrium 4H) เป็นหลักอ้างอิง ห้ามแต่งระดับที่ไม่มีเหตุผลรองรับ
+  - Entry ควรอยู่ที่โซน/ระดับสำคัญ (limit รอย่อ/รีบาวด์ หรือ stop รอทะลุ) SL อยู่หลังโครงสร้างที่ทำให้ไอเดียผิด TP อยู่ที่ระดับเป้าหมายจริง
+  - SL ต้องห่างจาก Entry อย่างน้อย min_sl_distance และ RR อย่างน้อย min_rr (ค่าอยู่ในข้อมูล) ไม่งั้นโค้ดจะตีตก
+  - จะเสนอทิศเดียวกับแผนบอท หรือคนละทิศก็ได้ ตามที่เห็นจริง
+  - ถ้าตอนนี้ไม่มีจุดเข้าที่ดีจริงๆ ให้ตอบ direction = "NONE" พร้อมสาเหตุสั้นๆ ห้ามฝืนเสนอเพื่อให้มีออเดอร์ การบอกว่า "ไม่มี" คือคำตอบที่ถูกเมื่อเป็นความจริง
+
+กติกาทั่วไป: ตัดสินจากหลักฐาน (เทรนด์ 4H/1H/15M, สถิติจริงของแต่ละแผน, ข่าว, session, premium/discount) แผนที่สถิติแย่ให้ระวัง
+ห้ามแต่งข้อมูลที่ไม่มีให้ ค่าไหนเป็น not_available ให้บอกว่าไม่มีข้อมูล
+
+ตอบเป็น JSON ก้อนเดียว ไม่มี markdown ไม่มีข้อความอื่น:
 {"verdict":"ENTER|WAIT|NO","pick":<เลขแผนหรือ null>,"confidence":<0-100>,
  "reasons":["เหตุผลสั้นๆ 1","เหตุผลสั้นๆ 2","เหตุผลสั้นๆ 3 (ไม่บังคับ)"],
  "risk_note":"คำเตือนสั้นๆ 1 บรรทัด หรือสตริงว่าง",
- "no_entry_reason":"ถ้าไม่มีจุดเข้า: สาเหตุเบื้องต้นสั้นๆ 1-2 ประโยค ไม่ยืดเยื้อ ไม่งั้นสตริงว่าง"}
+ "no_entry_reason":"ถ้าส่วน ① ไม่มีจุดเข้า: สาเหตุสั้นๆ 1-2 ประโยค ไม่งั้นสตริงว่าง",
+ "ai_idea":{"direction":"LONG|SHORT|NONE","entry":<ตัวเลขหรือ null>,"sl":<ตัวเลขหรือ null>,"tp":<ตัวเลขหรือ null>,
+           "basis":"อ้างอิงระดับไหน/ทำไม 1 ประโยค","confidence":<0-100 หรือ null>,
+           "none_reason":"ถ้า NONE: สาเหตุสั้นๆ 1-2 ประโยค ไม่งั้นสตริงว่าง"}}
 reasons แต่ละข้อไม่เกิน ~110 ตัวอักษร ภาษาไทยอ่านง่าย"""
 
 
@@ -178,6 +189,56 @@ def _upcoming_news(config, symbol):
     return out[:4]
 
 
+def build_key_levels(ctx, cands_price):
+    """ระดับราคาอ้างอิงให้ AI ใช้ตอนเสนอจุดเข้าเอง (ส่วน ②) — ข้อมูลจริงจากกราฟ 15M + โซน 4H ไม่ใช่ตัวเลขที่ AI ต้องเดา
+    คืน list ของข้อความ (ว่างถ้าคำนวณไม่ได้)"""
+    out = []
+    try:
+        df = ctx["df_ind"]
+        price = float(df["close"].iloc[-1])
+        n24 = min(len(df), 96)
+        out.append(f"High/Low 24 ชม. (15M x{n24} แท่ง): {df['high'].iloc[-n24:].max():.2f} / {df['low'].iloc[-n24:].min():.2f}")
+        n6 = min(len(df), 24)
+        out.append(f"High/Low 6 ชม.: {df['high'].iloc[-n6:].max():.2f} / {df['low'].iloc[-n6:].min():.2f}")
+        try:
+            from pattern import find_swings
+            sw = find_swings(df.iloc[-200:], lookback=3)
+            highs = sw.loc[sw["swing_high"], "high"].tolist()[-4:]
+            lows = sw.loc[sw["swing_low"], "low"].tolist()[-4:]
+            if highs:
+                out.append("Swing high 15M ล่าสุด (เก่า->ใหม่): " + ", ".join(f"{x:.2f}" for x in highs))
+            if lows:
+                out.append("Swing low 15M ล่าสุด (เก่า->ใหม่): " + ", ".join(f"{x:.2f}" for x in lows))
+        except Exception:
+            pass
+        cfg = ctx.get("config") or {}
+        try:
+            from orderblock import find_order_blocks, get_nearest_unmitigated_ob
+            obs = find_order_blocks(df, cfg)
+            for d, lab in (("bullish", "OB ขาขึ้น (แนวรับ) ใกล้สุดใต้ราคา"), ("bearish", "OB ขาลง (แนวต้าน) ใกล้สุดเหนือราคา")):
+                ob = get_nearest_unmitigated_ob(obs, d, price)
+                if ob:
+                    out.append(f"{lab}: {ob['bottom']:.2f} - {ob['top']:.2f}")
+        except Exception:
+            pass
+        try:
+            from fvg import find_fvgs, get_nearest_unfilled_fvg
+            fv = find_fvgs(df, cfg)
+            for d, lab in (("bullish", "FVG ขาขึ้น ใกล้สุดใต้ราคา"), ("bearish", "FVG ขาลง ใกล้สุดเหนือราคา")):
+                f = get_nearest_unfilled_fvg(fv, d, price)
+                if f:
+                    out.append(f"{lab}: {f['bottom']:.2f} - {f['top']:.2f}")
+        except Exception:
+            pass
+        b4 = ctx.get("bias_4h") or {}
+        parts = [f"{k}={b4[k]:.2f}" for k in ("swing_high", "swing_low", "equilibrium_price") if isinstance(b4.get(k), (int, float))]
+        if parts:
+            out.append("กรอบ 4H: " + ", ".join(parts))
+    except Exception:
+        pass
+    return out
+
+
 def build_context_text(ctx, cands, inactive, master_trend, master_source, config):
     df = ctx["df_ind"]
     last = df.iloc[-1]
@@ -196,6 +257,7 @@ def build_context_text(ctx, cands, inactive, master_trend, master_source, config
         f"Symbol: {ctx['symbol']}",
         f"เวลา (ไทย): {datetime.now(THAI_TZ).strftime('%Y-%m-%d %H:%M')}",
         f"ราคาปัจจุบัน: {price}",
+        f"เกณฑ์ที่โค้ดใช้ตรวจ: min_sl_distance={config.get('min_sl_distance')} min_rr={config.get('min_rr', 1.2)}",
         f"4H: เทรนด์={_fmt(bias.get('trend'))} เหตุการณ์={_fmt(bias.get('event'))} โซน={_fmt(bias.get('zone'))}",
         f"1H เทรนด์: {_fmt(ctx.get('higher_tf_trend'))}",
         f"15M: เทรนด์={_fmt(structure.get('trend'))} เหตุการณ์={_fmt(structure.get('event'))}",
@@ -207,7 +269,11 @@ def build_context_text(ctx, cands, inactive, master_trend, master_source, config
     news = _upcoming_news(config, ctx["symbol"])
     lines.append("ข่าวใกล้ๆ: " + ("; ".join(news) if news else "ไม่มีในช่วง 3 ชม. ข้างหน้า"))
     lines.append("")
-    lines.append("== ผู้สมัครออเดอร์ (ตัวเลขมาจากบอท ห้ามแก้) ==")
+    lines.append("== KEY LEVELS (ใช้อ้างอิงส่วน ② ความเห็นของคุณเอง) ==")
+    kl = build_key_levels(ctx, price)
+    lines.extend(kl if kl else ["not_available"])
+    lines.append("")
+    lines.append("== ผู้สมัครออเดอร์จากแผนบอท (ส่วน ① ตัวเลขมาจากบอท ห้ามแก้) ==")
     if not cands:
         lines.append("(ไม่มีแผนไหนเข้าเงื่อนไข)")
     for c in cands:
@@ -270,8 +336,40 @@ def call_ai(context_text, config):
         return None, f"อ่านคำตอบ AI ไม่ได้: {e}", {}
 
 
-def sanitize_ai(data, cands):
-    """ตรวจคำตอบ AI: verdict ต้องถูกต้อง ENTER ต้องเลือกแผน valid จริง ไม่งั้นลดระดับเป็น NO"""
+def sanitize_idea(raw, price, config):
+    """ตรวจ "ความเห็น AI" (ส่วน ②) ด้วยกฎในโค้ดชุดเดียวกับแผนบอท คืน dict:
+    direction (bullish/bearish/None), entry/sl/tp/rr, entry_side, basis, confidence, valid, invalid_reason, none_reason"""
+    out = {"direction": None, "entry": None, "sl": None, "tp": None, "rr": None, "entry_side": None,
+           "basis": "", "confidence": None, "valid": False, "invalid_reason": None, "none_reason": ""}
+    if not isinstance(raw, dict):
+        out["none_reason"] = "AI ไม่ได้ให้ความเห็นส่วนนี้"
+        return out
+    d = str(raw.get("direction", "NONE")).upper().strip()
+    out["none_reason"] = str(raw.get("none_reason") or "").strip()[:300]
+    out["basis"] = str(raw.get("basis") or "").strip()[:240]
+    try:
+        out["confidence"] = max(0, min(100, int(raw.get("confidence"))))
+    except (TypeError, ValueError):
+        pass
+    if d not in ("LONG", "SHORT"):
+        return out
+    direction = "bullish" if d == "LONG" else "bearish"
+    try:
+        entry, sl, tp = float(raw["entry"]), float(raw["sl"]), float(raw["tp"])
+    except (KeyError, TypeError, ValueError):
+        out["direction"] = direction
+        out["invalid_reason"] = "AI เสนอทิศแต่ตัวเลข Entry/SL/TP ไม่ครบ"
+        return out
+    out.update({"direction": direction, "entry": round(entry, 3), "sl": round(sl, 3), "tp": round(tp, 3)})
+    v = validate_trade(direction, entry, sl, tp, price, config)
+    out["rr"], out["entry_side"] = v["rr"], v["entry_side"]
+    out["valid"], out["invalid_reason"] = v["ok"], v["reason"]
+    return out
+
+
+def sanitize_ai(data, cands, price=None, config=None):
+    """ตรวจคำตอบ AI: verdict ต้องถูกต้อง ENTER ต้องเลือกแผน valid จริง ไม่งั้นลดระดับเป็น NO
+    และตรวจ ai_idea (ความเห็นส่วน ②) ด้วยกฎในโค้ด"""
     verdict = str(data.get("verdict", "")).upper().strip()
     if verdict not in ("ENTER", "WAIT", "NO"):
         raise ValueError("verdict ไม่ถูกต้อง")
@@ -292,11 +390,12 @@ def sanitize_ai(data, cands):
         conf = max(0, min(100, int(data.get("confidence"))))
     except (TypeError, ValueError):
         conf = None
+    idea = sanitize_idea(data.get("ai_idea"), price, config or {}) if price is not None else None
     return {
         "verdict": verdict, "pick": pick, "confidence": conf, "reasons": reasons,
         "risk_note": str(data.get("risk_note") or "").strip()[:200],
         "no_entry_reason": str(data.get("no_entry_reason") or "").strip()[:300],
-        "downgraded": downgraded,
+        "downgraded": downgraded, "idea": idea,
     }
 
 
@@ -314,7 +413,8 @@ def rules_only(cands, master_trend):
     else:
         reasons.append("ไม่มีแผนไหนผ่านเงื่อนไขและการตรวจของโค้ดตอนนี้")
     return {"verdict": "RULES", "pick": pick["num"] if pick else None, "confidence": None, "reasons": reasons,
-            "risk_note": "ยังไม่มี AI ช่วยตรวจบริบท/ข่าว ตัดสินใจเองอีกชั้น", "no_entry_reason": "", "downgraded": None}
+            "risk_note": "ยังไม่มี AI ช่วยตรวจบริบท/ข่าว ตัดสินใจเองอีกชั้น", "no_entry_reason": "", "downgraded": None,
+            "idea": None}
 
 
 # ══════════════════════════════════════════════════════
@@ -379,6 +479,36 @@ def format_message(symbol_label, price, decision, cands, ai_error, config, bucke
     return "\n".join(l for l in lines if l is not None)
 
 
+def format_idea_message(price, idea, config):
+    """ส่วน ② ความเห็นของ AI (แยกข้อความจากส่วน ① ไม่แสดง Risk)"""
+    lines = ["🧠 <b>ความเห็นของ AI เอง</b> (แยกจากแผนบอท)", "<i>AI คิดเองจากโครงสร้างราคา — ยังไม่มีสถิติย้อนหลังรองรับ</i>", ""]
+    if not idea.get("direction"):
+        lines.append("📍 <b>จุดเข้า: ไม่มี</b>")
+        lines.append(_esc(idea.get("none_reason") or "AI มองว่าตอนนี้ยังไม่มีจุดเข้าที่คุ้มพอ"))
+        return "\n".join(lines)
+    if not idea.get("valid"):
+        lines.append(f"📍 AI เสนอ{_dir_th(idea['direction'])} แต่โค้ดตรวจแล้วไม่ผ่าน จึงไม่แนะนำให้วาง")
+        if idea.get("entry") is not None:
+            lines.append(f"Entry {idea['entry']:.2f} | SL {idea['sl']:.2f} | TP {idea['tp']:.2f}")
+        lines.append(f"❌ เหตุผลที่ไม่ผ่าน: {_esc(idea.get('invalid_reason'))}")
+        if idea.get("basis"):
+            lines.append(f"แนวคิด AI: {_esc(idea['basis'])}")
+        return "\n".join(lines)
+    kind = "Limit (รอราคาย่อมา)" if idea["entry_side"] == "below" else "Stop (รอราคาทะลุไป)"
+    dist = abs(idea["entry"] - price)
+    lines += [
+        f"📍 <b>จุดเข้า — {_dir_th(idea['direction'])}</b>"
+        + (f"  (AI มั่นใจ {idea['confidence']}%)" if idea.get("confidence") is not None else ""),
+        f"Entry ({kind}): <b>{idea['entry']:.2f}</b>  (ห่างราคาปัจจุบัน {dist:.1f})",
+        f"SL: <b>{idea['sl']:.2f}</b>  (ห่าง {abs(idea['entry'] - idea['sl']):.1f})",
+        f"TP: <b>{idea['tp']:.2f}</b>  (RR {idea['rr']})",
+    ]
+    if idea.get("basis"):
+        lines.append(f"💡 {_esc(idea['basis'])}")
+    lines.append(f"\n👇 ถ้าวางออเดอร์นี้เอง กดปุ่มด้านล่าง (หมดอายุใน {config.get('orderai_button_ttl_minutes', 15)} นาที)")
+    return "\n".join(lines)
+
+
 def _prop_key(pid):
     return f"orderai_prop_{pid}"
 
@@ -417,7 +547,7 @@ def analyze(config, ctx, results, master_trend, master_source, symbol_label, siz
     parsed, ai_error, usage = call_ai(context_text, config)
     if parsed is not None:
         try:
-            decision = sanitize_ai(parsed, cands)
+            decision = sanitize_ai(parsed, cands, price, config)
         except Exception as e:
             ai_error = f"คำตอบ AI ไม่ตรงรูปแบบ: {e}"
     if decision is None:
@@ -435,7 +565,27 @@ def analyze(config, ctx, results, master_trend, master_source, symbol_label, siz
         "bias_4h": (ctx.get("bias_4h") or {}).get("trend"), "trend_15m": (ctx.get("structure") or {}).get("trend"),
         "n_candidates": len(cands),
     }
-    return {"text": text, "keyboard": build_keyboard(pid) if pick else None, "proposal": prop}
+    out = {"text": text, "keyboard": build_keyboard(pid) if pick else None, "proposal": prop,
+           "idea_text": None, "idea_keyboard": None, "idea_proposal": None}
+
+    idea = decision.get("idea")
+    if idea is not None:  # AI ตอบได้ (ไม่ใช่โหมด fallback) -> แสดงส่วน ② เสมอ
+        idea_pid = pid + "a"
+        out["idea_text"] = format_idea_message(price, idea, config)
+        if idea.get("valid"):
+            ipick = {"num": "AI", "label": "AI คิดเอง", "plan_key": "ai_free", "source": "ai_free",
+                     "direction": idea["direction"], "entry": idea["entry"], "sl": idea["sl"], "tp": idea["tp"],
+                     "rr": idea["rr"], "entry_side": idea["entry_side"], "score": None, "note": idea.get("basis")}
+            out["idea_keyboard"] = build_keyboard(idea_pid)
+        else:
+            ipick = None
+        out["idea_proposal"] = dict(prop, id=idea_pid, pick=ipick, source="ai_free",
+                                     status="open" if ipick else "info",
+                                     verdict="IDEA" if idea.get("direction") else "NO_IDEA",
+                                     confidence=idea.get("confidence"),
+                                     reasons=[x for x in (idea.get("basis"), idea.get("none_reason"), idea.get("invalid_reason")) if x],
+                                     ai_error=ai_error)
+    return out
 
 
 # ══════════════════════════════════════════════════════
@@ -477,13 +627,14 @@ def log_proposal_row(prop, decision_label=None, **extra):
     row = {
         "Proposal_ID": prop["id"], "Created_Time": prop["created_iso"], "Symbol": prop["symbol"],
         "AI_Verdict": prop["verdict"], "AI_Confidence": prop.get("confidence"),
-        "Plan_ID": f"P{pick['num']}" if pick else None,
+        "Plan_ID": (("AI" if pick.get("source") == "ai_free" else f"P{pick['num']}") if pick else None),
         "Direction": ("LONG" if pick.get("direction") == "bullish" else "SHORT") if pick else None,
         "Entry": pick.get("entry"), "SL": pick.get("sl"), "TP": pick.get("tp"), "RR": pick.get("rr"),
         "Plan_Score": pick.get("score"), "Price_At_Proposal": prop.get("price"),
         "AI_Model": prop.get("ai_model"), "AI_Reason": " | ".join(prop.get("reasons") or []),
         "AI_Error": prop.get("ai_error"), "Tokens": prop.get("tokens"),
-        "Decision": decision_label, "Tag": "ai_manual",
+        "Decision": decision_label,
+        "Tag": "ai_free" if prop.get("source") == "ai_free" else "ai_manual",
     }
     row.update(extra)
     _sheet_log(row)
@@ -568,6 +719,7 @@ def handle_callback(config, token, cq, price_fn):
     now = _now()
     item = {
         "id": pid, "symbol": prop["symbol"], "plan": pick["plan_key"], "plan_num": pick["num"],
+        "source": pick.get("source", "plan"),
         "direction": pick["direction"], "entry": pick["entry"], "sl": pick["sl"], "tp": pick["tp"], "rr": v["rr"],
         "entry_side": v["entry_side"], "status": "waiting", "placed_ts": now.timestamp(), "placed_iso": now.isoformat(),
         "expires_ts": (now + timedelta(hours=config.get("orderai_track_expiry_hours", 6))).timestamp(),
@@ -589,7 +741,7 @@ def handle_callback(config, token, cq, price_fn):
     answer("✅ บันทึกแล้ว — จะแจ้งเตือนเมื่อออเดอร์เข้า/ปิด/ควรยกเลิก")
     kind = "Limit" if v["entry_side"] == "below" else "Stop"
     send_message(token, chat_id,
-                 f"📌 <b>บันทึกออเดอร์แล้ว</b> — แผน {pick['num']} · {_dir_th(pick['direction'])}\n"
+                 f"📌 <b>บันทึกออเดอร์แล้ว</b> — {'AI คิดเอง' if pick.get('source') == 'ai_free' else 'แผน ' + str(pick['num'])} · {_dir_th(pick['direction'])}\n"
                  f"{kind} @ {pick['entry']:.2f} | SL {pick['sl']:.2f} | TP {pick['tp']:.2f} (RR {v['rr']})\n"
                  f"บอทจะเช็คทุก ~5 นาที แจ้งเมื่อ: ออเดอร์เข้า ✅ / ปิด TP-SL 🎯❌ / ควรยกเลิก ⚠️\n"
                  f"(ติดตามนานสุด {config.get('orderai_track_expiry_hours', 6)} ชม. ถ้ายังไม่เข้าจะแจ้งหมดอายุ)")
@@ -649,7 +801,8 @@ def track_orders(config, symbol, df, current_price, bias_trend=None, trend_15m=N
         lo = min(bar_lo, price) if it.get("checked_once") else price
         it["checked_once"] = True
         flags = it.setdefault("flags", {})
-        name = f"แผน {it['plan_num']} · {_dir_th(it['direction'])} @ {entry:.2f}"
+        who = "AI คิดเอง" if it.get("source") == "ai_free" else f"แผน {it['plan_num']}"
+        name = f"{who} · {_dir_th(it['direction'])} @ {entry:.2f}"
         closed = False
 
         if it["status"] == "waiting":

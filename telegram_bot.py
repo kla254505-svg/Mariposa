@@ -1095,6 +1095,11 @@ def _handle_orderai(config, token, chat_id, default_symbol, args):
         orderai.save_proposal(config, out["proposal"])
         orderai.send_message(token, chat_id, out["text"], out["keyboard"])
         orderai.log_proposal_row(out["proposal"], "PENDING" if out["keyboard"] else "NO_ENTRY")
+        if out.get("idea_text"):  # ส่วน ② ความเห็น AI เอง — ข้อความแยก ปุ่มแยก
+            ip = out["idea_proposal"]
+            orderai.save_proposal(config, ip)
+            orderai.send_message(token, chat_id, out["idea_text"], out["idea_keyboard"])
+            orderai.log_proposal_row(ip, "PENDING" if out["idea_keyboard"] else "NO_ENTRY")
     except Exception as e:
         _reply(token, chat_id, f"เกิดข้อผิดพลาดตอนประมวลผล /orderai: {e}")
 

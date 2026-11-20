@@ -223,3 +223,71 @@ def test_track_first_check_uses_price_only(kv):
     # รอบแรกหลังวาง: low ของแท่ง (3990) อาจเกิดก่อนวาง ต้องไม่ถือว่าเข้า ถ้าราคาปัจจุบันยัง 4006
     n, items, msgs = _track(kv, item_over={"checked_once": False}, lo=3990, hi=4010, price=4006)
     assert items[0]["status"] == "waiting" and not msgs
+
+
+# ───────── ส่วน ② ความเห็น AI เอง ─────────
+def test_sanitize_idea_valid_none_and_invalid():
+    ok = orderai.sanitize_idea({"direction": "LONG", "entry": 4000, "sl": 3985, "tp": 4045, "basis": "OB", "confidence": 60}, 4005, CFG)
+    assert ok["valid"] and ok["direction"] == "bullish" and ok["rr"] == 3.0
+    none = orderai.sanitize_idea({"direction": "NONE", "none_reason": "ราคากลางกรอบ"}, 4005, CFG)
+    assert none["direction"] is None and none["none_reason"] == "ราคากลางกรอบ" and not none["valid"]
+    wrong = orderai.sanitize_idea({"direction": "LONG", "entry": 4000, "sl": 4010, "tp": 4045}, 4005, CFG)
+    assert not wrong["valid"] and wrong["invalid_reason"]
+    tight = orderai.sanitize_idea({"direction": "SHORT", "entry": 4010, "sl": 4013, "tp": 3950}, 4005, CFG)
+    assert not tight["valid"] and "แคบ" in tight["invalid_reason"]
+    incomplete = orderai.sanitize_idea({"direction": "LONG", "entry": 4000}, 4005, CFG)
+    assert not incomplete["valid"] and "ไม่ครบ" in incomplete["invalid_reason"]
+    assert orderai.sanitize_idea(None, 4005, CFG)["direction"] is None
+
+
+def test_analyze_two_sections_and_ai_free_flow(monkeypatch, kv):
+    monkeypatch.setattr(orderai, "call_ai", lambda t, c: (
+        {"verdict": "WAIT", "pick": None, "reasons": ["รอก่อน"], "no_entry_reason": "",
+         "ai_idea": {"direction": "LONG", "entry": 3990, "sl": 3975, "tp": 4035, "basis": "OB 4H", "confidence": 55}},
+        None, {}))
+    out = orderai.analyze(CFG, _ctx(), [_results()[3]], "bullish", "4H", "GOLD")
+    assert out["keyboard"] is None                     # ส่วน ① ไม่มีจุดเข้า
+    assert out["idea_keyboard"] and "ความเห็นของ AI" in out["idea_text"] and "3990.00" in out["idea_text"]
+    assert "Risk" not in out["idea_text"] and "ยังไม่มีสถิติ" in out["idea_text"]
+    ip = out["idea_proposal"]
+    assert ip["id"] == out["proposal"]["id"] + "a" and ip["pick"]["source"] == "ai_free"
+
+    # กด วางแล้ว -> เข้า tracking พร้อมแท็ก ai_free
+    ip["price"] = 4005.0
+    orderai.save_proposal(CFG, ip)
+    orderai.handle_callback(CFG, "x", _cq(f"oai:p:{ip['id']}"), lambda s: 4005.0)
+    items = json.loads(kv.d["orderai_tracked_XAUUSD"])
+    assert items[0]["source"] == "ai_free" and "AI คิดเอง" not in json.dumps(items[0]["flags"])
+    rows = [r[1] for r in kv.sent if isinstance(r, tuple) and r[0] == "sheet"]
+    assert any(r.get("Tag") == "ai_free" and r.get("Plan_ID") == "AI" and r.get("Decision") == "PLACED" for r in rows)
+    # tracking: เข้าแล้วข้อความต้องเรียกว่า "AI คิดเอง"
+    orderai.track_orders(CFG, "XAUUSD", pd.DataFrame({"high": [4000], "low": [3989]}), 3995.0)
+    orderai.track_orders(CFG, "XAUUSD", pd.DataFrame({"high": [4000], "low": [3989]}), 3995.0)
+    assert any(isinstance(m, str) and "AI คิดเอง" in m and "ออเดอร์เข้าแล้ว" in m for m in kv.sent)
+
+
+def test_analyze_idea_none_and_invalid_have_no_buttons(monkeypatch, kv):
+    monkeypatch.setattr(orderai, "call_ai", lambda t, c: (
+        {"verdict": "NO", "reasons": ["x"], "ai_idea": {"direction": "NONE", "none_reason": "ไม่มีโซนชัด"}}, None, {}))
+    out = orderai.analyze(CFG, _ctx(), [], "bullish", "4H", "GOLD")
+    assert out["idea_keyboard"] is None and "จุดเข้า: ไม่มี" in out["idea_text"] and "ไม่มีโซนชัด" in out["idea_text"]
+    assert out["idea_proposal"]["status"] == "info"
+    monkeypatch.setattr(orderai, "call_ai", lambda t, c: (
+        {"verdict": "NO", "reasons": ["x"], "ai_idea": {"direction": "LONG", "entry": 4000, "sl": 4010, "tp": 4045}}, None, {}))
+    out = orderai.analyze(CFG, _ctx(), [], "bullish", "4H", "GOLD")
+    assert out["idea_keyboard"] is None and "ไม่ผ่าน" in out["idea_text"]
+
+
+def test_rules_fallback_has_no_idea_section(monkeypatch, kv):
+    monkeypatch.setattr(orderai, "call_ai", lambda t, c: (None, "AI ตอบ HTTP 400", {}))
+    assert orderai.analyze(CFG, _ctx(), _results(), "bullish", "4H", "GOLD")["idea_text"] is None
+
+
+def test_key_levels_from_ctx():
+    n = 60
+    df = pd.DataFrame({"open": [4000 + (i % 7) for i in range(n)], "high": [4005 + (i % 9) for i in range(n)],
+                       "low": [3995 - (i % 5) for i in range(n)], "close": [4001 + (i % 6) for i in range(n)]})
+    ctx = {"df_ind": df, "bias_4h": {"swing_high": 4100.0, "swing_low": 3900.0, "equilibrium_price": 4000.0}, "config": CFG}
+    kl = orderai.build_key_levels(ctx, 4003)
+    txt = "\n".join(kl)
+    assert "High/Low 24 ชม." in txt and "กรอบ 4H" in txt and "4100.00" in txt
