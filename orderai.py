@@ -806,7 +806,7 @@ def _hhmm(ts):
     return datetime.fromtimestamp(ts, THAI_TZ).strftime("%H:%M")
 
 
-def track_orders(config, symbol, df, current_price, bias_trend=None, trend_15m=None):
+def track_orders(config, symbol, df, current_price, bias_trend=None, trend_15m=None, df_5m=None):
     """เช็คออเดอร์ที่ผู้ใช้กด "วางแล้ว" ทุกตัว ส่งแจ้งเตือนเสมอ (ไม่ขึ้นกับ push_notifications_enabled
     เพราะผู้ใช้เลือกติดตามเอง) คืนจำนวนข้อความที่ส่ง"""
     bucket = config["kvdb_bucket"]
@@ -843,7 +843,18 @@ def track_orders(config, symbol, df, current_price, bias_trend=None, trend_15m=N
         # รอบแรกหลังวาง ใช้ราคาปัจจุบันอย่างเดียว (แท่งปัจจุบันอาจมี high/low ก่อนเวลาที่วาง)
         hi = max(bar_hi, price) if it.get("checked_once") else price
         lo = min(bar_lo, price) if it.get("checked_once") else price
+        # รอบถัดไป: ถ้ามีแท่ง 5M ให้กวาดทุกแท่งตั้งแต่เช็คครั้งก่อน (กัน cron ดีเลย์แล้วพลาดการแตะ Entry/SL/TP
+        # ที่ราคาแตะแล้วถอยกลับ — เดิมดูแค่แท่งสุดท้ายแท่งเดียว)
+        ref_ts = it.get("last_check_ts") or it.get("placed_ts")  # ออเดอร์เก่าที่ยังไม่มี last_check_ts ใช้เวลาที่วางแทน
+        if it.get("checked_once") and df_5m is not None and ref_ts:
+            try:
+                k = max(1, min(len(df_5m), 288, int((now.timestamp() - ref_ts) / 300) + 1))
+                hi = max(hi, float(df_5m["high"].iloc[-k:].max()))
+                lo = min(lo, float(df_5m["low"].iloc[-k:].min()))
+            except Exception:
+                pass
         it["checked_once"] = True
+        it["last_check_ts"] = now.timestamp()
         flags = it.setdefault("flags", {})
         who = "AI คิดเอง" if it.get("source") == "ai_free" else f"แผน {it['plan_num']}"
         name = f"{who} · {_dir_th(it['direction'])} @ {entry:.2f}"

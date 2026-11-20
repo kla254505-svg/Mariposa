@@ -1121,6 +1121,17 @@ def _handle_myorder(config, token, chat_id, default_symbol, args):
             items = _json.loads(kv_get(config["kvdb_bucket"], orderai._tracked_key(ctx["symbol"])) or "[]")
         except Exception:
             items = []
+        # ซิงก์สถานะออเดอร์ด้วยข้อมูลสดก่อนแสดง (ไม่ต้องรอรอบ cron ที่อาจดีเลย์) — ถ้าเข้า/ปิดแล้วจะแจ้งเตือนตามปกติ
+        try:
+            from fetch_data import fetch_twelvedata
+            df5 = fetch_twelvedata(symbol=TD_SYMBOL_MAP.get(target, target), interval="5min", outputsize=200,
+                                   api_key=config.get("twelvedata_api_key", ""))
+            orderai.track_orders(ctx["config"], ctx["symbol"], ctx["df_ind"], float(ctx["df_ind"]["close"].iloc[-1]),
+                                 bias_trend=(ctx.get("bias_4h") or {}).get("trend"),
+                                 trend_15m=(ctx.get("structure") or {}).get("trend"), df_5m=df5)
+            items = _json.loads(kv_get(config["kvdb_bucket"], orderai._tracked_key(ctx["symbol"])) or "[]")
+        except Exception as e:
+            print(f"[myorder] sync สถานะไม่สำเร็จ ใช้ข้อมูลที่บันทึกไว้แทน: {e}")
         master_trend, _src = determine_master_trend(ctx.get("bias_4h"), ctx["structure"])
         out = orderai.review_orders(ctx["config"], ctx, items, master_trend, _symbol_label(target))
         for p in out["proposals"]:

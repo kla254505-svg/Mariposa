@@ -365,3 +365,22 @@ def test_replace_refused_if_old_already_filled_and_keep_old(monkeypatch, kv):
     orderai.handle_callback(CFG, "x", _cq(f"oai:n:{p2['id']}"), lambda s: 4005.0)
     assert json.loads(orderai.load_proposal.__globals__["kv_get"]("t", f"orderai_prop_{p2['id']}"))["status"] == "skipped"
     assert [x["id"] for x in json.loads(kv.d["orderai_tracked_XAUUSD"])] == ["old11111"]
+
+
+def test_track_sweeps_5m_bars_after_delayed_cron(kv):
+    # cron ดีเลย์: ราคาแตะ Entry ไปแล้วแต่ตอนนี้ถอยกลับมาต่ำกว่า Entry — ต้องจับได้จากแท่ง 5M
+    it = {"id": "d1", "symbol": "XAUUSD", "plan": "ai_free", "plan_num": "AI", "source": "ai_free", "direction": "bearish",
+          "entry": 4010.0, "sl": 4025.0, "tp": 3965.0, "rr": 3.0, "entry_side": "above", "status": "waiting",
+          "placed_ts": time.time() - 3000, "expires_ts": time.time() + 9999, "flags": {}, "checked_once": True,
+          "last_check_ts": time.time() - 1500}
+    kv.d["orderai_tracked_XAUUSD"] = json.dumps([it])
+    df15 = pd.DataFrame({"high": [4002.0], "low": [3998.0]})
+    df5 = pd.DataFrame({"high": [4001.0, 4011.0, 4003.0, 4002.0, 4001.0, 4000.0], "low": [3995.0] * 6})
+    orderai.track_orders(CFG, "XAUUSD", df15, 4000.0, df_5m=df5)
+    assert json.loads(kv.d["orderai_tracked_XAUUSD"])[0]["status"] == "running"
+    assert any(isinstance(m, str) and "ออเดอร์เข้าแล้ว" in m for m in kv.sent)
+    # ไม่ส่ง df_5m -> พฤติกรรมเดิม (ดูแค่แท่งสุดท้าย) ไม่พัง
+    it["status"] = "waiting"; it["last_check_ts"] = time.time() - 1500
+    kv.d["orderai_tracked_XAUUSD"] = json.dumps([it])
+    orderai.track_orders(CFG, "XAUUSD", df15, 4000.0)
+    assert json.loads(kv.d["orderai_tracked_XAUUSD"])[0]["status"] == "waiting"

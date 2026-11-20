@@ -664,7 +664,7 @@ if __name__ == "__main__":
                     _st15 = analyze_structure(add_indicators(df, CONFIG), CONFIG)
                     orderai.track_orders(CONFIG, display_symbol, df, current_price,
                                          bias_trend=(bias_4h or {}).get("trend"),
-                                         trend_15m=(_st15 or {}).get("trend"))
+                                         trend_15m=(_st15 or {}).get("trend"), df_5m=df_5m)
             except Exception as e:
                 print(f"[OrderAI Tracking Error] {display_symbol}: {e}")
 
