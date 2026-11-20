@@ -1104,6 +1104,34 @@ def _handle_orderai(config, token, chat_id, default_symbol, args):
         _reply(token, chat_id, f"เกิดข้อผิดพลาดตอนประมวลผล /orderai: {e}")
 
 
+def _handle_myorder(config, token, chat_id, default_symbol, args):
+    """/myorder — สถานะออเดอร์ที่กด ✅ วางแล้ว + AI แนะนำ รอต่อ/ยกเลิก/ขยับ (ดู orderai.review_orders)"""
+    import orderai
+    import json as _json
+    from kvstore import kv_get
+    target, err = _resolve_symbol_arg(args, default_symbol)
+    if err:
+        _reply(token, chat_id, err)
+        return
+    _reply(token, chat_id, "⏳ กำลังเช็คออเดอร์ที่ติดตามอยู่...")
+    try:
+        _CONTEXT_CACHE.pop(target, None)
+        ctx = _build_command_context(target, config)
+        try:
+            items = _json.loads(kv_get(config["kvdb_bucket"], orderai._tracked_key(ctx["symbol"])) or "[]")
+        except Exception:
+            items = []
+        master_trend, _src = determine_master_trend(ctx.get("bias_4h"), ctx["structure"])
+        out = orderai.review_orders(ctx["config"], ctx, items, master_trend, _symbol_label(target))
+        for p in out["proposals"]:
+            orderai.save_proposal(config, p)
+        orderai.send_message(token, chat_id, out["text"], out["keyboard"])
+        for p in out["proposals"]:
+            orderai.log_proposal_row(p, "PENDING")
+    except Exception as e:
+        _reply(token, chat_id, f"เกิดข้อผิดพลาดตอนประมวลผล /myorder: {e}")
+
+
 def _handle_callback_query(config, token, cq):
     """กดปุ่ม inline ของ /orderai (✅ วางแล้ว / ❌ ไม่วาง) — เฉพาะเจ้าของบอท (เช็คใน orderai.handle_callback)"""
     import orderai
@@ -1347,6 +1375,10 @@ def run_polling_loop(config, symbol="XAUUSD"):
                     # /orderai ใช้ได้เฉพาะเจ้าของบอท (มีปุ่มบันทึกออเดอร์) คนในกลุ่มพิมพ์จะถูกเมิน
                     if is_owner:
                         _handle_orderai(config, token, message["chat"]["id"], symbol, command_args)
+                    continue
+                if command == "myorder":
+                    if is_owner:  # มีปุ่มขยับออเดอร์ ใช้ได้เฉพาะเจ้าของบอท
+                        _handle_myorder(config, token, message["chat"]["id"], symbol, command_args)
                     continue
                 handler = COMMAND_HANDLERS.get(command)
                 chat_id = message["chat"]["id"]

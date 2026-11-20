@@ -291,3 +291,77 @@ def test_key_levels_from_ctx():
     kl = orderai.build_key_levels(ctx, 4003)
     txt = "\n".join(kl)
     assert "High/Low 24 ชม." in txt and "กรอบ 4H" in txt and "4100.00" in txt
+
+
+# ───────── /myorder + ชื่อชนิดออเดอร์ ─────────
+def test_order_type_name_by_direction():
+    assert orderai.order_type_name("bullish", "below", False) == "Buy Limit"
+    assert orderai.order_type_name("bullish", "above", False) == "Buy Stop"
+    assert orderai.order_type_name("bearish", "above", False) == "Sell Limit"   # กรณีในรูป: SHORT Entry เหนือราคา
+    assert orderai.order_type_name("bearish", "below", False) == "Sell Stop"
+
+
+def _tracked(kv, **over):
+    it = {"id": "old11111", "symbol": "XAUUSD", "plan": "ai_free", "plan_num": "AI", "source": "ai_free", "direction": "bearish",
+          "entry": 4010.0, "sl": 4025.0, "tp": 3965.0, "rr": 3.0, "entry_side": "above", "status": "waiting",
+          "placed_ts": time.time() - 1800, "placed_iso": "x", "expires_ts": time.time() + 3600 * 5, "bias_at": "bearish",
+          "trend15_at": "bearish", "flags": {}, "checked_once": True}
+    it.update(over)
+    kv.d["orderai_tracked_XAUUSD"] = json.dumps([it])
+    return it
+
+
+def test_myorder_empty_and_rules_fallback(monkeypatch, kv):
+    monkeypatch.setattr(orderai, "_post_ai", lambda p, c: (None, "AI ตอบ HTTP 400", {}))
+    out = orderai.review_orders(CFG, _ctx(), [], "bullish", "GOLD")
+    assert "ไม่มีออเดอร์ที่ติดตาม" in out["text"] and out["keyboard"] is None
+    it = _tracked(kv)
+    out = orderai.review_orders(CFG, _ctx(), [it], "bullish", "GOLD")   # ctx เทรนด์ขึ้น = สวน SHORT -> กฎแนะนำยกเลิก
+    assert "ควรยกเลิก" in out["text"] and "Sell Limit" in out["text"] and out["keyboard"] is None
+
+
+def test_myorder_ai_move_valid_and_replace_flow(monkeypatch, kv):
+    it = _tracked(kv)
+    monkeypatch.setattr(orderai, "_post_ai", lambda p, c: ({"orders": [
+        {"id": "old11111", "action": "MOVE", "reason": "โซนเลื่อนลง", "new_entry": 4008, "new_sl": 4020, "new_tp": 3970}]}, None, {}))
+    out = orderai.review_orders(CFG, _ctx(), [it], "bearish", "GOLD")
+    assert out["keyboard"] and "ยกเลิกออเดอร์เดิมในโบรก" in out["text"] and "4008.00" in out["text"]
+    p = out["proposals"][0]
+    assert p["replaces"] == "old11111" and p["tag"] == "ai_move"
+    orderai.save_proposal(CFG, p)
+    orderai.handle_callback(CFG, "x", _cq(f"oai:r:{p['id']}"), lambda s: 4005.0)
+    items = json.loads(kv.d["orderai_tracked_XAUUSD"])
+    assert [x["id"] for x in items] == [p["id"]] and items[0]["entry"] == 4008.0 and items[0]["replaces"] == "old11111"
+    rows = [r[1] for r in kv.sent if isinstance(r, tuple) and r[0] == "sheet"]
+    assert any(r.get("Result") == "REPLACED" and r.get("Proposal_ID") == "old11111" for r in rows)
+    assert any(r.get("Tag") == "ai_move" and r.get("Decision") == "PLACED" for r in rows)
+
+
+def test_myorder_move_invalid_downgrades_and_running_cannot_move(monkeypatch, kv):
+    it = _tracked(kv)
+    monkeypatch.setattr(orderai, "_post_ai", lambda p, c: ({"orders": [
+        {"id": "old11111", "action": "MOVE", "reason": "x", "new_entry": 4008, "new_sl": 3990, "new_tp": 3970}]}, None, {}))
+    out = orderai.review_orders(CFG, _ctx(), [it], "bearish", "GOLD")
+    assert out["keyboard"] is None and "ไม่ผ่านการตรวจ" in out["text"]
+    run = _tracked(kv, status="running")
+    monkeypatch.setattr(orderai, "_post_ai", lambda p, c: ({"orders": [
+        {"id": "old11111", "action": "MOVE", "reason": "x", "new_entry": 4008, "new_sl": 4020, "new_tp": 3970}]}, None, {}))
+    out = orderai.review_orders(CFG, _ctx(), [run], "bearish", "GOLD")   # MOVE ไม่ถูกยอมรับกับออเดอร์ที่วิ่งอยู่ -> ใช้กฎ
+    assert out["keyboard"] is None and "ถือต่อ" in out["text"]
+
+
+def test_replace_refused_if_old_already_filled_and_keep_old(monkeypatch, kv):
+    it = _tracked(kv)
+    monkeypatch.setattr(orderai, "_post_ai", lambda p, c: ({"orders": [
+        {"id": "old11111", "action": "MOVE", "reason": "x", "new_entry": 4008, "new_sl": 4020, "new_tp": 3970}]}, None, {}))
+    p = orderai.review_orders(CFG, _ctx(), [it], "bearish", "GOLD")["proposals"][0]
+    orderai.save_proposal(CFG, p)
+    _tracked(kv, status="running")                      # ระหว่างนั้นออเดอร์เดิมเข้าแล้ว
+    orderai.handle_callback(CFG, "x", _cq(f"oai:r:{p['id']}"), lambda s: 4005.0)
+    items = json.loads(kv.d["orderai_tracked_XAUUSD"])
+    assert [x["id"] for x in items] == ["old11111"]     # ไม่แตะของเดิม ไม่เพิ่มของใหม่
+    p2 = orderai.review_orders(CFG, _ctx(), [it], "bearish", "GOLD")["proposals"][0]
+    orderai.save_proposal(CFG, p2)
+    orderai.handle_callback(CFG, "x", _cq(f"oai:n:{p2['id']}"), lambda s: 4005.0)
+    assert json.loads(orderai.load_proposal.__globals__["kv_get"]("t", f"orderai_prop_{p2['id']}"))["status"] == "skipped"
+    assert [x["id"] for x in json.loads(kv.d["orderai_tracked_XAUUSD"])] == ["old11111"]

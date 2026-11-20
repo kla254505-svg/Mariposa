@@ -70,6 +70,18 @@ def _dir_th(direction):
     return "LONG (ซื้อ)" if direction == "bullish" else "SHORT (ขาย)"
 
 
+def order_type_name(direction, entry_side, with_hint=True):
+    """ชื่อชนิดออเดอร์ตามที่โบรกใช้ (ขึ้นกับทิศ + Entry อยู่เหนือ/ใต้ราคา)
+    entry_side 'below' = Entry ต่ำกว่าราคาตอนนั้น: LONG=Buy Limit, SHORT=Sell Stop
+    entry_side 'above' = Entry สูงกว่าราคา: LONG=Buy Stop, SHORT=Sell Limit"""
+    bull = direction == "bullish"
+    if entry_side == "below":
+        name, hint = ("Buy Limit", "รอราคาย่อลงมา") if bull else ("Sell Stop", "รอราคาทะลุลง")
+    else:
+        name, hint = ("Buy Stop", "รอราคาทะลุขึ้น") if bull else ("Sell Limit", "รอราคาเด้งขึ้นมา")
+    return f"{name} ({hint})" if with_hint else name
+
+
 # ══════════════════════════════════════════════════════
 # 1) ตรวจ setup ด้วยกฎในโค้ด (ไม่พึ่ง AI)
 # ══════════════════════════════════════════════════════
@@ -158,7 +170,7 @@ SYSTEM_PROMPT = """คุณเป็นผู้ช่วยตัดสิน�
  "risk_note":"คำเตือนสั้นๆ 1 บรรทัด หรือสตริงว่าง",
  "no_entry_reason":"ถ้าส่วน ① ไม่มีจุดเข้า: สาเหตุสั้นๆ 1-2 ประโยค ไม่งั้นสตริงว่าง",
  "ai_idea":{"direction":"LONG|SHORT|NONE","entry":<ตัวเลขหรือ null>,"sl":<ตัวเลขหรือ null>,"tp":<ตัวเลขหรือ null>,
-           "basis":"อ้างอิงระดับไหน/ทำไม 1 ประโยค","confidence":<0-100 หรือ null>,
+           "basis":"อ้างอิงระดับไหน/ทำไม 1 ประโยค (ห้ามเขียนชื่อชนิดออเดอร์ Limit/Stop โค้ดจะแสดงเอง)","confidence":<0-100 หรือ null>,
            "none_reason":"ถ้า NONE: สาเหตุสั้นๆ 1-2 ประโยค ไม่งั้นสตริงว่าง"}}
 reasons แต่ละข้อไม่เกิน ~110 ตัวอักษร ภาษาไทยอ่านง่าย"""
 
@@ -303,17 +315,11 @@ def _extract_json(text):
     return json.loads(t[a:b + 1])
 
 
-def call_ai(context_text, config):
-    """คืน (parsed|None, error|None, usage dict) — ไม่โยน exception"""
+def _post_ai(payload, config):
+    """ยิง Anthropic API คืน (parsed|None, error|None, usage)"""
     key = config.get("anthropic_api_key")
     if not key:
         return None, "ยังไม่ได้ตั้งค่า ANTHROPIC_API_KEY", {}
-    payload = {
-        "model": config.get("ai_model", "claude-sonnet-5-5"),
-        "max_tokens": config.get("orderai_max_tokens", 3000),
-        "system": SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": context_text}],
-    }
     headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_API_VERSION, "content-type": "application/json"}
     try:
         resp = requests.post(ANTHROPIC_API_URL, headers=headers, json=payload,
@@ -334,6 +340,22 @@ def call_ai(context_text, config):
         return _extract_json(text), None, usage
     except Exception as e:
         return None, f"อ่านคำตอบ AI ไม่ได้: {e}", {}
+
+
+def _call_ai_payload(payload, config):
+    parsed, err, _usage = _post_ai(payload, config)
+    return parsed, err
+
+
+def call_ai(context_text, config):
+    """คืน (parsed|None, error|None, usage dict) — ไม่โยน exception"""
+    payload = {
+        "model": config.get("ai_model", "claude-sonnet-5-5"),
+        "max_tokens": config.get("orderai_max_tokens", 3000),
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": context_text}],
+    }
+    return _post_ai(payload, config)
 
 
 def sanitize_idea(raw, price, config):
@@ -444,7 +466,7 @@ def format_message(symbol_label, price, decision, cands, ai_error, config, bucke
     pick = next((c for c in cands if c["num"] == decision["pick"]), None) if decision["pick"] else None
     lines.append("")
     if pick:
-        kind = "Limit (รอราคาย่อมา)" if pick["entry_side"] == "below" else "Stop (รอราคาทะลุไป)"
+        kind = order_type_name(pick["direction"], pick["entry_side"])
         lines += [
             f"📍 <b>จุดเข้า — {_esc(pick['label'])} · {_dir_th(pick['direction'])}</b>",
             f"Entry ({kind}): <b>{pick['entry']:.2f}</b>",
@@ -494,7 +516,7 @@ def format_idea_message(price, idea, config):
         if idea.get("basis"):
             lines.append(f"แนวคิด AI: {_esc(idea['basis'])}")
         return "\n".join(lines)
-    kind = "Limit (รอราคาย่อมา)" if idea["entry_side"] == "below" else "Stop (รอราคาทะลุไป)"
+    kind = order_type_name(idea["direction"], idea["entry_side"])
     dist = abs(idea["entry"] - price)
     lines += [
         f"📍 <b>จุดเข้า — {_dir_th(idea['direction'])}</b>"
@@ -634,7 +656,7 @@ def log_proposal_row(prop, decision_label=None, **extra):
         "AI_Model": prop.get("ai_model"), "AI_Reason": " | ".join(prop.get("reasons") or []),
         "AI_Error": prop.get("ai_error"), "Tokens": prop.get("tokens"),
         "Decision": decision_label,
-        "Tag": "ai_free" if prop.get("source") == "ai_free" else "ai_manual",
+        "Tag": prop.get("tag") or ("ai_free" if prop.get("source") == "ai_free" else "ai_manual"),
     }
     row.update(extra)
     _sheet_log(row)
@@ -686,6 +708,13 @@ def handle_callback(config, token, cq, price_fn):
         log_proposal_row(prop, "EXPIRED")
         return
 
+    if action == "n":  # /myorder: ไม่ขยับ -> ติดตามออเดอร์เดิมต่อ
+        prop["status"] = "skipped"
+        save_proposal(config, prop)
+        strip_buttons()
+        answer("รับทราบ ไม่ขยับ — ติดตามออเดอร์เดิมต่อ")
+        return
+
     if action == "s":
         prop["status"] = "skipped"
         save_proposal(config, prop)
@@ -694,7 +723,7 @@ def handle_callback(config, token, cq, price_fn):
         log_proposal_row(prop, "NOT_PLACED", Decision_Time=_now().isoformat())
         return
 
-    if action != "p":
+    if action not in ("p", "r"):
         return
 
     pick = prop["pick"]
@@ -719,7 +748,7 @@ def handle_callback(config, token, cq, price_fn):
     now = _now()
     item = {
         "id": pid, "symbol": prop["symbol"], "plan": pick["plan_key"], "plan_num": pick["num"],
-        "source": pick.get("source", "plan"),
+        "source": pick.get("source", "plan"), "tag": prop.get("tag"),
         "direction": pick["direction"], "entry": pick["entry"], "sl": pick["sl"], "tp": pick["tp"], "rr": v["rr"],
         "entry_side": v["entry_side"], "status": "waiting", "placed_ts": now.timestamp(), "placed_iso": now.isoformat(),
         "expires_ts": (now + timedelta(hours=config.get("orderai_track_expiry_hours", 6))).timestamp(),
@@ -731,6 +760,18 @@ def handle_callback(config, token, cq, price_fn):
         items = json.loads(kv_get(config["kvdb_bucket"], key) or "[]")
     except Exception:
         items = []
+    replaced_old = None
+    if action == "r":  # /myorder: ยกเลิกออเดอร์เดิม + ติดตามค่าใหม่แทน
+        old = next((x for x in items if x["id"] == prop.get("replaces")), None)
+        if old is None or old.get("status") != "waiting":
+            prop["status"] = "refused"
+            save_proposal(config, prop)
+            strip_buttons()
+            answer("ออเดอร์เดิมเข้าแล้ว/ปิดแล้ว/ไม่อยู่ในรายการ จึงไม่ควรวางใหม่ ดู /myorder อีกครั้ง", alert=True)
+            return
+        replaced_old = old
+        items = [x for x in items if x["id"] != old["id"]]
+        item["replaces"] = old["id"]
     items.append(item)
     if not kv_set(config["kvdb_bucket"], key, json.dumps(items)):
         answer("บันทึกไม่สำเร็จ (ฐานข้อมูลมีปัญหา) ลองกดใหม่อีกครั้ง", alert=True)
@@ -739,9 +780,12 @@ def handle_callback(config, token, cq, price_fn):
     save_proposal(config, prop)
     strip_buttons()
     answer("✅ บันทึกแล้ว — จะแจ้งเตือนเมื่อออเดอร์เข้า/ปิด/ควรยกเลิก")
-    kind = "Limit" if v["entry_side"] == "below" else "Stop"
+    if replaced_old:
+        _sheet_log({"Proposal_ID": replaced_old["id"], "Order_Status": "CANCELLED", "Result": "REPLACED",
+                    "Cancel_Reason": f"ขยับเป็นออเดอร์ใหม่ {pid}", "Close_Time": now.isoformat()})
+    kind = order_type_name(pick["direction"], v["entry_side"], with_hint=False)
     send_message(token, chat_id,
-                 f"📌 <b>บันทึกออเดอร์แล้ว</b> — {'AI คิดเอง' if pick.get('source') == 'ai_free' else 'แผน ' + str(pick['num'])} · {_dir_th(pick['direction'])}\n"
+                 f"📌 <b>{'ย้ายไปติดตามออเดอร์ใหม่แล้ว (เลิกติดตามอันเดิม — อย่าลืมยกเลิกอันเดิมในโบรก)' if replaced_old else 'บันทึกออเดอร์แล้ว'}</b> — {'AI คิดเอง' if pick.get('source') == 'ai_free' else 'แผน ' + str(pick['num'])} · {_dir_th(pick['direction'])}\n"
                  f"{kind} @ {pick['entry']:.2f} | SL {pick['sl']:.2f} | TP {pick['tp']:.2f} (RR {v['rr']})\n"
                  f"บอทจะเช็คทุก ~5 นาที แจ้งเมื่อ: ออเดอร์เข้า ✅ / ปิด TP-SL 🎯❌ / ควรยกเลิก ⚠️\n"
                  f"(ติดตามนานสุด {config.get('orderai_track_expiry_hours', 6)} ชม. ถ้ายังไม่เข้าจะแจ้งหมดอายุ)")
@@ -885,3 +929,168 @@ def track_orders(config, symbol, df, current_price, bias_trend=None, trend_15m=N
     if changed or True:  # checked_once ต้องบันทึกเสมอ
         kv_set(bucket, key, json.dumps(keep))
     return sent
+
+
+# ══════════════════════════════════════════════════════
+# 7) /myorder — สถานะออเดอร์ที่ติดตามอยู่ + AI แนะนำ รอต่อ/ยกเลิก/ขยับ
+# ══════════════════════════════════════════════════════
+MYORDER_PROMPT = """คุณเป็นผู้ช่วยดูแลออเดอร์ทอง (XAUUSD) ที่เจ้าของบอทวางไว้เองในโบรกและบอทกำลังติดตามอยู่ เขาอ่านภาษาไทยง่ายๆ
+ให้ประเมินออเดอร์แต่ละตัวจากข้อมูลที่ให้ แล้วแนะนำ:
+- ออเดอร์สถานะ waiting (ยังไม่เข้า): HOLD (รอต่อ) / CANCEL (ควรยกเลิก) / MOVE (ควรยกเลิกแล้ววางใหม่ที่ค่าใหม่)
+- ออเดอร์สถานะ running (เข้าแล้ว): HOLD (ถือต่อ) หรือ CLOSE (ควรพิจารณาปิดก่อนถึง TP/SL) ห้ามเสนอ MOVE เพราะออเดอร์เข้าไปแล้ว
+กติกา:
+1. MOVE ต้องเป็นทิศเดิมเท่านั้น และให้ new_entry/new_sl/new_tp ที่อิงระดับราคาจริงใน KEY LEVELS ห่าง SL อย่างน้อย min_sl_distance และ RR อย่างน้อย min_rr (โค้ดจะตรวจซ้ำ ไม่ผ่านจะตีตก)
+2. เสนอ MOVE เมื่อกรอบเดิมไม่ตรงโครงสร้างราคาตอนนี้แล้วแต่ทิศยังน่าเชื่อ ถ้าทิศเองก็พังแล้วให้ CANCEL ถ้าเดิมยังดีอยู่ให้ HOLD ไม่ต้องขยับพร่ำเพรื่อ
+3. ตัดสินจากหลักฐาน (เทรนด์ 4H/1H/15M เทียบตอนวาง, ระยะราคาห่าง Entry, เวลาที่รอ, ข่าว) ห้ามแต่งข้อมูลที่ไม่มี
+4. ห้ามเขียนชื่อชนิดออเดอร์ (Limit/Stop) ในเหตุผล โค้ดแสดงเอง
+ตอบเป็น JSON ก้อนเดียว ไม่มี markdown:
+{"orders":[{"id":"<id ที่ให้มา>","action":"HOLD|CANCEL|MOVE|CLOSE","reason":"เหตุผลสั้นๆ ไม่เกิน ~120 ตัวอักษร",
+ "new_entry":<ตัวเลขหรือ null>,"new_sl":<ตัวเลขหรือ null>,"new_tp":<ตัวเลขหรือ null>}]}"""
+
+
+def order_facts(it, price, bias_trend, trend_15m, now_ts=None):
+    """ข้อเท็จจริงของออเดอร์ที่ติดตามอยู่ (คำนวณจากกฎ ไม่พึ่ง AI)"""
+    now_ts = now_ts or time.time()
+    bull = it["direction"] == "bullish"
+    entry, sl, tp = it["entry"], it["sl"], it["tp"]
+    f = {
+        "id": it["id"], "status": it["status"], "waited_min": int((now_ts - it["placed_ts"]) / 60),
+        "expires_in_min": int((it["expires_ts"] - now_ts) / 60) if it["status"] == "waiting" else None,
+        "dist_to_entry": round(price - entry, 2),
+        "progress": round((price - entry) / (tp - entry), 2),
+        "opp_trend4h": bias_trend == ("bearish" if bull else "bullish"),
+        "opp_trend15": trend_15m == ("bearish" if bull else "bullish"),
+        "flags": sorted((it.get("flags") or {}).keys()),
+    }
+    if it["status"] == "running":
+        risk = abs(entry - sl) or 1
+        f["open_r"] = round(((price - entry) if bull else (entry - price)) / risk, 2)
+    return f
+
+
+def _item_name(it):
+    who = "AI คิดเอง" if it.get("source") == "ai_free" else f"แผน {it['plan_num']}"
+    return f"{who} · {_dir_th(it['direction'])}"
+
+
+def rules_review(it, facts):
+    """คำแนะนำจากกฎล้วน (ใช้เมื่อ AI ใช้ไม่ได้)"""
+    if it["status"] == "running":
+        return {"action": "HOLD", "reason": "ออเดอร์เข้าแล้ว รอ TP/SL ตามแผน"}
+    if facts["opp_trend4h"] or facts["opp_trend15"]:
+        return {"action": "CANCEL", "reason": "เทรนด์พลิกสวนทิศออเดอร์แล้ว ออเดอร์ยังไม่เข้า"}
+    if facts["progress"] >= 0.3:
+        return {"action": "CANCEL", "reason": f"ราคาวิ่งไปทาง TP แล้ว {facts['progress'] * 100:.0f}% โดยยังไม่เข้า"}
+    return {"action": "HOLD", "reason": "ยังไม่มีสัญญาณให้เปลี่ยนแผน รอต่อ"}
+
+
+def sanitize_review(raw, items, facts_by_id, price, config):
+    """ตรวจคำแนะนำ AI รายออเดอร์ -> dict id -> {action, reason, new(optional dict), note}"""
+    by_id = {r.get("id"): r for r in (raw.get("orders") or []) if isinstance(r, dict)}
+    out = {}
+    for it in items:
+        r = by_id.get(it["id"])
+        if not r:
+            continue
+        action = str(r.get("action", "")).upper().strip()
+        reason = str(r.get("reason") or "").strip()[:200]
+        running = it["status"] == "running"
+        if action not in (("HOLD", "CLOSE") if running else ("HOLD", "CANCEL", "MOVE")):
+            continue
+        rec = {"action": action, "reason": reason}
+        if action == "MOVE":
+            v = validate_trade(it["direction"], r.get("new_entry"), r.get("new_sl"), r.get("new_tp"), price, config)
+            if v["ok"]:
+                rec["new"] = {"entry": round(float(r["new_entry"]), 3), "sl": round(float(r["new_sl"]), 3),
+                              "tp": round(float(r["new_tp"]), 3), "rr": v["rr"], "entry_side": v["entry_side"]}
+            else:
+                rec["action"] = "HOLD"
+                rec["note"] = f"AI เสนอขยับแต่ค่าใหม่ไม่ผ่านการตรวจ ({v['reason']}) จึงให้รอต่อ/ตัดสินใจเอง"
+        out[it["id"]] = rec
+    return out
+
+
+def review_orders(config, ctx, items, master_trend, symbol_label):
+    """ทำทั้งกระบวนการของ /myorder คืน dict: text, keyboard|None, proposals(list ของข้อเสนอขยับ)"""
+    df = ctx["df_ind"]
+    price = float(df["close"].iloc[-1])
+    bias = (ctx.get("bias_4h") or {}).get("trend")
+    t15 = (ctx.get("structure") or {}).get("trend")
+    facts = {it["id"]: order_facts(it, price, bias, t15) for it in items}
+
+    ai_error, recs = None, {}
+    if items:
+        lines = [f"Symbol: {ctx['symbol']}", f"เวลา (ไทย): {datetime.now(THAI_TZ).strftime('%Y-%m-%d %H:%M')}",
+                 f"ราคาปัจจุบัน: {price:.2f}",
+                 f"เกณฑ์ที่โค้ดใช้ตรวจ: min_sl_distance={config.get('min_sl_distance')} min_rr={config.get('min_rr', 1.2)}",
+                 f"เทรนด์ตอนนี้: 4H={_fmt(bias)} 1H={_fmt(ctx.get('higher_tf_trend'))} 15M={_fmt(t15)} (ทิศ 'bullish'=ขึ้น 'bearish'=ลง)"]
+        news = _upcoming_news(config, ctx["symbol"])
+        lines.append("ข่าวใกล้ๆ: " + ("; ".join(news) if news else "ไม่มีในช่วง 3 ชม. ข้างหน้า"))
+        lines += ["", "== KEY LEVELS =="] + (build_key_levels(ctx, price) or ["not_available"]) + ["", "== ออเดอร์ที่ติดตามอยู่ =="]
+        for it in items:
+            f = facts[it["id"]]
+            lines.append(
+                f"id={it['id']} | {_item_name(it)} | ชนิด {order_type_name(it['direction'], it['entry_side'], False)} | "
+                f"Entry {it['entry']} SL {it['sl']} TP {it['tp']} RR {it['rr']} | สถานะ {it['status']} | "
+                f"วางมา {f['waited_min']} นาที" + (f" หมดอายุอีก {f['expires_in_min']} นาที" if f["expires_in_min"] is not None else "")
+                + f" | ราคาห่าง Entry {f['dist_to_entry']:+.2f} | ความคืบหน้าไป TP {f['progress'] * 100:.0f}%"
+                + (f" | กำไร/ขาดทุนตอนนี้ {f['open_r']:+.2f}R" if "open_r" in f else "")
+                + f" | เทรนด์ตอนวาง 4H={_fmt(it.get('bias_at'))} 15M={_fmt(it.get('trend15_at'))}"
+                + f" | เทรนด์พลิกสวนทิศแล้ว 4H={'ใช่' if f['opp_trend4h'] else 'ไม่'} 15M={'ใช่' if f['opp_trend15'] else 'ไม่'}")
+        payload = {"model": config.get("ai_model", "claude-sonnet-5-5"), "max_tokens": config.get("orderai_max_tokens", 3000),
+                   "system": MYORDER_PROMPT, "messages": [{"role": "user", "content": "\n".join(lines)}]}
+        parsed, ai_error = _call_ai_payload(payload, config)
+        if parsed is not None:
+            try:
+                recs = sanitize_review(parsed, items, facts, price, config)
+            except Exception as e:
+                ai_error = f"คำตอบ AI ไม่ตรงรูปแบบ: {e}"
+
+    out_lines = [f"📋 <b>/myorder — {_esc(symbol_label)}</b>", f"ราคา {price:.2f} · {datetime.now(THAI_TZ).strftime('%H:%M')} น.", ""]
+    proposals, kb_rows = [], []
+    if not items:
+        out_lines.append("ตอนนี้ไม่มีออเดอร์ที่ติดตามอยู่\nกด ✅ วางแล้ว จาก /orderai ก่อน บอทถึงจะเริ่มติดตามให้")
+    for n, it in enumerate(items, 1):
+        f = facts[it["id"]]
+        rec = recs.get(it["id"]) or rules_review(it, f)
+        run = it["status"] == "running"
+        head = f"<b>#{n} {_esc(_item_name(it))}</b> · {order_type_name(it['direction'], it['entry_side'], False)} @ {it['entry']:.2f}"
+        state = ("🏃 เข้าแล้ว กำลังวิ่ง" + (f" ({f['open_r']:+.2f}R)" if "open_r" in f else "")) if run else \
+                f"⏳ รอเข้า · วางมา {f['waited_min']} นาที (หมดอายุอีก {max(f['expires_in_min'], 0)} นาที)"
+        out_lines += [head, state,
+                      f"SL {it['sl']:.2f} | TP {it['tp']:.2f} (RR {it['rr']}) · ราคาห่าง Entry {f['dist_to_entry']:+.1f}"
+                      + ("" if run else f" · ไป TP แล้ว {max(f['progress'], 0) * 100:.0f}%")]
+        act = rec["action"]
+        if act == "HOLD":
+            out_lines.append(f"✅ <b>{'ถือต่อ' if run else 'รอต่อ'}</b> — {_esc(rec['reason'])}")
+        elif act == "CANCEL":
+            out_lines.append(f"⚠️ <b>ควรยกเลิก</b> — {_esc(rec['reason'])}")
+        elif act == "CLOSE":
+            out_lines.append(f"⚠️ <b>ควรพิจารณาปิดก่อน</b> — {_esc(rec['reason'])}")
+        elif act == "MOVE":
+            nw = rec["new"]
+            out_lines.append(f"🔄 <b>ควรขยับ</b> — {_esc(rec['reason'])}")
+            out_lines.append(f"👉 ยกเลิกออเดอร์เดิมในโบรก แล้ววางใหม่: {order_type_name(it['direction'], nw['entry_side'], False)} "
+                             f"<b>{nw['entry']:.2f}</b> | SL <b>{nw['sl']:.2f}</b> | TP <b>{nw['tp']:.2f}</b> (RR {nw['rr']})")
+            npid = uuid.uuid4().hex[:8]
+            now = _now()
+            proposals.append({
+                "id": npid, "symbol": it["symbol"], "created_ts": time.time(), "created_iso": now.isoformat(), "status": "open",
+                "price": price, "verdict": "MOVE", "confidence": None, "reasons": [rec["reason"]],
+                "pick": {"num": it["plan_num"], "label": _item_name(it), "plan_key": it["plan"], "source": it.get("source", "plan"),
+                         "direction": it["direction"], "entry": nw["entry"], "sl": nw["sl"], "tp": nw["tp"], "rr": nw["rr"],
+                         "entry_side": nw["entry_side"], "score": None, "note": None},
+                "ai_model": config.get("ai_model"), "ai_error": None, "tokens": None, "bias_4h": bias, "trend_15m": t15,
+                "replaces": it["id"], "tag": "ai_move", "source": it.get("source", "plan"),
+            })
+            kb_rows.append([{"text": f"✅ #{n} วางใหม่แล้ว", "callback_data": f"oai:r:{npid}"},
+                            {"text": f"❌ #{n} ไม่ขยับ", "callback_data": f"oai:n:{npid}"}])
+        if rec.get("note"):
+            out_lines.append(f"ℹ️ {_esc(rec['note'])}")
+        out_lines.append("")
+    if ai_error:
+        out_lines.append(f"🛠 AI: {_esc(ai_error)[:160]} (ใช้คำแนะนำจากกฎแทน)")
+    if kb_rows:
+        out_lines.append(f"👇 ถ้าขยับจริง กดวางใหม่ (ปุ่มหมดอายุใน {config.get('orderai_button_ttl_minutes', 15)} นาที) บอทจะเลิกติดตามอันเดิมแล้วติดตามอันใหม่")
+    return {"text": "\n".join(out_lines).strip(), "keyboard": {"inline_keyboard": kb_rows} if kb_rows else None,
+            "proposals": proposals}
