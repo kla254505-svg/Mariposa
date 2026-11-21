@@ -1075,6 +1075,23 @@ def _handle_orderai(config, token, chat_id, default_symbol, args):
     if not config.get("orderai_enabled", True):
         _reply(token, chat_id, "คำสั่ง /orderai ปิดใช้งานอยู่ครับ")
         return
+    zone, zone_err = orderai.parse_zone_args(args)
+    if zone_err:
+        _reply(token, chat_id, zone_err)
+        return
+    if zone:  # /orderai 3568-3580 short — ให้ AI ตรวจโซนที่ผู้ใช้เห็นเอง
+        _reply(token, chat_id, "⏳ กำลังให้ AI ตรวจโซนของคุณ (ประมาณ 10–30 วินาที)...")
+        try:
+            _CONTEXT_CACHE.pop(default_symbol, None)
+            ctx = _build_command_context(default_symbol, config)
+            master_trend, _src = determine_master_trend(ctx.get("bias_4h"), ctx["structure"])
+            out = orderai.analyze_zone(ctx["config"], ctx, zone, _symbol_label(default_symbol), master_trend)
+            orderai.save_proposal(config, out["proposal"])
+            orderai.send_message(token, chat_id, out["text"], out["keyboard"])
+            orderai.log_proposal_row(out["proposal"], "PENDING" if out["keyboard"] else "NO_ENTRY")
+        except Exception as e:
+            _reply(token, chat_id, f"เกิดข้อผิดพลาดตอนประมวลผล /orderai โซน: {e}")
+        return
     target, err = _resolve_symbol_arg(args, default_symbol)
     if err:
         _reply(token, chat_id, err)
@@ -1382,6 +1399,10 @@ def run_polling_loop(config, symbol="XAUUSD"):
                 command = text_parts[0].lower()
                 command_args = text_parts[1:]
                 command, command_args = _normalize_order_shorthand(command, command_args)
+                if command.startswith("orderai") and len(command) > 7 and command[7].isdigit():
+                    # พิมพ์ติดกัน เช่น /orderai3625-3658short -> แยกส่วนหลังชื่อคำสั่งเป็น argument
+                    command_args = [command[7:]] + command_args
+                    command = "orderai"
                 if command == "orderai":
                     # /orderai ใช้ได้เฉพาะเจ้าของบอท (มีปุ่มบันทึกออเดอร์) คนในกลุ่มพิมพ์จะถูกเมิน
                     if is_owner:

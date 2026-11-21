@@ -384,3 +384,71 @@ def test_track_sweeps_5m_bars_after_delayed_cron(kv):
     kv.d["orderai_tracked_XAUUSD"] = json.dumps([it])
     orderai.track_orders(CFG, "XAUUSD", df15, 4000.0)
     assert json.loads(kv.d["orderai_tracked_XAUUSD"])[0]["status"] == "waiting"
+
+
+# ───────── /orderai <โซน> <ทิศ> ─────────
+@pytest.mark.parametrize("args,lo,hi,d", [
+    (["3568-3580", "short"], 3568, 3580, "bearish"),
+    (["3625.261-3658.251", "short"], 3625.261, 3658.251, "bearish"),
+    (["3625–3658", "long"], 3625, 3658, "bullish"),          # en dash
+    (["3580-3568SELL"], 3568, 3580, "bearish"),              # สลับสูง/ต่ำ + ติดกัน
+    (["3500", "-", "3510", "buy"], 3500, 3510, "bullish"),
+    (["3500", "ถึง", "3510", "ซื้อ"], 3500, 3510, "bullish"),
+])
+def test_parse_zone_args_ok(args, lo, hi, d):
+    z, err = orderai.parse_zone_args(args)
+    assert err is None and z == {"lo": lo, "hi": hi, "direction": d}
+
+
+def test_parse_zone_args_modes_and_errors():
+    assert orderai.parse_zone_args([]) == (None, None)
+    assert orderai.parse_zone_args(["gold"]) == (None, None)             # โหมดเดิม (เลือกคู่เงิน)
+    z, err = orderai.parse_zone_args(["3568-3580"])
+    assert z is None and "ต้องใส่ทิศ" in err
+    assert orderai.parse_zone_args(["3568", "short"])[0] is None          # โซนไม่ครบ
+    assert orderai.parse_zone_args(["3568-3568.2", "short"])[1]           # แคบเกิน
+
+
+ZONE = {"lo": 4010.0, "hi": 4020.0, "direction": "bearish"}
+
+
+def test_sanitize_zone_rules():
+    ok = orderai.sanitize_zone({"verdict": "ENTER", "confidence": 60, "entry": 4015, "sl": 4030, "tp": 3970}, ZONE, 4000, CFG)
+    assert ok["valid"] and ok["entry_side"] == "above"
+    out_zone = orderai.sanitize_zone({"verdict": "ENTER", "entry": 4040, "sl": 4055, "tp": 3990}, ZONE, 4000, CFG)
+    assert not out_zone["valid"] and "นอกโซน" in out_zone["invalid_reason"]
+    sl_in = orderai.sanitize_zone({"verdict": "ENTER", "entry": 4015, "sl": 4018, "tp": 3970}, ZONE, 4000, CFG)
+    assert not sl_in["valid"] and "SL" in sl_in["invalid_reason"]
+    assert not orderai.sanitize_zone({"verdict": "ENTER", "entry": 4015}, ZONE, 4000, CFG)["valid"]
+    wait = orderai.sanitize_zone({"verdict": "WAIT", "reasons": ["x"], "wait_for": "รอแท่งกลับตัว"}, ZONE, 4000, CFG)
+    assert wait["verdict"] == "WAIT" and not wait["valid"]
+    with pytest.raises(ValueError):
+        orderai.sanitize_zone({"verdict": "??"}, ZONE, 4000, CFG)
+
+
+def test_analyze_zone_enter_then_place_tracks_as_ai_zone(monkeypatch, kv):
+    monkeypatch.setattr(orderai, "_post_ai", lambda p, c: (
+        {"verdict": "ENTER", "confidence": 65, "reasons": ["เทรนด์ลงตรงทิศ"], "entry": 4015, "sl": 4030, "tp": 3970,
+         "basis": "ขอบโซนขาลง 15M"}, None, {"input_tokens": 10, "output_tokens": 5}))
+    out = orderai.analyze_zone(CFG, _ctx(), ZONE, "GOLD", "bearish")
+    assert out["keyboard"] and "โซนที่คุณให้" in out["text"] and "Sell Limit" in out["text"] and "Risk" not in out["text"]
+    p = out["proposal"]
+    assert p["tag"] == "ai_zone" and p["pick"]["source"] == "ai_zone" and p["tokens"] == 15
+    orderai.save_proposal(CFG, p)
+    orderai.handle_callback(CFG, "x", _cq(f"oai:p:{p['id']}"), lambda s: 4005.0)
+    assert json.loads(kv.d["orderai_tracked_XAUUSD"])[0]["source"] == "ai_zone"
+    rows = [r[1] for r in kv.sent if isinstance(r, tuple) and r[0] == "sheet"]
+    assert any(r.get("Tag") == "ai_zone" and r.get("Plan_ID") == "ZONE" and r.get("Decision") == "PLACED" for r in rows)
+    assert "โซนของคุณ" in orderai._item_name(json.loads(kv.d["orderai_tracked_XAUUSD"])[0])
+
+
+def test_analyze_zone_no_wait_invalid_and_ai_error(monkeypatch, kv):
+    monkeypatch.setattr(orderai, "_post_ai", lambda p, c: ({"verdict": "NO", "reasons": ["สวนเทรนด์"]}, None, {}))
+    out = orderai.analyze_zone(CFG, _ctx(), ZONE, "GOLD")
+    assert out["keyboard"] is None and "ไม่ควรเข้า" in out["text"] and out["proposal"]["status"] == "info"
+    monkeypatch.setattr(orderai, "_post_ai", lambda p, c: ({"verdict": "ENTER", "entry": 4040, "sl": 4055, "tp": 3990}, None, {}))
+    out = orderai.analyze_zone(CFG, _ctx(), ZONE, "GOLD")
+    assert out["keyboard"] is None and "ไม่ผ่าน" in out["text"]
+    monkeypatch.setattr(orderai, "_post_ai", lambda p, c: (None, "AI ตอบ HTTP 400", {}))
+    out = orderai.analyze_zone(CFG, _ctx(), ZONE, "GOLD")
+    assert out["keyboard"] is None and "ตรวจโซนไม่ได้" in out["text"]

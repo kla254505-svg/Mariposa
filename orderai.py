@@ -70,6 +70,14 @@ def _dir_th(direction):
     return "LONG (ซื้อ)" if direction == "bullish" else "SHORT (ขาย)"
 
 
+def source_label(source, plan_num=None):
+    if source == "ai_free":
+        return "AI คิดเอง"
+    if source == "ai_zone":
+        return "โซนของคุณ"
+    return f"แผน {plan_num}"
+
+
 def order_type_name(direction, entry_side, with_hint=True):
     """ชื่อชนิดออเดอร์ตามที่โบรกใช้ (ขึ้นกับทิศ + Entry อยู่เหนือ/ใต้ราคา)
     entry_side 'below' = Entry ต่ำกว่าราคาตอนนั้น: LONG=Buy Limit, SHORT=Sell Stop
@@ -649,7 +657,7 @@ def log_proposal_row(prop, decision_label=None, **extra):
     row = {
         "Proposal_ID": prop["id"], "Created_Time": prop["created_iso"], "Symbol": prop["symbol"],
         "AI_Verdict": prop["verdict"], "AI_Confidence": prop.get("confidence"),
-        "Plan_ID": (("AI" if pick.get("source") == "ai_free" else f"P{pick['num']}") if pick else None),
+        "Plan_ID": ({"ai_free": "AI", "ai_zone": "ZONE"}.get(pick.get("source"), f"P{pick['num']}") if pick else None),
         "Direction": ("LONG" if pick.get("direction") == "bullish" else "SHORT") if pick else None,
         "Entry": pick.get("entry"), "SL": pick.get("sl"), "TP": pick.get("tp"), "RR": pick.get("rr"),
         "Plan_Score": pick.get("score"), "Price_At_Proposal": prop.get("price"),
@@ -785,7 +793,7 @@ def handle_callback(config, token, cq, price_fn):
                     "Cancel_Reason": f"ขยับเป็นออเดอร์ใหม่ {pid}", "Close_Time": now.isoformat()})
     kind = order_type_name(pick["direction"], v["entry_side"], with_hint=False)
     send_message(token, chat_id,
-                 f"📌 <b>{'ย้ายไปติดตามออเดอร์ใหม่แล้ว (เลิกติดตามอันเดิม — อย่าลืมยกเลิกอันเดิมในโบรก)' if replaced_old else 'บันทึกออเดอร์แล้ว'}</b> — {'AI คิดเอง' if pick.get('source') == 'ai_free' else 'แผน ' + str(pick['num'])} · {_dir_th(pick['direction'])}\n"
+                 f"📌 <b>{'ย้ายไปติดตามออเดอร์ใหม่แล้ว (เลิกติดตามอันเดิม — อย่าลืมยกเลิกอันเดิมในโบรก)' if replaced_old else 'บันทึกออเดอร์แล้ว'}</b> — {source_label(pick.get('source'), pick['num'])} · {_dir_th(pick['direction'])}\n"
                  f"{kind} @ {pick['entry']:.2f} | SL {pick['sl']:.2f} | TP {pick['tp']:.2f} (RR {v['rr']})\n"
                  f"บอทจะเช็คทุก ~5 นาที แจ้งเมื่อ: ออเดอร์เข้า ✅ / ปิด TP-SL 🎯❌ / ควรยกเลิก ⚠️\n"
                  f"(ติดตามนานสุด {config.get('orderai_track_expiry_hours', 6)} ชม. ถ้ายังไม่เข้าจะแจ้งหมดอายุ)")
@@ -856,7 +864,7 @@ def track_orders(config, symbol, df, current_price, bias_trend=None, trend_15m=N
         it["checked_once"] = True
         it["last_check_ts"] = now.timestamp()
         flags = it.setdefault("flags", {})
-        who = "AI คิดเอง" if it.get("source") == "ai_free" else f"แผน {it['plan_num']}"
+        who = source_label(it.get("source"), it["plan_num"])
         name = f"{who} · {_dir_th(it['direction'])} @ {entry:.2f}"
         closed = False
 
@@ -980,7 +988,7 @@ def order_facts(it, price, bias_trend, trend_15m, now_ts=None):
 
 
 def _item_name(it):
-    who = "AI คิดเอง" if it.get("source") == "ai_free" else f"แผน {it['plan_num']}"
+    who = source_label(it.get("source"), it["plan_num"])
     return f"{who} · {_dir_th(it['direction'])}"
 
 
@@ -1105,3 +1113,182 @@ def review_orders(config, ctx, items, master_trend, symbol_label):
         out_lines.append(f"👇 ถ้าขยับจริง กดวางใหม่ (ปุ่มหมดอายุใน {config.get('orderai_button_ttl_minutes', 15)} นาที) บอทจะเลิกติดตามอันเดิมแล้วติดตามอันใหม่")
     return {"text": "\n".join(out_lines).strip(), "keyboard": {"inline_keyboard": kb_rows} if kb_rows else None,
             "proposals": proposals}
+
+
+# ══════════════════════════════════════════════════════
+# 8) /orderai <โซน> <ทิศ> — ให้ AI ตรวจ "โซนที่ผู้ใช้เห็นเอง" แทนการหาโซนเอง
+# ══════════════════════════════════════════════════════
+ZONE_USAGE = ("พิมพ์แบบนี้ครับ:\n/orderai 3568-3580 short  (โซนขาย)\n/orderai 3500-3510 long  (โซนซื้อ)\n"
+              "ต้องมี ราคาต่ำ-ราคาสูง และทิศ short/long (เว้นวรรคหรือไม่เว้นก็ได้)")
+_NUM = r"(\d+(?:[.,]\d+)?)"
+_ZONE_RE = re.compile(_NUM + r"\s*(?:-|–|—|~|ถึง|to)\s*" + _NUM)
+
+
+def parse_zone_args(args):
+    """แยกโซน+ทิศจากคำสั่ง /orderai คืน (zone|None, error|None)
+    zone = {"lo","hi","direction":"bullish|bearish"}  ไม่พบตัวเลขโซนเลย -> (None, None) = ใช้โหมดปกติ
+    มีตัวเลขแต่ไม่ครบ/ไม่มีทิศ -> (None, ข้อความบอกวิธีพิมพ์)"""
+    text = " ".join(str(a) for a in args).lower().replace(",", "")
+    if not re.search(r"\d", text):
+        return None, None
+    m = _ZONE_RE.search(text)
+    if not m:
+        return None, "อ่านโซนไม่ออกครับ\n" + ZONE_USAGE
+    lo, hi = sorted((float(m.group(1)), float(m.group(2))))
+    rest = text[:m.start()] + " " + text[m.end():]
+    if re.search(r"short|sell|ขาย|เซล", rest):
+        d = "bearish"
+    elif re.search(r"long|buy|ซื้อ|บาย", rest):
+        d = "bullish"
+    else:
+        return None, "ต้องใส่ทิศด้วยครับ (short หรือ long)\n" + ZONE_USAGE
+    if hi - lo < 0.5:
+        return None, "โซนแคบเกินไป (ต้องต่างกันอย่างน้อย 0.5)\n" + ZONE_USAGE
+    return {"lo": lo, "hi": hi, "direction": d}, None
+
+
+ZONE_PROMPT = """คุณเป็นผู้ช่วยตัดสินใจเทรดทอง (XAUUSD) เจ้าของบอทเทรดมือบนโบรกและเห็น "โซน" จากกราฟของเขาเอง (30m-1H) ให้คุณตรวจโซนนั้น ไม่ต้องหาโซนใหม่
+เขาอ่านภาษาไทยง่ายๆ งานของคุณ: ตัดสินว่าตอนนี้ควรวางออเดอร์รอที่โซนนั้นไหม
+- verdict: ENTER (ควรวางออเดอร์รอที่โซนนี้ ให้ entry/sl/tp), WAIT (โซนน่าสนใจแต่ยังไม่ควรวาง บอกใน wait_for ว่ารออะไร), NO (ไม่ควรเข้าโซนนี้ เช่น สวนเทรนด์/โซนอ่อน/ใกล้ข่าวแรง)
+กติกาของ ENTER:
+1. entry ต้องอยู่ในโซนที่ให้มา (หรือใกล้ขอบไม่เกิน 2) เลือกจุดที่ดีที่สุดในโซนเอง เช่น ขอบที่ราคามาถึงก่อน กลางโซน
+2. sl ต้องอยู่นอกขอบไกลของโซน (SHORT: เหนือขอบบน LONG: ใต้ขอบล่าง) บวกส่วนเผื่อพอสมควร และอยู่หลังโครงสร้างที่ทำให้ไอเดียผิด
+3. tp อยู่ที่ระดับเป้าหมายจริงตาม KEY LEVELS ห่าง SL อย่างน้อย min_sl_distance และ RR อย่างน้อย min_rr (โค้ดจะตรวจซ้ำ ไม่ผ่านจะตีตก)
+4. ห้ามแต่งระดับที่ไม่มีเหตุผลรองรับ ห้ามเขียนชื่อชนิดออเดอร์ (Limit/Stop) โค้ดแสดงเอง
+5. ตัดสินจากหลักฐาน: เทรนด์ 4H/1H/15M เทียบทิศที่ผู้ใช้ให้ ระยะราคาห่างโซน ข่าว session ถ้าข้อมูลไหน not_available ให้บอกว่าไม่มีข้อมูล
+ถ้าทิศที่ผู้ใช้ให้สวนเทรนด์ใหญ่ชัดเจน ไม่ต้องเกรงใจ ตอบ NO หรือ WAIT พร้อมเหตุผลตรงๆ
+ตอบเป็น JSON ก้อนเดียว ไม่มี markdown:
+{"verdict":"ENTER|WAIT|NO","confidence":<0-100>,"reasons":["เหตุผลสั้นๆ 1","2","3 (ไม่บังคับ)"],
+ "entry":<ตัวเลขหรือ null>,"sl":<ตัวเลขหรือ null>,"tp":<ตัวเลขหรือ null>,"basis":"อ้างอิงระดับไหน 1 ประโยค","wait_for":"ถ้า WAIT: รออะไร ไม่งั้นสตริงว่าง"}
+reasons แต่ละข้อไม่เกิน ~110 ตัวอักษร"""
+
+
+def sanitize_zone(data, zone, price, config):
+    """ตรวจคำตอบ AI สำหรับโหมดโซน -> dict (valid=True เฉพาะ ENTER ที่ผ่านกฎโค้ดทั้งหมด)"""
+    verdict = str(data.get("verdict", "")).upper().strip()
+    if verdict not in ("ENTER", "WAIT", "NO"):
+        raise ValueError("verdict ไม่ถูกต้อง")
+    out = {"verdict": verdict, "reasons": [str(x).strip()[:160] for x in (data.get("reasons") or []) if str(x).strip()][:3],
+           "basis": str(data.get("basis") or "").strip()[:240], "wait_for": str(data.get("wait_for") or "").strip()[:200],
+           "confidence": None, "entry": None, "sl": None, "tp": None, "rr": None, "entry_side": None,
+           "valid": False, "invalid_reason": None}
+    try:
+        out["confidence"] = max(0, min(100, int(data.get("confidence"))))
+    except (TypeError, ValueError):
+        pass
+    if verdict != "ENTER":
+        return out
+    try:
+        entry, sl, tp = float(data["entry"]), float(data["sl"]), float(data["tp"])
+    except (KeyError, TypeError, ValueError):
+        out["invalid_reason"] = "AI ตอบควรเข้าแต่ตัวเลข Entry/SL/TP ไม่ครบ"
+        return out
+    out.update({"entry": round(entry, 3), "sl": round(sl, 3), "tp": round(tp, 3)})
+    lo, hi, d = zone["lo"], zone["hi"], zone["direction"]
+    if not (lo - 2 <= entry <= hi + 2):
+        out["invalid_reason"] = f"Entry {entry:.2f} อยู่นอกโซนที่คุณให้ ({lo:g}-{hi:g})"
+        return out
+    if (d == "bearish" and sl <= hi) or (d == "bullish" and sl >= lo):
+        out["invalid_reason"] = "SL อยู่ในโซน/ไม่พ้นขอบโซน โซนนี้จึงไม่ได้ป้องกันไอเดียจริง"
+        return out
+    v = validate_trade(d, entry, sl, tp, price, config)
+    out["rr"], out["entry_side"] = v["rr"], v["entry_side"]
+    out["valid"], out["invalid_reason"] = v["ok"], v["reason"]
+    return out
+
+
+def format_zone_message(symbol_label, price, zone, res, ai_error, config):
+    d_txt = _dir_th(zone["direction"])
+    lo, hi = zone["lo"], zone["hi"]
+    if lo <= price <= hi:
+        pos = "ราคาอยู่ในโซนแล้ว"
+    elif price < lo:
+        pos = f"ราคาต่ำกว่าโซน {lo - price:.1f}"
+    else:
+        pos = f"ราคาสูงกว่าโซน {price - hi:.1f}"
+    lines = [f"🎯 <b>/orderai โซนของคุณ — {_esc(symbol_label)}</b>", f"ราคา {price:.2f} · {datetime.now(THAI_TZ).strftime('%H:%M')} น.",
+             f"โซนที่คุณให้: <b>{lo:g} – {hi:g}</b> · {d_txt} · {pos}", ""]
+    if res is None:
+        lines.append("🛠 ตรวจโซนไม่ได้ตอนนี้ (AI ใช้ไม่ได้)")
+        if ai_error:
+            lines.append(_esc(ai_error)[:200])
+        lines.append("ลองพิมพ์ใหม่อีกครั้ง")
+        return "\n".join(lines)
+    lines.append(VERDICT_LABEL[res["verdict"]] + (f"  (มั่นใจ {res['confidence']}%)" if res.get("confidence") is not None else ""))
+    if res["reasons"]:
+        lines.append("")
+        lines.append("<b>สาเหตุ</b>")
+        lines += [f"• {_esc(r)}" for r in res["reasons"]]
+    lines.append("")
+    if res["verdict"] == "ENTER" and res["valid"]:
+        kind = order_type_name(zone["direction"], res["entry_side"])
+        lines += [f"📍 <b>จุดเข้า — {d_txt}</b>",
+                  f"Entry ({kind}): <b>{res['entry']:.2f}</b>  (ห่างราคาปัจจุบัน {abs(res['entry'] - price):.1f})",
+                  f"SL: <b>{res['sl']:.2f}</b>  (ห่าง {abs(res['entry'] - res['sl']):.1f})",
+                  f"TP: <b>{res['tp']:.2f}</b>  (RR {res['rr']})"]
+        if res.get("basis"):
+            lines.append(f"💡 {_esc(res['basis'])}")
+        lines.append(f"\n👇 ถ้าวางออเดอร์นี้เอง กดปุ่มด้านล่าง (หมดอายุใน {config.get('orderai_button_ttl_minutes', 15)} นาที)")
+    elif res["verdict"] == "ENTER":
+        lines.append("📍 AI เสนอให้เข้า แต่โค้ดตรวจแล้วไม่ผ่าน จึงไม่แนะนำให้วาง")
+        if res.get("entry") is not None:
+            lines.append(f"Entry {res['entry']:.2f} | SL {res['sl']:.2f} | TP {res['tp']:.2f}")
+        lines.append(f"❌ เหตุผลที่ไม่ผ่าน: {_esc(res['invalid_reason'])}")
+    else:
+        lines.append("📍 <b>จุดเข้า: ไม่มี</b>")
+        if res.get("wait_for"):
+            lines.append(f"⏳ รอ: {_esc(res['wait_for'])}")
+    if ai_error:
+        lines.append(f"\n🛠 AI: {_esc(ai_error)[:160]}")
+    return "\n".join(lines)
+
+
+def analyze_zone(config, ctx, zone, symbol_label, master_trend=None):
+    """ตรวจโซนของผู้ใช้ คืน dict: text, keyboard|None, proposal"""
+    df = ctx["df_ind"]
+    price = float(df["close"].iloc[-1])
+    bias = (ctx.get("bias_4h") or {}).get("trend")
+    t15 = (ctx.get("structure") or {}).get("trend")
+    lines = [f"Symbol: {ctx['symbol']}", f"เวลา (ไทย): {datetime.now(THAI_TZ).strftime('%Y-%m-%d %H:%M')}",
+             f"ราคาปัจจุบัน: {price:.2f}",
+             f"เกณฑ์ที่โค้ดใช้ตรวจ: min_sl_distance={config.get('min_sl_distance')} min_rr={config.get('min_rr', 1.2)}",
+             f"โซนที่ผู้ใช้ให้: {zone['lo']:g}-{zone['hi']:g} ทิศ {'SHORT (ขาย)' if zone['direction'] == 'bearish' else 'LONG (ซื้อ)'} "
+             f"(ทิศ 'bullish'=ขึ้น 'bearish'=ลง)",
+             f"เทรนด์ตอนนี้: 4H={_fmt(bias)} 1H={_fmt(ctx.get('higher_tf_trend'))} 15M={_fmt(t15)} เทรนด์หลักที่บอทสรุป={_fmt(master_trend)}",
+             f"ตัวชี้วัด 15M: RSI={_fmt(round(float(df['rsi'].iloc[-1]), 1) if 'rsi' in df.columns else None)} "
+             f"ADX={_fmt(round(float(df['adx'].iloc[-1]), 1) if 'adx' in df.columns else None)}",
+             f"Session: {json.dumps(ctx.get('session_info'), default=str, ensure_ascii=False)}"]
+    blackout = ctx.get("news_blackout", (False, None))
+    lines.append(f"ช่วงห้ามเทรดรอบข่าว (±60 นาที): {'ใช่ — ' + str((blackout[1] or {}).get('title')) if blackout[0] else 'ไม่'}")
+    news = _upcoming_news(config, ctx["symbol"])
+    lines.append("ข่าวใกล้ๆ: " + ("; ".join(news) if news else "ไม่มีในช่วง 3 ชม. ข้างหน้า"))
+    lines += ["", "== KEY LEVELS =="] + (build_key_levels(ctx, price) or ["not_available"])
+    payload = {"model": config.get("ai_model", "claude-sonnet-5-5"), "max_tokens": config.get("orderai_max_tokens", 3000),
+               "system": ZONE_PROMPT, "messages": [{"role": "user", "content": "\n".join(lines)}]}
+    parsed, ai_error, usage = _post_ai(payload, config)
+    res = None
+    if parsed is not None:
+        try:
+            res = sanitize_zone(parsed, zone, price, config)
+        except Exception as e:
+            ai_error = f"คำตอบ AI ไม่ตรงรูปแบบ: {e}"
+    pid = uuid.uuid4().hex[:8]
+    pick = None
+    if res and res["verdict"] == "ENTER" and res["valid"]:
+        pick = {"num": "ZONE", "label": "โซนของคุณ", "plan_key": "ai_zone", "source": "ai_zone",
+                "direction": zone["direction"], "entry": res["entry"], "sl": res["sl"], "tp": res["tp"], "rr": res["rr"],
+                "entry_side": res["entry_side"], "score": None, "note": res.get("basis")}
+    reasons = list((res or {}).get("reasons") or [])
+    if res and res.get("invalid_reason"):
+        reasons.append("ไม่ผ่านการตรวจ: " + res["invalid_reason"])
+    zone_txt = f"โซนผู้ใช้ {zone['lo']:g}-{zone['hi']:g}"
+    prop = {
+        "id": pid, "symbol": ctx["symbol"], "created_ts": time.time(), "created_iso": _now().isoformat(),
+        "status": "open" if pick else "info", "price": price, "verdict": (res or {}).get("verdict", "ERROR"),
+        "confidence": (res or {}).get("confidence"), "reasons": [zone_txt] + reasons, "pick": pick,
+        "ai_model": config.get("ai_model"), "ai_error": ai_error,
+        "tokens": (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0),
+        "bias_4h": bias, "trend_15m": t15, "tag": "ai_zone", "source": "ai_zone", "zone": zone,
+    }
+    return {"text": format_zone_message(symbol_label, price, zone, res, ai_error, config),
+            "keyboard": build_keyboard(pid) if pick else None, "proposal": prop}
