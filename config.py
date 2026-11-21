@@ -182,6 +182,8 @@ CONFIG = {
     "orderai_max_tokens": 3000,
     "orderai_timeout_seconds": 60,
     "orderai_missed_progress": 0.5,       # ราคาวิ่งไปทาง TP เกินกี่ส่วนของระยะ Entry->TP โดยยังไม่เข้า = ตกรถ
+    "orderai_be_enabled": True,      # แจ้งเตือนย้าย SL มา BE ให้ออเดอร์ที่วิ่งอยู่ (มีปุ่ม ✅ ย้ายแล้ว / ❌ ไม่ย้าย)
+    "orderai_be_progress": 0.5,      # จุดแจ้งเตือน = ราคาไปถึงกี่ส่วนของระยะ Entry -> TP (0.5 = 50%)
 
     # --- Plan Coordination / Conflict Detection (ใหม่) — ดู plan_coordination.py ---
     # 8 แผนทำงานอิสระจากกัน ไม่รู้จักกันเอง อาจยิงสัญญาณสวนทางกันพร้อมกันได้ (เช่น Plan 5 มี Zone LONG

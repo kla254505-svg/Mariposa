@@ -673,6 +673,42 @@ def log_proposal_row(prop, decision_label=None, **extra):
 # ══════════════════════════════════════════════════════
 # 5) ปุ่ม ✅ / ❌ (ทำงานบน Render ผ่าน polling loop)
 # ══════════════════════════════════════════════════════
+def _handle_be(config, token, cq, item_id, action, answer, strip_buttons, chat_id):
+    bucket = config["kvdb_bucket"]
+    symbol = kv_get(bucket, f"orderai_beref_{item_id}") or "XAUUSD"
+    key = _tracked_key(symbol)
+    try:
+        items = json.loads(kv_get(bucket, key) or "[]")
+    except Exception:
+        items = []
+    it = next((x for x in items if x["id"] == item_id), None)
+    if it is None or it.get("status") != "running":
+        answer("ออเดอร์นี้ปิดไปแล้ว/ไม่อยู่ในรายการติดตาม", alert=True)
+        strip_buttons()
+        return
+    if action == "k":
+        strip_buttons()
+        answer("รับทราบ ไม่ย้าย — ยังใช้ SL เดิม")
+        return
+    if it.get("be_moved"):
+        strip_buttons()
+        answer("ย้ายไปแล้ว")
+        return
+    it["be_moved"] = True
+    it["sl_orig"] = it["sl"]
+    it["sl"] = it["entry"]
+    it["last_check_ts"] = time.time()   # นับแท่งราคาหลังจากกดเท่านั้น กัน BE หลอกจากแท่งก่อนหน้า
+    if not kv_set(bucket, key, json.dumps(items)):
+        answer("บันทึกไม่สำเร็จ (ฐานข้อมูลมีปัญหา) ลองกดใหม่อีกครั้ง", alert=True)
+        return
+    strip_buttons()
+    answer("🔒 บันทึกแล้ว — SL ที่ติดตามอยู่ย้ายมาที่ Entry")
+    _sheet_log({"Proposal_ID": item_id, "Order_Status": "RUNNING_BE"})
+    send_message(config["telegram_token"], chat_id,
+                 f"🔒 <b>บันทึกย้าย SL มา BE แล้ว</b>\n{_esc(_item_name(it))}\nSL {it['sl_orig']:.2f} → {it['sl']:.2f} (Entry)\n"
+                 f"ถ้าราคากลับมาแตะ Entry บอทจะบันทึกเป็น BE (0R) ไม่ใช่แพ้")
+
+
 def handle_callback(config, token, cq, price_fn):
     """price_fn(symbol) -> ราคาล่าสุด (float) — ส่งเข้ามาจาก telegram_bot เพื่อไม่ import วนกัน"""
     cqid = cq.get("id")
@@ -697,6 +733,9 @@ def handle_callback(config, token, cq, price_fn):
     if len(parts) != 3 or parts[0] != "oai":
         return
     action, pid = parts[1], parts[2]
+    if action in ("b", "k"):  # ย้าย SL มา BE / ไม่ย้าย (ปุ่มจากข้อความแจ้งเตือนตอนออเดอร์ถึงจุด 50%)
+        _handle_be(config, token, cq, pid, action, answer, strip_buttons, chat_id)
+        return
     prop = load_proposal(config, pid)
     if not prop:
         answer("ไม่พบรายการนี้แล้ว (หมดอายุ) พิมพ์ /orderai ใหม่ได้เลย", alert=True)
@@ -808,6 +847,12 @@ def _alert(config, text):
     chat = config.get("telegram_owner_id") or config.get("telegram_chat_id")
     if chat:
         send_telegram_alert(config["telegram_token"], chat, text)
+
+
+def _alert_kb(config, text, keyboard):
+    chat = config.get("telegram_owner_id") or config.get("telegram_chat_id")
+    if chat:
+        send_message(config["telegram_token"], chat, text, keyboard)
 
 
 def _hhmm(ts):
@@ -928,17 +973,38 @@ def track_orders(config, symbol, df, current_price, bias_trend=None, trend_15m=N
             if sl_hit or tp_hit:
                 # ถ้าแท่งเดียวแตะทั้งคู่ ถือว่าโดน SL ก่อน (เข้มงวดไว้ก่อน)
                 win = tp_hit and not sl_hit
-                r = it["rr"] if win else -1.0
+                be_exit = (not win) and bool(it.get("be_moved"))
+                r = it["rr"] if win else (0.0 if be_exit else -1.0)
                 dur_min = int((now.timestamp() - it.get("filled_ts", it["placed_ts"])) / 60)
                 note = "\n(แท่งเดียวแตะทั้ง TP และ SL — นับเป็น SL ไว้ก่อน เช็คผลจริงในโบรก)" if (sl_hit and tp_hit) else ""
                 if win:
                     _alert(config, f"🎯 <b>ถึง TP แล้ว +{r}R</b>\n{name}\nTP {tp:.2f} · ถือ {dur_min} นาที")
+                elif be_exit:
+                    _alert(config, f"🔒 <b>ออกที่ BE (0R)</b>\n{name}\nราคากลับมาแตะ Entry {sl:.2f} หลังย้าย SL · ถือ {dur_min} นาที{note}")
                 else:
-                    _alert(config, f"❌ <b>โดน SL -1R</b>\n{name}\nSL {sl:.2f} · ถือ {dur_min} นาที{note}")
+                    hint = ("\nℹ️ ราคาเคยไปถึงจุดย้าย BE แล้ว ถ้าคุณย้าย SL ไว้ในโบรกแต่ไม่ได้กดปุ่ม ผลจริงคือ BE ไม่ใช่ -1R"
+                            if it.get("be_prompted") else "")
+                    _alert(config, f"❌ <b>โดน SL -1R</b>\n{name}\nSL {sl:.2f} · ถือ {dur_min} นาที{note}{hint}")
                 sent += 1
-                _sheet_log({"Proposal_ID": it["id"], "Order_Status": "CLOSED", "Result": "WIN" if win else "LOSS",
+                _sheet_log({"Proposal_ID": it["id"], "Order_Status": "CLOSED",
+                            "Result": "WIN" if win else ("BE" if be_exit else "LOSS"),
                             "R_Multiple": r, "Close_Time": now.isoformat()})
                 closed = True
+            elif config.get("orderai_be_enabled", True) and not it.get("be_prompted") and not it.get("be_moved"):
+                half = config.get("orderai_be_progress", 0.5)
+                reach = (entry + half * (tp - entry))
+                reached = (hi >= reach) if bullish else (lo <= reach)
+                if reached:
+                    it["be_prompted"] = True
+                    changed = True
+                    kv_set(bucket, f"orderai_beref_{it['id']}", symbol)
+                    _alert_kb(config,
+                              f"🔒 <b>ถึง {half * 100:.0f}% ของระยะไป TP แล้ว</b>\n{name}\n"
+                              f"ราคาตอนนี้ {price:.2f} · ย้าย SL มา BE ได้ (SL → {entry:.2f})\n"
+                              f"ย้ายในโบรกแล้วกดปุ่มด้านล่าง ถ้าไม่ย้ายไม่ต้องกดอะไร",
+                              {"inline_keyboard": [[{"text": "✅ ย้าย SL มา BE แล้ว", "callback_data": f"oai:b:{it['id']}"},
+                                                    {"text": "❌ ไม่ย้าย", "callback_data": f"oai:k:{it['id']}"}]]})
+                    sent += 1
 
         if closed:
             changed = True
@@ -1074,7 +1140,8 @@ def review_orders(config, ctx, items, master_trend, symbol_label):
         rec = recs.get(it["id"]) or rules_review(it, f)
         run = it["status"] == "running"
         head = f"<b>#{n} {_esc(_item_name(it))}</b> · {order_type_name(it['direction'], it['entry_side'], False)} @ {it['entry']:.2f}"
-        state = ("🏃 เข้าแล้ว กำลังวิ่ง" + (f" ({f['open_r']:+.2f}R)" if "open_r" in f else "")) if run else \
+        state = ("🏃 เข้าแล้ว กำลังวิ่ง" + (f" ({f['open_r']:+.2f}R)" if "open_r" in f else "")
+                 + (" · 🔒 SL ย้ายมา BE แล้ว" if it.get("be_moved") else "")) if run else \
                 f"⏳ รอเข้า · วางมา {f['waited_min']} นาที (หมดอายุอีก {max(f['expires_in_min'], 0)} นาที)"
         out_lines += [head, state,
                       f"SL {it['sl']:.2f} | TP {it['tp']:.2f} (RR {it['rr']}) · ราคาห่าง Entry {f['dist_to_entry']:+.1f}"

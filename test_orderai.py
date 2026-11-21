@@ -452,3 +452,75 @@ def test_analyze_zone_no_wait_invalid_and_ai_error(monkeypatch, kv):
     monkeypatch.setattr(orderai, "_post_ai", lambda p, c: (None, "AI ตอบ HTTP 400", {}))
     out = orderai.analyze_zone(CFG, _ctx(), ZONE, "GOLD")
     assert out["keyboard"] is None and "ตรวจโซนไม่ได้" in out["text"]
+
+
+# ───────── ย้าย SL มา BE ที่ 50% ─────────
+def _running(kv, **over):
+    it = {"id": "r1", "symbol": "XAUUSD", "plan": "ai_free", "plan_num": "AI", "source": "ai_free", "direction": "bullish",
+          "entry": 4000.0, "sl": 3985.0, "tp": 4045.0, "rr": 3.0, "entry_side": "below", "status": "running",
+          "placed_ts": time.time() - 3600, "filled_ts": time.time() - 1800, "expires_ts": time.time() + 9999,
+          "flags": {}, "checked_once": True}
+    it.update(over)
+    kv.d["orderai_tracked_XAUUSD"] = json.dumps([it])
+    return it
+
+
+def _bars(hi, lo):
+    return pd.DataFrame({"high": [hi], "low": [lo]})
+
+
+def test_be_prompt_once_at_half_way(kv):
+    _running(kv)
+    n = orderai.track_orders(CFG, "XAUUSD", _bars(4023, 4010), 4015.0)   # 50% = 4022.5 -> ถึงแล้ว
+    kbs = [m for m in kv.sent if isinstance(m, tuple) and m[0] == "msg"]
+    assert n == 1 and len(kbs) == 1 and "50%" in kbs[0][1]
+    assert kv.d["orderai_beref_r1"] == "XAUUSD"
+    orderai.track_orders(CFG, "XAUUSD", _bars(4030, 4012), 4020.0)        # รอบถัดไปไม่ถามซ้ำ
+    assert len([m for m in kv.sent if isinstance(m, tuple) and m[0] == "msg"]) == 1
+
+
+def test_be_not_prompted_before_half_way(kv):
+    _running(kv)
+    assert orderai.track_orders(CFG, "XAUUSD", _bars(4015, 4005), 4010.0) == 0
+
+
+def test_be_confirm_then_retrace_is_be_not_loss(kv):
+    _running(kv)
+    orderai.track_orders(CFG, "XAUUSD", _bars(4023, 4010), 4015.0)
+    orderai.handle_callback(CFG, "x", _cq("oai:b:r1"), lambda s: 4015.0)
+    it = json.loads(kv.d["orderai_tracked_XAUUSD"])[0]
+    assert it["be_moved"] and it["sl"] == 4000.0 and it["sl_orig"] == 3985.0
+    orderai.handle_callback(CFG, "x", _cq("oai:b:r1"), lambda s: 4015.0)     # กดซ้ำไม่พัง
+    orderai.track_orders(CFG, "XAUUSD", _bars(4012, 3999.5), 4001.0)         # ย้อนแตะ Entry
+    rows = [r[1] for r in kv.sent if isinstance(r, tuple) and r[0] == "sheet"]
+    assert any(r.get("Result") == "BE" and r.get("R_Multiple") == 0.0 for r in rows)
+    assert any(isinstance(m, str) and "ออกที่ BE" in m for m in kv.sent)
+    assert json.loads(kv.d["orderai_tracked_XAUUSD"]) == []
+
+
+def test_be_keep_or_ignored_means_normal_sl_with_hint(kv):
+    _running(kv)
+    orderai.track_orders(CFG, "XAUUSD", _bars(4023, 4010), 4015.0)
+    orderai.handle_callback(CFG, "x", _cq("oai:k:r1"), lambda s: 4015.0)
+    assert json.loads(kv.d["orderai_tracked_XAUUSD"])[0]["sl"] == 3985.0
+    orderai.track_orders(CFG, "XAUUSD", _bars(4005, 3984), 3984.5)
+    rows = [r[1] for r in kv.sent if isinstance(r, tuple) and r[0] == "sheet"]
+    assert any(r.get("Result") == "LOSS" and r.get("R_Multiple") == -1.0 for r in rows)
+    assert any(isinstance(m, str) and "ไม่ได้กดปุ่ม" in m for m in kv.sent)
+
+
+def test_be_after_move_tp_still_wins_and_closed_item_button(kv):
+    _running(kv, be_prompted=True, be_moved=True, sl=4000.0, sl_orig=3985.0)
+    orderai.track_orders(CFG, "XAUUSD", _bars(4046, 4030), 4045.5)
+    rows = [r[1] for r in kv.sent if isinstance(r, tuple) and r[0] == "sheet"]
+    assert any(r.get("Result") == "WIN" and r.get("R_Multiple") == 3.0 for r in rows)
+    orderai.handle_callback(CFG, "x", _cq("oai:b:r1"), lambda s: 4000.0)     # ออเดอร์ปิดแล้ว กดปุ่มเก่า -> ไม่เปลี่ยนอะไร
+    assert json.loads(kv.d["orderai_tracked_XAUUSD"]) == []
+
+
+def test_be_short_direction_and_other_user_rejected(kv):
+    _running(kv, direction="bearish", entry=4000.0, sl=4015.0, tp=3955.0, entry_side="above")
+    orderai.track_orders(CFG, "XAUUSD", _bars(3990, 3976), 3980.0)           # 50% = 3977.5
+    assert any(isinstance(m, tuple) and m[0] == "msg" and "50%" in m[1] for m in kv.sent)
+    orderai.handle_callback(CFG, "x", _cq("oai:b:r1", uid=99), lambda s: 3980.0)   # ไม่ใช่เจ้าของ
+    assert not json.loads(kv.d["orderai_tracked_XAUUSD"])[0].get("be_moved")
